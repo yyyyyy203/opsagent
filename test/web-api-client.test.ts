@@ -75,4 +75,55 @@ describe('browser API client', () => {
     }
     expect(invokedWithGlobal).toBe(true);
   });
+
+  it('uses the governed memory endpoints and sends only the documented command fields', async () => {
+    const requests: Request[] = [];
+    const client = new ApiClient({
+      baseUrl: 'http://127.0.0.1:4100',
+      fetchImpl: (input, init) => {
+        requests.push(new Request(input, init));
+        return Promise.resolve(new Response(JSON.stringify({ enabled: true }), { status: 200 }));
+      },
+      eventSourceFactory: () => ({ close: () => undefined }),
+    });
+
+    await client.memoryCapabilities('simulation');
+    await client.listMemoryCases('simulation', { status: 'observation', afterId: 'case/1', limit: 20 });
+    await client.getRunMemory('run/1');
+    await client.getRunMemoryCapture('run/1');
+    await client.captureRunMemory('run/1', { requestId: 'capture-1', expectedCheckpointRevision: 4 });
+    await client.reviewMemory('case/1', {
+      profileId: 'simulation', requestId: 'review-1', expectedRevision: 2,
+      decision: 'approved', claimCheck: 'supported',
+    });
+
+    expect(requests.map(({ url, method }) => [url, method])).toEqual([
+      ['http://127.0.0.1:4100/memory/capabilities?profileId=simulation', 'GET'],
+      ['http://127.0.0.1:4100/memory/cases?profileId=simulation&limit=20&status=observation&afterId=case%2F1', 'GET'],
+      ['http://127.0.0.1:4100/runs/run%2F1/memory', 'GET'],
+      ['http://127.0.0.1:4100/runs/run%2F1/memory/capture', 'GET'],
+      ['http://127.0.0.1:4100/runs/run%2F1/memory/capture', 'POST'],
+      ['http://127.0.0.1:4100/memory/cases/case%2F1/review', 'POST'],
+    ]);
+    expect(await requests[4]?.clone().json()).toEqual({ requestId: 'capture-1', expectedCheckpointRevision: 4 });
+    expect(await requests[5]?.clone().json()).toEqual({ profileId: 'simulation', requestId: 'review-1',
+      expectedRevision: 2, decision: 'approved', claimCheck: 'supported' });
+  });
+
+  it('surfaces memory revision conflicts without retrying a capture or review command', async () => {
+    let calls = 0;
+    const client = new ApiClient({
+      baseUrl: 'http://127.0.0.1:4100',
+      fetchImpl: () => {
+        calls += 1;
+        return Promise.resolve(new Response(JSON.stringify({ error: 'MEMORY_REVISION_CONFLICT', message: 'stale' }), { status: 409 }));
+      },
+      eventSourceFactory: () => ({ close: () => undefined }),
+    });
+
+    await expect(client.reviewMemory('case-1', { profileId: 'simulation', requestId: 'review-1',
+      expectedRevision: 1, decision: 'approved', claimCheck: 'supported' }))
+      .rejects.toEqual(expect.objectContaining({ code: 'MEMORY_REVISION_CONFLICT', status: 409 }));
+    expect(calls).toBe(1);
+  });
 });

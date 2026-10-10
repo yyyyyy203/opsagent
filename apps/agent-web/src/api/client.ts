@@ -8,6 +8,12 @@ import type {
   PublicProfile,
   PublicRunDetail,
   PublicRunPage,
+  DiagnosticMemoryCase,
+  MemoryCaptureTicket,
+  MemoryCapabilities,
+  MemoryPreferences,
+  MemoryStatus,
+  RunMemoryState,
 } from './types.js';
 
 export interface EventSourceLike {
@@ -93,8 +99,36 @@ export class ApiClient {
     return this.request<PublicConfirmation | null>(`${this.runPath(runId)}/confirmation`);
   }
 
-  public async startRun(input: { runId: string; message: string; profileId: string }): Promise<{ runId: string; status: string; eventsUrl: string }> {
+  public async startRun(input: { runId: string; message: string; profileId: string; memoryPreferences?: MemoryPreferences }): Promise<{ runId: string; status: string; eventsUrl: string }> {
     return this.request('/runs', { method: 'POST', body: input });
+  }
+
+  public async memoryCapabilities(profileId: string): Promise<MemoryCapabilities> {
+    const query = new URLSearchParams({ profileId });
+    return this.request<MemoryCapabilities>(`/memory/capabilities?${query.toString()}`);
+  }
+
+  public async listMemoryCases(profileId: string, input: { status?: MemoryStatus; afterId?: string; limit: number }): Promise<readonly DiagnosticMemoryCase[]> {
+    const query = new URLSearchParams({ profileId, limit: String(input.limit) });
+    if (input.status !== undefined) query.set('status', input.status);
+    if (input.afterId !== undefined) query.set('afterId', input.afterId);
+    return this.request<readonly DiagnosticMemoryCase[]>(`/memory/cases?${query.toString()}`);
+  }
+
+  public async getRunMemory(runId: string): Promise<RunMemoryState | null> {
+    return this.request<RunMemoryState | null>(`${this.runPath(runId)}/memory`);
+  }
+
+  public async getRunMemoryCapture(runId: string): Promise<MemoryCaptureTicket> {
+    return this.request<MemoryCaptureTicket>(`${this.runPath(runId)}/memory/capture`);
+  }
+
+  public async captureRunMemory(runId: string, command: { requestId: string; expectedCheckpointRevision: number }): Promise<MemoryCaptureTicket> {
+    return this.request<MemoryCaptureTicket>(`${this.runPath(runId)}/memory/capture`, { method: 'POST', body: command });
+  }
+
+  public async reviewMemory(id: string, command: { profileId: string; requestId: string; expectedRevision: number; decision: 'approved' | 'rejected'; claimCheck: 'supported' | 'unsupported' }): Promise<DiagnosticMemoryCase> {
+    return this.request<DiagnosticMemoryCase>(`/memory/cases/${encodeURIComponent(id)}/review`, { method: 'POST', body: command });
   }
 
   public async resumeRun(runId: string): Promise<{ runId: string; status: string; eventsUrl: string }> {

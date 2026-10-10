@@ -51,7 +51,7 @@ export function resolveMemoryControl(config: DiagnosticMemoryConfig, profileId: 
   catch { throw new MemoryError('MEMORY_DATA_INVALID'); }
   const item = config.enabled ? config.profiles.find(p => p.scope.profileId === profileId) : undefined;
   if (item === undefined) {
-    if (selected.capture === 'automatic' || selected.capture === 'manual' || selected.recall === 'enabled') {
+    if (selected.capture === 'automatic' || selected.recall === 'enabled') {
       throw new MemoryError('MEMORY_POLICY_DENIED');
     }
     return undefined;

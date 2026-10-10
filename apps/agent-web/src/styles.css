@@ -64,6 +64,29 @@ textarea { resize: vertical; line-height: 1.5; }
 .reasoning-block, .tool-block, .evidence-ref, .summary-block, .confirm-inline, .diagnosis-block, .action-block, .error-block, .unknown-block, .missing-box { border-radius: 9px; padding: 10px 11px; font-size: .78rem; line-height: 1.5; }
 .reasoning-block { background: #202033; color: #c7bae9; }
 .tool-block { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; background: #172438; color: #c1d7f2; }
+.memory-panel { display: grid; gap: 12px; }
+.memory-preferences { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 11px; border: 1px solid #29364a; border-radius: 9px; }
+.memory-preferences legend { padding: 0 5px; color: #aebbd0; font-size: .76rem; }
+.memory-toggle { display: flex; align-items: center; gap: 8px; color: #d8e1ee; font-size: .78rem; }
+.memory-toggle input { accent-color: #74b8a0; }
+.memory-disabled-note, .memory-notice, .memory-archive-note, .memory-simulation-note { margin: 0; padding: 8px 10px; border-radius: 8px; background: #282435; color: #dfc9a2; font-size: .75rem; line-height: 1.5; }
+.memory-notice { background: #30262a; color: #f0b9bd; }
+.memory-capture, .memory-case-list { display: grid; gap: 9px; }
+.memory-subheading, .memory-case-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #e5edf8; font-size: .78rem; }
+.memory-subheading span, .memory-case-heading span, .memory-case-meta { color: #9eabc0; font-size: .7rem; }
+.memory-capture-status { margin: 0; color: #9ad9c2; font-size: .78rem; }
+.memory-hints, .memory-case { display: grid; gap: 7px; padding: 10px; border: 1px solid #29364a; border-radius: 9px; background: #121c29; }
+.memory-hints { border-color: #315a51; color: #a8e0cb; font-size: .76rem; }
+.memory-hints p, .memory-case-summary { margin: 0; color: #d5dfeb; font-size: .76rem; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-case-meta { margin: 0; overflow-wrap: anywhere; }
+.memory-case-meta code { color: #c2d4ec; }
+.memory-archive-note { background: #33292a; color: #e5b5b5; }
+.memory-simulation-note { background: #282a36; color: #c7c0e5; }
+.memory-evidence-link, .text-button { width: fit-content; padding: 0; border: 0; background: transparent; color: #8fc6ec; text-align: left; font-size: .7rem; cursor: pointer; }
+.memory-evidence-link:disabled { color: #778396; cursor: default; }
+.memory-case-actions { display: flex; align-items: center; gap: 8px; }
+.memory-case-filter { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #aebbd0; font-size: .75rem; }
+.memory-case-filter select { width: auto; min-width: 110px; padding: 6px 8px; }
 .tool-block p { width: 100%; color: #f4a9af; }
 .evidence-ref, .summary-block { background: #112b2c; color: #a4e4d3; }
 .evidence-ref p, .summary-block p, .diagnosis-block p, .action-block p, .error-block p, .confirm-inline p { color: #d9e3ef; margin-top: 4px; }

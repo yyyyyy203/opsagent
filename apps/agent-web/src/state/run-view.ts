@@ -11,6 +11,7 @@ import type {
   PublicRunDetail,
   PublicRunPage,
   RunUsageSummary,
+  MemoryPreferences,
 } from '../api/types.js';
 
 export interface RunViewClient {
@@ -20,7 +21,7 @@ export interface RunViewClient {
   getMessages(runId: string, options?: { cursor?: string; limit?: number }): Promise<PublicMessagePage>;
   listEvidence(runId: string, options?: { cursor?: string; limit?: number }): Promise<PublicEvidencePage>;
   getConfirmation(runId: string): Promise<PublicConfirmation | null>;
-  startRun(input: { runId: string; message: string; profileId: string }): Promise<{ runId: string; status: string; eventsUrl: string }>;
+  startRun(input: { runId: string; message: string; profileId: string; memoryPreferences?: MemoryPreferences }): Promise<{ runId: string; status: string; eventsUrl: string }>;
   resumeRun(runId: string): Promise<{ runId: string; status: string; eventsUrl: string }>;
   cancelRun(runId: string): Promise<{ runId: string; status: string }>;
   decideConfirmation(runId: string, input: ConfirmationDecisionInput): Promise<ConfirmationDecisionResult>;
@@ -139,11 +140,11 @@ export class RunViewController {
     });
   }
 
-  public async startRun(message: string, profileId: string): Promise<void> {
+  public async startRun(message: string, profileId: string, memoryPreferences?: MemoryPreferences): Promise<void> {
     const runId = globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}`;
     this.patch({ pendingCommand: 'start', notice: null });
     try {
-      await this.client.startRun({ runId, message, profileId });
+      await this.client.startRun({ runId, message, profileId, ...(memoryPreferences === undefined ? {} : { memoryPreferences }) });
       await this.openRun(runId);
     } catch (error) {
       this.patch({ notice: errorMessage(error), status: 'error' });

@@ -1,23 +1,27 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { ReactElement } from 'react';
 import { ApiClient } from './api/client.js';
+import type { MemoryPreferences } from './api/types.js';
 import { RunViewController } from './state/run-view.js';
 import { ConfirmationCard } from './components/ConfirmationCard.js';
 import { EvidencePanel } from './components/EvidencePanel.js';
 import { MessageList } from './components/MessageList.js';
+import { MemoryPanel } from './components/MemoryPanel.js';
 import { RunList } from './components/RunList.js';
 import { RunStatus } from './components/RunStatus.js';
 import { SubagentPanel } from './components/SubagentPanel.js';
 import { TaskComposer } from './components/TaskComposer.js';
 
 export default function App(): ReactElement {
-  const controller = useMemo(() => new RunViewController(new ApiClient({
+  const apiClient = useMemo(() => new ApiClient({
     baseUrl: typeof import.meta.env.VITE_AGENT_API_URL === 'string' && import.meta.env.VITE_AGENT_API_URL.length > 0
       ? import.meta.env.VITE_AGENT_API_URL
       : 'http://127.0.0.1:4100',
-  })), []);
+  }), []);
+  const controller = useMemo(() => new RunViewController(apiClient), [apiClient]);
   const state = useSyncExternalStore(controller.subscribe.bind(controller), controller.getState.bind(controller), controller.getState.bind(controller));
   const [selectedProfile, setSelectedProfile] = useState('');
+  const [memoryPreferences, setMemoryPreferences] = useState<MemoryPreferences>({ capture: 'manual', recall: 'disabled' });
 
   useEffect(() => {
     void controller.loadIndex();
@@ -34,8 +38,13 @@ export default function App(): ReactElement {
 
   async function startRun(message: string): Promise<void> {
     if (selectedProfile === '') return;
-    await controller.startRun(message, selectedProfile);
+    await controller.startRun(message, selectedProfile, memoryPreferences);
     await controller.loadIndex();
+  }
+
+  async function openEvidence(ownerRunId: string): Promise<void> {
+    await selectRun(ownerRunId);
+    window.requestAnimationFrame(() => document.querySelector('.evidence-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
   }
 
   const selectedProfileDescription = state.profiles.find((profile) => profile.id === selectedProfile)?.description;
@@ -76,6 +85,9 @@ export default function App(): ReactElement {
         </section>
 
         <aside className="side-column">
+          {selectedProfile !== '' && <MemoryPanel profileId={selectedProfile} {...(state.runId === null ? {} : { runId: state.runId })}
+            preferences={memoryPreferences} onPreferencesChange={setMemoryPreferences}
+            onOpenEvidence={(ownerRunId) => void openEvidence(ownerRunId)} client={apiClient} />}
           <RunStatus detail={state.detail} descendantUsage={state.descendantUsage} subtreeUsage={state.subtreeUsage} connected={state.connected} pending={state.pendingCommand === 'resume'} cancelPending={state.pendingCommand === 'cancel'} resumeAvailable={state.resumeRequired} toolActivity={state.toolActivity} onResume={() => void controller.resumeRun()} onCancel={() => void controller.cancelRun()} />
           <ConfirmationCard confirmation={state.confirmation} pending={state.pendingCommand === 'confirmation'} onDecision={(confirmed, reason) => {
             if (state.confirmation === null) return;

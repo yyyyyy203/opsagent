@@ -23,6 +23,8 @@ describe('host memory policy', () => {
       scope: simulationMemoryScope(), capture: 'manual', recall: false, profilePolicyRevision: 'policy-v1' });
     expect(resolveMemoryControl(config, 'missing')).toBeUndefined();
     expect(resolveMemoryControl({ enabled: false }, 'simulation')).toBeUndefined();
+    expect(resolveMemoryControl({ enabled: false }, 'simulation', { capture: 'manual', recall: 'disabled' })).toBeUndefined();
+    expect(resolveMemoryControl(config, 'missing', { capture: 'profile', recall: 'profile' })).toBeUndefined();
     expect(resolveMemoryControl(config, 'simulation', { capture: 'skip', recall: 'enabled' }))
       .toMatchObject({ capture: 'skip', recall: true });
   });

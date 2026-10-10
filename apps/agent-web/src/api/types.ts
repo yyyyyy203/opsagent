@@ -1,6 +1,15 @@
 export type RunStatus = 'running' | 'awaiting_confirmation' | 'paused' | 'completed' | 'failed' | 'cancelled';
 export type DiagnosisStage = 'triage' | 'evidence_collection' | 'hypothesis' | 'risk_gate' | 'action' | 'verification' | 'postmortem';
 
+export type {
+  DiagnosticMemoryCase,
+  MemoryCaptureTicket,
+  MemoryCapabilities,
+  MemoryPreferences,
+  MemoryStatus,
+  RunMemoryState,
+} from '../../../../src/contracts/diagnostic-memory.js';
+
 export interface PublicRunSummary {
   runId: string;
   profileId: string;
