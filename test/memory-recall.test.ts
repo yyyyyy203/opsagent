@@ -273,23 +273,35 @@ describe('bounded recall snapshots', () => {
     expect(result).toMatchObject({ selectionState: 'selected', availability: 'empty', hints: [] });
   });
   it('shares one deadline across sequential dependencies when no clock is injected', async () => {
+    vi.useFakeTimers();
     const h = setup([candidate('first'), candidate('second')]);
-    const realSearch = h.store.search.bind(h.store);
-    vi.spyOn(h.store, 'search').mockImplementation(async input => {
-      await new Promise(resolve => setTimeout(resolve, 40));
-      return realSearch(input);
-    });
-    const validate = vi.fn(async () => {
-      await new Promise(resolve => setTimeout(resolve, 40));
-      return true;
-    });
-    const { clock: _clock, ...withoutClock } = operation;
-    void _clock;
-    const result = await new BoundedMemoryRecall({ queries: h.store, evidence: { validate } }).prepare(
-      { runId: 'current', text: 'timeout', state: state() },
-      { ...withoutClock, deadlineMs: Date.parse(memoryNow) + 100 });
-    expect(validate).toHaveBeenCalledTimes(2);
-    expect(result).toMatchObject({ selectionState: 'selected', availability: 'empty', hints: [] });
+    try {
+      const realSearch = h.store.search.bind(h.store);
+      vi.spyOn(h.store, 'search').mockImplementation(async input => {
+        await new Promise(resolve => setTimeout(resolve, 40));
+        return realSearch(input);
+      });
+      const validate = vi.fn(async () => {
+        await new Promise(resolve => setTimeout(resolve, 40));
+        return true;
+      });
+      const { clock: _clock, ...withoutClock } = operation;
+      void _clock;
+      const pending = new BoundedMemoryRecall({ queries: h.store, evidence: { validate } }).prepare(
+        { runId: 'current', text: 'timeout', state: state() },
+        { ...withoutClock, deadlineMs: Date.parse(memoryNow) + 100 });
+
+      await vi.advanceTimersByTimeAsync(40);
+      await vi.advanceTimersByTimeAsync(40);
+      await vi.advanceTimersByTimeAsync(20);
+
+      const result = await pending;
+      expect(validate).toHaveBeenCalledTimes(2);
+      expect(result).toMatchObject({ selectionState: 'selected', availability: 'empty', hints: [] });
+    } finally {
+      vi.useRealTimers();
+      h.close();
+    }
   });
   it('does not launch a query when cancelled before its async invocation', async () => {
     const h = setup();

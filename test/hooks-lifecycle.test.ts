@@ -17,6 +17,7 @@ import { InMemoryCheckpointStore } from '../src/storage/in-memory-checkpoint-sto
 import { ToolExecutionPipeline } from '../src/tool/execution-pipeline.js';
 import { DefaultToolRunner } from '../src/tool/tool-runner.js';
 import { Toolkit } from '../src/tool/toolkit.js';
+import { simulationMemoryScope } from './fixtures/diagnostic-memory.js';
 
 const timestamp = '2026-09-09T12:00:00.000Z';
 
@@ -187,6 +188,7 @@ describe('control hooks and lifecycle observers', () => {
 
   it('wires lifecycle observers through the runtime composition root', async () => {
     const facts: ToolLifecycleFact[] = [];
+    const memoryScope = simulationMemoryScope();
     const runtime = createAgentRuntime({
       model: new ScriptedModel([
         { toolCalls: [{ id: 'call-1', name: 'inspect', input: {} }] },
@@ -196,6 +198,14 @@ describe('control hooks and lifecycle observers', () => {
       includeExternalBash: false,
       tools: [tool()],
       lifecycleObservers: [{ id: 'test-capture', observe: (fact) => { facts.push(fact); return Promise.resolve([]); } }],
+      memoryHarness: {
+        recall: { prepare: ({ state }) => Promise.resolve(state) },
+        renderer: { render: () => null },
+        policy: { allows: () => true },
+        requiredSources: ['metric'],
+        modelWindowTokens: 8_192,
+        reservedOutputTokens: 1_024,
+      },
     });
     const durable = runtime.durableState;
     if (durable === undefined) throw new Error('Expected the default runtime to expose durable state.');
@@ -208,7 +218,9 @@ describe('control hooks and lifecycle observers', () => {
       return originalCommit(input);
     };
     try {
-      const result = await runtime.agent.reply({ message: 'inspect', profileId: 'test' });
+      const result = await runtime.agent.reply({ message: 'inspect', profileId: 'simulation',
+        trustedMemoryControl: { schemaVersion: 1, scope: memoryScope,
+          profilePolicyRevision: 'memory-policy-v1', capture: 'manual', recall: false } });
       expect(result.status).toBe('completed');
       expect(facts).toHaveLength(1);
       expect(facts[0]?.result.status).toBe('success');
