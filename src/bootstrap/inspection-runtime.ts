@@ -5,15 +5,23 @@ import {
   type RuntimeToolPorts,
 } from '../application/create-runtime.js';
 import type { Tool } from '../contracts/index.js';
+import type { DiagnosticMemoryConfig } from '../contracts/diagnostic-memory.js';
+import { createDiagnosticMemoryRuntime } from './diagnostic-memory.js';
+import { parseDiagnosticMemoryConfig } from './memory-policy.js';
 
 export interface InspectionRuntimeOptions extends Omit<AgentRuntimeOptions, 'includeExternalBash' | 'actionMode'> {
   allowedToolNames: readonly string[];
   includeExternalBash?: false;
   actionMode?: 'dry_run';
+  diagnosticMemory?: DiagnosticMemoryConfig;
 }
 
 /** A local allowlist is an operator decision; remote tool annotations cannot grant access. */
 export function createInspectionRuntime(options: InspectionRuntimeOptions) {
+  const memoryConfig = parseDiagnosticMemoryConfig(options.diagnosticMemory ?? { enabled: false });
+  if (memoryConfig.enabled && (options.memoryFactory !== undefined || options.memoryHarness !== undefined)) {
+    throw new Error('diagnosticMemory cannot be combined with another memory seam.');
+  }
   const allowed = new Set(options.allowedToolNames);
   const validateTool = (tool: Tool): Tool => {
     if (!allowed.has(tool.name) || tool.kind === 'action' || tool.call === undefined || /(^|[._-])bash($|[._-])/i.test(tool.name)) {
@@ -33,6 +41,7 @@ export function createInspectionRuntime(options: InspectionRuntimeOptions) {
     ...(toolFactories === undefined ? {} : { toolFactories }),
     includeExternalBash: false,
     actionMode: 'dry_run',
+    ...(memoryConfig.enabled ? { memoryFactory: ports => createDiagnosticMemoryRuntime({ config: memoryConfig, ports })! } : {}),
   });
   runtime.toolkit.freeze();
   return runtime;

@@ -8,6 +8,9 @@ import { encodeSseFrame } from './sse-encoder.js';
 import { EventStreamCursorError, type EventStreamService } from './event-stream-service.js';
 import type { RunExecutionCoordinator } from '../application/run-execution-coordinator.js';
 import type { WebConfirmationDecisionInput, WebConfirmationService } from '../application/web-confirmation-service.js';
+import { handleMemoryRoute, type MemoryRoutePorts } from './memory-routes.js';
+import { parseMemoryPreferences } from '../contracts/diagnostic-memory-schema.js';
+import { systemClock } from '../contracts/common.js';
 
 export interface InspectionHttpServerOptions {
   agent: DiagnosisAgent;
@@ -23,6 +26,9 @@ export interface InspectionHttpServerOptions {
   allowedOrigins?: readonly string[];
   allowedHosts?: readonly string[];
   allowedProfileIds?: readonly string[];
+  memory?: MemoryRoutePorts;
+  /** Synchronous host validation before the transport accepts a Run. */
+  prepareRun?: (options: ReplyOptions) => ReplyOptions;
   heartbeatTimer?: {
     set(callback: () => void, ms: number): unknown;
     clear(handle: unknown): void;
@@ -81,6 +87,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (method === 'OPTIONS') { response.writeHead(204); response.end(); return; }
   if (method === 'GET' && parsed.pathname === '/health') { writeJson(response, 200, { status: 'ok' }); return; }
+  if (await handleMemoryRoute(request, response, parsed, options.memory ?? {
+    clock: systemClock, schedule: async () => {},
+  }, () => readJson(request, maxBodyBytes))) return;
   if (method === 'GET' && parsed.pathname === '/profiles') {
     if (options.webQueries === undefined) throw unavailable();
     writeJson(response, 200, options.webQueries.listProfiles());
@@ -112,7 +121,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       throw Object.assign(new Error('profileId is not enabled.'), { code: 'PROFILE_NOT_ALLOWED', statusCode: 400 });
     }
     const runId = run.runId ?? randomUUID();
-    const requestOptions = { ...run, runId };
+    const requestOptions = options.prepareRun?.({ ...run, runId }) ?? { ...run, runId };
     if (options.execution === undefined) void consume(options.agent.replyStream(requestOptions));
     else void options.execution.start(requestOptions).catch(() => undefined);
     writeJson(response, 202, { runId, status: 'started', eventsUrl: `/runs/${encodeURIComponent(runId)}/events` });
@@ -372,6 +381,10 @@ async function readJson(request: IncomingMessage, maxBytes: number): Promise<Rec
 }
 
 function toReplyOptions(body: Record<string, unknown>): ReplyOptions {
+  if (['trustedMemoryControl', 'memoryControl', 'memory', 'actorId', 'scope', 'eligibleForPromotion', 'raw', 'report']
+    .some(key => Object.hasOwn(body, key))) {
+    throw Object.assign(new Error('Trusted memory fields are not accepted.'), { code: 'MEMORY_DATA_INVALID', statusCode: 400 });
+  }
   if (typeof body.message !== 'string' || body.message.length === 0) throw Object.assign(new Error('message is required.'), { statusCode: 400 });
   if (typeof body.profileId !== 'string' || body.profileId.length === 0) throw Object.assign(new Error('profileId is required.'), { statusCode: 400 });
   const result: ReplyOptions = { message: body.message, profileId: body.profileId };
@@ -379,6 +392,10 @@ function toReplyOptions(body: Record<string, unknown>): ReplyOptions {
   if (typeof body.maxIterations === 'number') result.maxIterations = body.maxIterations;
   if (typeof body.maxToolCalls === 'number') result.maxToolCalls = body.maxToolCalls;
   if (typeof body.maxDurationMs === 'number') result.maxDurationMs = body.maxDurationMs;
+  if (body.memoryPreferences !== undefined) {
+    try { result.memoryPreferences = parseMemoryPreferences(body.memoryPreferences); }
+    catch { throw Object.assign(new Error('Memory preferences are invalid.'), { code: 'MEMORY_DATA_INVALID', statusCode: 400 }); }
+  }
   return result;
 }
 

@@ -27,7 +27,8 @@ export class RunExecutionCoordinator {
   public constructor(
     private readonly agent: DiagnosisAgent,
     private readonly checkpoints: Pick<CheckpointStore, 'load'>,
-    private readonly options: { prepareStart?: (options: ReplyOptions) => ReplyOptions } = {},
+    private readonly options: { prepareStart?: (options: ReplyOptions) => ReplyOptions;
+      afterTerminal?: (runId: string) => Promise<void> } = {},
   ) {}
 
   public start(options: ReplyOptions): Promise<void> {
@@ -49,6 +50,7 @@ export class RunExecutionCoordinator {
       }
       const preparedOptions = this.prepareStart(options);
       await this.drain(this.agent.replyStream({ ...preparedOptions, signal }));
+      await this.afterTerminal(runId);
     }, options.signal);
   }
 
@@ -66,6 +68,7 @@ export class RunExecutionCoordinator {
         throw new RunExecutionError('RUN_CONFLICT', 'Resolve the pending confirmation before resuming.', 409);
       }
       await this.drain(this.agent.resumeStream(runId, runSignal));
+      await this.afterTerminal(runId);
     }, signal);
   }
 
@@ -137,6 +140,12 @@ export class RunExecutionCoordinator {
 
   private async drain(stream: AsyncGenerator<unknown, unknown>): Promise<void> {
     for await (const event of stream) void event;
+  }
+
+  private async afterTerminal(runId: string): Promise<void> {
+    if (this.options.afterTerminal === undefined) return;
+    const checkpoint = await this.checkpoints.load(runId);
+    if (checkpoint !== null && isTerminal(checkpoint.status)) await this.options.afterTerminal(runId);
   }
 }
 

@@ -16,6 +16,8 @@ import { RunExecutionCoordinator } from '../application/run-execution-coordinato
 import { WebConfirmationService } from '../application/web-confirmation-service.js';
 import { startInspectionHttpServer, type InspectionHttpServer } from '../api/http-server.js';
 import { SourceInvocationLimiter } from '../tool/source-invocation-limiter.js';
+import type { DiagnosticMemoryConfig } from '../contracts/diagnostic-memory.js';
+import { parseDiagnosticMemoryConfig, resolveMemoryControl } from './memory-policy.js';
 
 const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
   id: 'group-buy-market',
@@ -68,6 +70,7 @@ export interface AgentWebRuntimeOptions {
   modelIdentity?: ModelIdentity;
   /** Opt-in per-parent-Run limit for the source smoke acceptance only. */
   sourceInvocationLimit?: 1;
+  diagnosticMemory?: DiagnosticMemoryConfig;
 }
 
 export interface AgentWebRuntime {
@@ -118,6 +121,10 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
   const allowedToolNames = metrics === undefined
     ? directTools.map((tool) => tool.name)
     : ['metrics_subagent', ...(logs === undefined ? [] : ['logs_subagent'])];
+  const memoryConfig = parseDiagnosticMemoryConfig(options.diagnosticMemory ?? { enabled: false });
+  if (memoryConfig.enabled && memoryConfig.profiles.some(p => !profiles.some(web => web.enabled && web.id === p.scope.profileId))) {
+    throw new Error('Diagnostic memory Profiles must be in the enabled host allowlist.');
+  }
   const runtime = createInspectionRuntime({
     model,
     workspaceRoots: [...options.workspaceRoots],
@@ -152,6 +159,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     sqlitePath: join(options.dataDirectory, 'agent.sqlite'),
     clock,
     ids,
+    diagnosticMemory: memoryConfig,
     ...(options.observability === undefined ? {} : { observability: options.observability }),
     ...(options.eventObservability === undefined ? {} : { eventObservability: options.eventObservability }),
     ...(options.modelIdentity === undefined ? {} : {
@@ -167,10 +175,17 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     }
     const cursorCodec = new OpaqueMessageCursorCodec(() => clock.now().getTime());
     const webQueries = new WebQueryService(runtime.durableState.checkpoints, profiles, () => clock.now());
+    const simulationPreparation = metrics === undefined ? undefined : createSimulationStartPreparation(clock, logs !== undefined, sourceWindow);
+    const prepareStart = (request: ReplyOptions): ReplyOptions => {
+      const prepared = simulationPreparation?.(request) ?? request;
+      const trustedMemoryControl = resolveMemoryControl(memoryConfig, request.profileId, request.memoryPreferences);
+      return { ...prepared, ...(trustedMemoryControl === undefined ? {} : { trustedMemoryControl }) };
+    };
+    const scheduleMemory = async (): Promise<void> => { await runtime.memory?.worker.drain({ limit: 50 }); };
     const execution = new RunExecutionCoordinator(
       runtime.agent,
       runtime.checkpoints,
-      metrics === undefined ? {} : { prepareStart: createSimulationStartPreparation(clock, logs !== undefined, sourceWindow) },
+      { prepareStart, ...(runtime.memory === undefined ? {} : { afterTerminal: scheduleMemory }) },
     );
     const confirmation = new WebConfirmationService(runtime.hitl, runtime.durableState.checkpoints, clock);
     const server = await startInspectionHttpServer({
@@ -187,6 +202,15 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       allowedOrigins: options.allowedOrigins ?? defaultOrigins(host),
       allowedHosts: [host],
       allowedProfileIds: profiles.filter((profile) => profile.enabled).map((profile) => profile.id),
+      prepareRun: request => {
+        try { return prepareStart(request); }
+        catch (error) {
+          if (error instanceof Error && 'code' in error) throw Object.assign(error, { statusCode: 400 });
+          throw error;
+        }
+      },
+      memory: { ...(runtime.memory === undefined ? {} : { runtime: runtime.memory }),
+        checkpoints: runtime.durableState.checkpoints, runQueries: runtime.queries, clock, schedule: scheduleMemory },
     });
     let closed = false;
     return {
@@ -197,8 +221,8 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
         if (closed) return;
         closed = true;
         try {
-          await execution.close();
           await server.close();
+          await execution.close();
         } finally {
           try {
             await runtime.close();

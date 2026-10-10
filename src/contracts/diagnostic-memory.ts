@@ -1,4 +1,6 @@
-import type { Clock } from './common.js';
+import type { Clock, IdGenerator } from './common.js';
+import type { EvidenceManifestStore, VersionedCheckpointStore } from './storage.js';
+import type { InspectionQueryService } from './read-model.js';
 import type { AgentContext } from './context.js';
 import type { AgentMessage } from './message.js';
 import type { PendingAgentEventV2 } from './event-store.js';
@@ -277,4 +279,18 @@ export interface DiagnosticMemoryRuntime {
   reviews: MemoryReviewPort;
   queries: MemoryReadServicePort;
   close(): Promise<void>;
+}
+
+/** Late-bound host ports. No database handles or raw evidence readers cross this seam. */
+export interface RuntimeMemoryAssemblyPorts {
+  queries: MemoryQueryStore;
+  writes: MemoryWriteUnitOfWork;
+  captureSource: MemoryCaptureSource;
+  evidenceQueries: InspectionQueryService;
+  evidenceManifests: Pick<EvidenceManifestStore, 'getVisible'>;
+  checkpoints: VersionedCheckpointStore;
+  clock: Clock;
+  ids: IdGenerator;
+  events: MemoryEventFactory;
+  dispatch: () => Promise<void>;
 }

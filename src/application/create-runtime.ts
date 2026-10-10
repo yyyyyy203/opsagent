@@ -1,5 +1,6 @@
 import { AgentHarness } from '../agent/agent-harness.js';
 import type { AgentMemoryHarness } from '../agent/types.js';
+import type { DiagnosticMemoryRuntime, RuntimeMemoryAssemblyPorts } from '../contracts/diagnostic-memory.js';
 import type {
   ChatModel,
   CheckpointStore,
@@ -115,6 +116,8 @@ export interface AgentRuntimeOptions {
   model: ChatModel;
   /** Host/test-injected memory ports. Production assembly is owned by bootstrap. */
   memoryHarness?: AgentMemoryHarness;
+  /** Production host assembly, called only after the complete durable ports exist. */
+  memoryFactory?: (ports: RuntimeMemoryAssemblyPorts) => DiagnosticMemoryRuntime;
   /** Optional independent model used only for structured L2 history summaries. */
   compactModel?: ChatModel;
   workspaceRoots: string[];
@@ -169,6 +172,12 @@ export interface AgentRuntimeOptions {
 }
 
 export function createAgentRuntime(options: AgentRuntimeOptions) {
+  if (options.memoryFactory !== undefined && options.memoryHarness !== undefined) {
+    throw new Error('memoryFactory cannot be combined with memoryHarness.');
+  }
+  if (options.memoryFactory !== undefined && options.sqlitePath === undefined) {
+    throw new Error('memoryFactory requires a complete durable persistence bundle.');
+  }
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? randomIdGenerator;
   const shutdownCallbacks: Array<() => void | Promise<void>> = [];
@@ -286,7 +295,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   }
   const publicProjectorV2 = new PublicEventProjectorV2();
   // Startup recovery is local-only by default. External LangSmith backfill stays explicit.
-  const ready = options.sharedEvents === undefined
+  const initializeEvents = (): Promise<number> => options.sharedEvents === undefined
     ? Promise.resolve().then(async () => {
       await durableOutboxDispatcher?.drainAll();
       // The V1 bridge is live-delivery only and has no durable projection
@@ -301,13 +310,45 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ?? (evidenceQuery === undefined
       ? undefined
       : new InMemoryInspectionQueryService(eventStoreV2, checkpoints, evidenceQuery, evidenceManifests));
+  let memory: DiagnosticMemoryRuntime | undefined;
+  const cleanupInitialization = (): void => {
+    void runShutdownHooks().finally(() => memory?.close()).finally(() => persistence?.close()).catch(() => undefined);
+  };
+  try {
+    if (options.memoryFactory !== undefined) {
+      if (persistence === undefined || queries === undefined || durableOutboxDispatcher === undefined) {
+        throw new Error('memoryFactory requires owned durable persistence and event dispatch.');
+      }
+      memory = options.memoryFactory({
+        queries: persistence.memory.queries,
+        writes: persistence.memory.writes,
+        captureSource: persistence.memory.captureSource,
+        evidenceQueries: queries,
+        evidenceManifests: { getVisible: id => persistence.evidenceManifests.getVisible(id) },
+        checkpoints: persistence.checkpoints,
+        clock, ids,
+        events: { create: (type, runId, payload) => eventFactoryV2.create(type, {
+          runId, correlationId: `run:${runId}`, visibility: 'audit', durability: 'durable',
+        }, payload) },
+        dispatch: async () => { await durableOutboxDispatcher.drainAll(); },
+      });
+      if (!Number.isSafeInteger(memory.modelWindowTokens) || memory.modelWindowTokens <= 0
+        || !Number.isSafeInteger(memory.reservedOutputTokens) || memory.reservedOutputTokens <= 0
+        || memory.reservedOutputTokens >= memory.modelWindowTokens) {
+        throw new Error('memoryFactory token-window configuration is invalid.');
+      }
+    }
+  } catch (error) {
+    cleanupInitialization();
+    throw error;
+  }
   const toolResultCompactor = options.l0?.toolResultCompactor ?? new DefaultToolResultCompactor();
   const l0DataPlaneRequested = options.evidenceBlobRootPath !== undefined
     || options.l0?.blobStore !== undefined
     || options.l0?.manifests !== undefined;
   if (l0DataPlaneRequested && options.l0?.streamingEvidenceRecorder === undefined
     && (evidenceBlobs === undefined || evidenceManifests === undefined)) {
-    persistence?.close();
+    cleanupInitialization();
     throw new Error('L0 Blob storage requires both blobStore and manifests ports.');
   }
   const streamingEvidenceRecorder = options.l0?.streamingEvidenceRecorder
@@ -347,7 +388,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       ids,
     })]);
   } catch (error) {
-    persistence?.close();
+    cleanupInitialization();
     throw error;
   }
   const model = options.modelRetry === undefined
@@ -481,10 +522,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ...(options.enableGovernance === true && options.profileResolver !== undefined
       ? { profileResolver: options.profileResolver }
       : {}),
-    ...(options.memoryHarness === undefined ? {} : { memory: options.memoryHarness }),
+    ...((memory ?? options.memoryHarness) === undefined ? {} : { memory: memory ?? options.memoryHarness! }),
     ...(durableState === undefined ? {} : { durableState }),
     hookRegistry,
     v2Events: v2EventDependencies,
+  });
+  // No recovery/worker task can race failed synchronous host assembly and database release.
+  const ready = initializeEvents().then(async count => {
+    await memory?.worker.drain({ limit: 50 });
+    return count;
   });
   return {
     agent,
@@ -496,6 +542,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     evidenceBlobs,
     evidenceManifests,
     queries,
+    memory,
     streamingEvidenceRecorder,
     toolResultCompactor,
     evidenceRecorder,
@@ -551,9 +598,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
           await runShutdownHooks();
         } finally {
           try {
-            await flushEventObservability();
+            await memory?.close();
           } finally {
-            persistence?.close();
+            try {
+              await flushEventObservability();
+            } finally {
+              persistence?.close();
+            }
           }
         }
       }
