@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMessage, ChatModel, ModelResponse, ModelStreamEvent } from '../src/contracts/index.js';
 import { startAgentWebRuntime } from '../src/bootstrap/agent-web-runtime.js';
 import { stableSourceChildRunId } from '../src/bootstrap/source-subagent-identity.js';
@@ -9,12 +9,64 @@ import { ScriptedModel } from '../src/model/scripted-model.js';
 import { RecordingObservability } from './fixtures/recording-observability.js';
 
 const roots: string[] = [];
+const fetchablePortAttempts = 16;
+
+type FetchableRuntime = Pick<Awaited<ReturnType<typeof startAgentWebRuntime>>, 'url' | 'close'>;
+
+async function startFetchableRuntime<T extends FetchableRuntime>(
+  create: () => Promise<T>,
+  probe: (url: string) => Promise<void> = async (url) => {
+    const response = await fetch(`${url}/health`);
+    if (!response.ok) throw new Error(`Local runtime health check returned ${response.status}.`);
+  },
+): Promise<T> {
+  for (let attempt = 0; attempt < fetchablePortAttempts; attempt += 1) {
+    const runtime = await create();
+    try {
+      await probe(runtime.url);
+      return runtime;
+    } catch (error) {
+      await runtime.close();
+      if (!isFetchBadPort(error)) throw error;
+    }
+  }
+  throw new Error('Could not allocate a Fetch-compatible local HTTP port.');
+}
+
+function isFetchBadPort(error: unknown): boolean {
+  return error instanceof TypeError && error.cause instanceof Error && error.cause.message === 'bad port';
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe('local Agent web runtime', () => {
+  it('retries a Fetch-rejected ephemeral port and closes the rejected runtime', async () => {
+    const closed: string[] = [];
+    const rejectedPort = {
+      url: 'http://127.0.0.1:6000',
+      close: () => { closed.push('6000'); return Promise.resolve(); },
+    };
+    const safePort = {
+      url: 'http://127.0.0.1:6002',
+      close: () => { closed.push('6002'); return Promise.resolve(); },
+    };
+    const runtimes = [rejectedPort, safePort];
+    const probe = vi.fn<(url: string) => Promise<void>>()
+      .mockRejectedValueOnce(new TypeError('fetch failed', { cause: new Error('bad port') }))
+      .mockResolvedValueOnce(undefined);
+
+    const runtime = await startFetchableRuntime(
+      () => Promise.resolve(runtimes.shift() ?? safePort),
+      probe,
+    );
+
+    expect(runtime).toBe(safePort);
+    expect(probe.mock.calls.map(([url]) => url)).toEqual([rejectedPort.url, safePort.url]);
+    expect(closed).toEqual(['6000']);
+  });
+
   it('waits for durable readiness, rejects unknown Profiles, and reopens the explicit data directory', async () => {
     const root = await mkdtemp(join(tmpdir(), 'opsangent-web-'));
     roots.push(root);
@@ -25,7 +77,7 @@ describe('local Agent web runtime', () => {
       port: 0,
       allowedOrigins: ['http://127.0.0.1:5173'],
     } as const;
-    const first = await startAgentWebRuntime(options);
+    const first = await startFetchableRuntime(() => startAgentWebRuntime(options));
     try {
       const profiles = await fetch(`${first.url}/profiles`, { headers: { Origin: 'http://127.0.0.1:5173' } });
       expect(profiles.status).toBe(200);
@@ -56,7 +108,7 @@ describe('local Agent web runtime', () => {
       await first.close();
     }
 
-    const second = await startAgentWebRuntime({ ...options, model: new ScriptedModel([]) });
+    const second = await startFetchableRuntime(() => startAgentWebRuntime({ ...options, model: new ScriptedModel([]) }));
     try {
       const detail = await fetch(`${second.url}/runs/web-run`);
       expect(detail.status).toBe(200);
@@ -88,7 +140,7 @@ describe('local Agent web runtime', () => {
       { text: '子 Agent 不查询来源。', toolCalls: [] },
       { text: '巡检结束。', toolCalls: [] },
     ]);
-    const runtime = await startAgentWebRuntime({
+    const runtime = await startFetchableRuntime(() => startAgentWebRuntime({
       dataDirectory: root,
       workspaceRoots: [root],
       model,
@@ -100,7 +152,7 @@ describe('local Agent web runtime', () => {
         modelIdentity: { provider: 'incorrect-override', model: 'incorrect-override' },
       },
       port: 0,
-    });
+    }));
     try {
       const started = await fetch(`${runtime.url}/runs`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -143,7 +195,7 @@ describe('local Agent web runtime', () => {
         return { text: '完成', toolCalls: [] };
       },
     };
-    const runtime = await startAgentWebRuntime({
+    const runtime = await startFetchableRuntime(() => startAgentWebRuntime({
       dataDirectory: root,
       workspaceRoots: [root],
       model,
@@ -152,7 +204,7 @@ describe('local Agent web runtime', () => {
       sourceInvocationLimit: 1,
       port: 0,
       allowedOrigins: ['http://127.0.0.1:5173'],
-    });
+    }));
     try {
       const profiles = await fetch(`${runtime.url}/profiles`, { headers: { Origin: 'http://127.0.0.1:5173' } });
       expect(profiles.status).toBe(200);
@@ -200,7 +252,7 @@ describe('local Agent web runtime', () => {
         return { text: '完成', toolCalls: [] };
       },
     };
-    const runtime = await startAgentWebRuntime({
+    const runtime = await startFetchableRuntime(() => startAgentWebRuntime({
       dataDirectory: root,
       workspaceRoots: [root],
       model,
@@ -212,7 +264,7 @@ describe('local Agent web runtime', () => {
       },
       port: 0,
       allowedOrigins: ['http://127.0.0.1:5173'],
-    });
+    }));
     try {
       const started = await fetch(`${runtime.url}/runs`, {
         method: 'POST', headers: { 'content-type': 'application/json', Origin: 'http://127.0.0.1:5173' },
@@ -251,7 +303,7 @@ describe('local Agent web runtime', () => {
         return { text: '完成', toolCalls: [] };
       },
     };
-    const runtime = await startAgentWebRuntime({
+    const runtime = await startFetchableRuntime(() => startAgentWebRuntime({
       dataDirectory: root,
       workspaceRoots: [root],
       model,
@@ -260,7 +312,7 @@ describe('local Agent web runtime', () => {
       logs: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:19211/mcp', cursorSecret: '0123456789abcdef0123456789abcdef' },
       sourceWindow,
       port: 0,
-    });
+    }));
     try {
       const response = await fetch(`${runtime.url}/runs`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
