@@ -189,6 +189,10 @@ test('memory controls recover after disabled capabilities become available', asy
   const sourceCase = page.getByRole('article').filter({ hasText: sourceRunId });
   await sourceCase.getByRole('button', { name: '批准历史参考' }).click();
   await expect(sourceCase.getByText('已批准', { exact: true })).toBeVisible();
+  const casesResponse = await page.request.get(`${agentUrl}/memory/cases?profileId=simulation&limit=50`);
+  const cases = await casesResponse.json() as Array<{ id: string; sourceRunId: string }>;
+  const sourceCaseData = cases.find((item) => item.sourceRunId === sourceRunId);
+  if (sourceCaseData === undefined) throw new Error('Approved source case was not persisted.');
 
   await restartMemoryRuntime(page, false);
   await page.reload();
@@ -207,6 +211,7 @@ test('memory controls recover after disabled capabilities become available', asy
   const recoveredRunId = await startRun(page, '记忆服务恢复后核对结算失败率升高、连接池等待增加。');
   await expect.poll(async () => runMemory(page, recoveredRunId)).toMatchObject({
     selectionState: 'selected', availability: 'ready',
+    hints: [{ memoryId: sourceCaseData.id, sourceRunId }],
   });
   await expect(page.getByText('历史参考已载入')).toBeVisible();
   await page.getByRole('button', { name: '沉淀本次巡检' }).click();
@@ -259,9 +264,16 @@ test('disabled memory keeps existing inspection usable and explains the one-time
 
 async function startRun(page: Page, message: string): Promise<string> {
   await page.getByLabel('巡检问题').fill(message);
+  const requestPromise = page.waitForRequest(isRunStartRequest);
   await page.getByRole('button', { name: '开始巡检' }).click();
+  const request = await requestPromise;
+  const body = request.postDataJSON() as { runId?: unknown };
+  if (typeof body.runId !== 'string') throw new Error('Run start request omitted its runId.');
+  const runId = body.runId;
+  await expect(page.locator('.run-card.selected code')).toHaveText(runId);
   await expect(page.getByText('已完成')).toBeVisible();
-  return selectedRunId(page);
+  await expect(page.locator('.status-hero strong')).toHaveText('已完成');
+  return runId;
 }
 
 async function selectedRunId(page: Page): Promise<string> {
