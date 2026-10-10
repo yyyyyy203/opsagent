@@ -120,9 +120,21 @@ test('自动沉淀保存一次且刷新只读', async ({ page }) => {
   const runId = await startRun(page, '自动沉淀与手动保存去重。');
   await expect(page.getByText('已保存候选')).toBeVisible();
   await expect(page.getByRole('button', { name: '沉淀本次巡检' })).toBeDisabled();
-  expect(await runCapture(page, runId)).toMatchObject({ state: 'saved' });
+  const savedTicket = await runCapture(page, runId) as {
+    state: string; memoryId?: string; sourceCheckpointRevision?: number;
+  };
+  expect(savedTicket).toMatchObject({ state: 'saved' });
+  expect(savedTicket.memoryId).toBeTruthy();
+  expect(savedTicket.sourceCheckpointRevision).toBeGreaterThan(0);
+
+  const manualCapture = await page.request.post(`${agentUrl}/runs/${encodeURIComponent(runId)}/memory/capture`, {
+    data: { requestId: `manual-after-auto-${runId}`, expectedCheckpointRevision: savedTicket.sourceCheckpointRevision },
+  });
+  expect(manualCapture.ok()).toBe(true);
+  expect(await manualCapture.json()).toMatchObject({ state: 'saved', memoryId: savedTicket.memoryId });
   const before = await page.request.get(`${agentUrl}/memory/cases?profileId=simulation&limit=50`);
-  const listBefore = await before.json() as unknown[];
+  const listBefore = await before.json() as Array<{ id: string }>;
+  expect(listBefore.filter((item) => item.id === savedTicket.memoryId)).toHaveLength(1);
   await page.reload();
   await page.locator('.run-card').filter({ hasText: runId }).click();
   await expect(page.getByText('已保存候选')).toBeVisible();
@@ -130,6 +142,87 @@ test('自动沉淀保存一次且刷新只读', async ({ page }) => {
   expect(await runCapture(page, runId)).toMatchObject({ state: 'saved' });
   const after = await page.request.get(`${agentUrl}/memory/cases?profileId=simulation&limit=50`);
   expect(await after.json()).toHaveLength(listBefore.length);
+});
+
+test('review conflict refreshes the candidate and never resubmits automatically', async ({ page }) => {
+  await page.goto('/');
+  const runId = await startRun(page, '审核并发变化时只提交一次。');
+  await page.getByRole('button', { name: '沉淀本次巡检' }).click();
+  const candidate = page.getByRole('article').filter({ hasText: runId });
+  await expect(candidate.getByText('待审核', { exact: true })).toBeVisible();
+  let reviewCommands = 0;
+  await page.route('**/memory/cases/*/review', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    reviewCommands += 1;
+    if (reviewCommands === 1) {
+      await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({
+        error: 'MEMORY_REVISION_CONFLICT', message: 'The memory case changed after it was read.',
+      }) });
+      return;
+    }
+    await route.continue();
+  });
+
+  await candidate.getByRole('button', { name: '批准历史参考' }).click();
+  await expect(page.getByText('案例版本已变化，已刷新最新状态；请确认后重新操作。')).toBeVisible();
+  await expect(candidate.getByText('待审核', { exact: true })).toBeVisible();
+  expect(reviewCommands).toBe(1);
+
+  await candidate.getByRole('button', { name: '批准历史参考' }).click();
+  await expect(candidate.getByText('已批准', { exact: true })).toBeVisible();
+  expect(reviewCommands).toBe(2);
+});
+
+test('memory controls recover after disabled capabilities become available', async ({ page }) => {
+  let restored = false;
+  await page.route('**/memory/capabilities?profileId=simulation', async (route) => {
+    if (restored) {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      enabled: false, kind: 'episodic', manualCapture: false, automaticCapture: false, recall: false,
+    }) });
+  });
+
+  await page.goto('/');
+  await expect(page.getByLabel('本次沉淀')).toBeDisabled();
+  await expect(page.getByText('记忆服务未启用；请管理员一次性启用后使用。')).toBeVisible();
+  await page.getByLabel('巡检问题').fill('服务未启用时仍可继续巡检。');
+  await page.getByRole('button', { name: '开始巡检' }).click();
+  await expect(page.getByText('已完成')).toBeVisible();
+
+  restored = true;
+  await page.reload();
+  await expect(page.getByLabel('本次沉淀')).toBeEnabled();
+  const recoveredRunId = await startRun(page, '记忆服务恢复后可继续使用。');
+  await page.getByRole('button', { name: '沉淀本次巡检' }).click();
+  await expect(page.getByRole('article').filter({ hasText: recoveredRunId }).getByText('待审核', { exact: true })).toBeVisible();
+});
+
+test('capacity errors are shown without automatically resubmitting capture', async ({ page }) => {
+  await page.goto('/');
+  const runId = await startRun(page, '记忆容量达到上限时应提示且不重试。');
+  let captureCommands = 0;
+  await page.route('**/runs/*/memory/capture', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    captureCommands += 1;
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({
+      error: 'MEMORY_CAPACITY_EXCEEDED', message: 'Memory capacity is exceeded.',
+    }) });
+  });
+
+  await page.getByRole('button', { name: '沉淀本次巡检' }).click();
+  await expect(page.getByText('记忆存储容量已满，请清理旧案例后重试。')).toBeVisible();
+  await expect(page.getByText('未保存', { exact: true })).toBeVisible();
+  expect(captureCommands).toBe(1);
+  expect(await runCapture(page, runId)).toMatchObject({ state: 'not_saved' });
 });
 
 test('failed investigations are listed for archive and cannot be approved', async ({ page }) => {

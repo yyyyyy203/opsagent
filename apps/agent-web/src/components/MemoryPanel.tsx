@@ -37,7 +37,6 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setNotice(null);
     void (async () => {
       try {
         const nextCapabilities = await api.memoryCapabilities(profileId);
@@ -58,6 +57,8 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
     })();
     return () => { active = false; };
   }, [api, filter, profileId, refresh]);
+
+  useEffect(() => { setNotice(null); }, [filter, profileId]);
 
   useEffect(() => {
     let active = true;
@@ -236,5 +237,8 @@ function apiBaseUrl(): string {
     ? import.meta.env.VITE_AGENT_API_URL : 'http://127.0.0.1:4100';
 }
 function errorMessage(error: unknown): string {
+  if (error instanceof ApiClientError && error.code === 'MEMORY_CAPACITY_EXCEEDED') {
+    return '记忆存储容量已满，请清理旧案例后重试。';
+  }
   return error instanceof Error ? error.message : '记忆请求失败。';
 }
