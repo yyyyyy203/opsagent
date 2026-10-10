@@ -270,8 +270,8 @@ async function startRun(page: Page, message: string): Promise<string> {
   const body = request.postDataJSON() as { runId?: unknown };
   if (typeof body.runId !== 'string') throw new Error('Run start request omitted its runId.');
   const runId = body.runId;
+  await expect.poll(async () => runStatus(page, runId)).toBe('completed');
   await expect(page.locator('.run-card.selected code')).toHaveText(runId);
-  await expect(page.getByText('已完成')).toBeVisible();
   await expect(page.locator('.status-hero strong')).toHaveText('已完成');
   return runId;
 }
@@ -292,6 +292,13 @@ async function runCapture(page: Page, runId: string): Promise<unknown> {
   const response = await page.request.get(`${agentUrl}/runs/${encodeURIComponent(runId)}/memory/capture`);
   expect(response.ok()).toBe(true);
   return response.json();
+}
+
+async function runStatus(page: Page, runId: string): Promise<string> {
+  const response = await page.request.get(`${agentUrl}/runs/${encodeURIComponent(runId)}`);
+  expect(response.ok()).toBe(true);
+  const run = await response.json() as { status: string };
+  return run.status;
 }
 
 async function restartMemoryRuntime(page: Page, enabled: boolean): Promise<void> {
