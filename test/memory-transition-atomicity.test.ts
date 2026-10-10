@@ -9,6 +9,7 @@ import { SqliteEventOutboxStore } from '../src/infrastructure/sqlite/event-outbo
 import { InMemoryDurableState } from '../src/storage/in-memory-durable-state.js';
 import { checkpointChecksum, parseAgentContext } from '../src/storage/durable-codec.js';
 import { memoryNow, simulationMemoryScope } from './fixtures/diagnostic-memory.js';
+import { EventFactoryV2 } from '../src/event/v2/event-factory.js';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
@@ -70,4 +71,39 @@ describe.each(['memory', 'sqlite'] as const)('%s memory transition', (kind: 'mem
     expect((await outbox.listPending({ limit: 10 })).map((record) => record.event.type))
       .toEqual(['MEMORY_UPDATE_SCHEDULED']);
   });
+});
+
+it('does not schedule automatic memory capture for a linked child Run', async () => {
+  let id = 0;
+  const factory = new EventFactoryV2(clock, { next: (prefix) => `${prefix}-${++id}` });
+  const state = new InMemoryDurableState(clock);
+  const parentRunId = 'memory-parent-run';
+  const childRunId = 'memory-child-run';
+  const childStarted = factory.create('SUBAGENT_STARTED', {
+    runId: parentRunId,
+    correlationId: `run:${parentRunId}`,
+    visibility: 'audit',
+    durability: 'durable',
+  }, {
+    subagentType: 'metrics',
+    childRunId,
+    parentRunId,
+    budget: { type: 'tool_calls', limit: 4, used: 0 },
+  });
+  await state.commit({
+    expectedRevision: null,
+    context: sourceContext({ runId: parentRunId, status: 'running' }),
+    outboxEvents: [childStarted],
+  });
+
+  const child = sourceContext({ runId: childRunId, status: 'completed' });
+  await state.commit({
+    expectedRevision: null,
+    context: child,
+    outboxEvents: [],
+    memoryCapture: captureIntent(child),
+  });
+
+  expect((await state.outbox.listPending({ limit: 20 })).map((record) => record.event.type))
+    .not.toContain('MEMORY_UPDATE_SCHEDULED');
 });

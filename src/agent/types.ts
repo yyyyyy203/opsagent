@@ -1,5 +1,22 @@
 import type { AgentContext, AgentEvent } from '../contracts/index.js';
-import type { MemoryPreferences, RunMemoryControl } from '../contracts/diagnostic-memory.js';
+import type {
+  HistoricalEvidenceRef,
+  MemoryHintRenderer,
+  MemoryPolicyPort,
+  MemoryPreferences,
+  MemoryRecallPort,
+  RunMemoryControl,
+} from '../contracts/diagnostic-memory.js';
+
+/** Host-injected memory ports; concrete stores and policy assembly stay outside the Harness. */
+export interface AgentMemoryHarness {
+  recall: MemoryRecallPort;
+  renderer: MemoryHintRenderer;
+  policy: MemoryPolicyPort;
+  requiredSources: readonly HistoricalEvidenceRef['source'][];
+  modelWindowTokens: number;
+  reservedOutputTokens: number;
+}
 
 /** Internal sentinel used to preserve the trusted origin of a user cancel command. */
 export const USER_RUN_CANCELLATION_REASON: unique symbol = Symbol('user-run-cancellation');

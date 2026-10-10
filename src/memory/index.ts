@@ -8,3 +8,5 @@ export * from './capture-worker.js';
 export * from './review-service.js';
 export * from './chinese-tokenizer.js';
 export * from './bounded-recall.js';
+export * from './capture-intent.js';
+export * from './hint-renderer.js';

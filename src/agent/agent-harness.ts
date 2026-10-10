@@ -36,6 +36,11 @@ import type { EventFactory } from '../event/event-factory.js';
 import type { BatchExecutionCallbacks, ToolBatchExecutor } from '../tool/batch-executor.js';
 import type { Toolkit } from '../tool/toolkit.js';
 import type { ToolAdmission } from '../tool/admission.js';
+import type { AgentMemoryHarness } from './types.js';
+import type { MemoryCaptureIntent, MemoryEventFactory, MemoryOperation, RunMemoryControl, RunMemoryState } from '../contracts/diagnostic-memory.js';
+import { parseRunMemoryControl, parseRunMemoryState } from '../contracts/diagnostic-memory-schema.js';
+import { memoryScopeKey } from '../memory/memory-scope.js';
+import { toolInputJsonSchema } from '../tool/schema.js';
 import { legacyRunFinishedPayload } from '../event/v1-payloads.js';
 import { admitToolBatch } from './admit-tool-batch.js';
 import { planPendingBatchRecovery } from './run-recovery.js';
@@ -44,6 +49,7 @@ import { USER_RUN_CANCELLATION_REASON } from './types.js';
 import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
 import { createLoopCallSignature, isLoopCallBlocked, recordLoopSample, type LoopIntervention } from './loop-detection/index.js';
 import { readRunUsageSummary } from '../contracts/run-usage.js';
+import { createMemoryCaptureIntent } from '../memory/capture-intent.js';
 
 const MAX_TRUSTED_SYSTEM_CONTEXT_CHARS = 8_192;
 
@@ -62,6 +68,8 @@ export interface AgentHarnessDependencies {
   /** Resolves exactly one immutable Profile snapshot for a fresh Run. */
   profileResolver?: ProfileResolver;
   hookRegistry?: HookRegistryLike;
+  /** Optional host-injected, policy-gated historical memory ports. */
+  memory?: AgentMemoryHarness;
   durableState?: DurableRunState;
   v2Events?: Omit<EventPublisherV2Dependencies, 'correlationId'> & {
     correlationId: string | ((runId: string) => string);
@@ -338,6 +346,8 @@ export class AgentHarness implements DiagnosisAgent {
       }
       yield* this.publishCompressionOutcome(frame, compressed, before);
 
+      const memoryMessage = await this.prepareMemoryView(frame, signal);
+
       frame.context.budget.iteration += 1;
       const stepId = this.dependencies.ids.next('step');
       frame.activeStepId = stepId;
@@ -356,7 +366,7 @@ export class AgentHarness implements DiagnosisAgent {
 
       const loopHint = frame.loopHint;
       delete frame.loopHint;
-      const response = yield* this.reasonStream(frame.context, stepId, signal, loopHint);
+      const response = yield* this.reasonStream(frame.context, stepId, signal, loopHint, memoryMessage);
       const candidates: Array<ToolCall | RawToolCall> = [...response.toolCalls, ...(response.rawToolCalls ?? [])];
       const seenIds = new Set(frame.context.messages.flatMap((message) => message.blocks.flatMap((block) =>
         block.type === 'tool_call' || block.type === 'raw_tool_call' ? [block.call.id] : [])));
@@ -390,7 +400,9 @@ export class AgentHarness implements DiagnosisAgent {
           }),
           durationMs: this.elapsed(frame.context),
         };
-        await this.publishTransitionV2(frame, 'RUN_FINISHED', finishPayload);
+        const memoryCapture = this.automaticMemoryCaptureIntent(frame.context);
+        await this.publishTransitionV2(frame, 'RUN_FINISHED', finishPayload,
+          undefined, undefined, undefined, undefined, [], memoryCapture);
         frame.terminalOutcome = 'completed';
         const result = this.result(frame.context, frame.finalText);
         rootSpan.end(result);
@@ -1114,21 +1126,26 @@ export class AgentHarness implements DiagnosisAgent {
     }
   }
 
-  private async *reasonStream(context: AgentContext, stepId: string, signal: AbortSignal, loopHint?: string): AsyncGenerator<AgentEvent, ModelResponse> {
+  private async *reasonStream(
+    context: AgentContext,
+    stepId: string,
+    signal: AbortSignal,
+    loopHint?: string,
+    memoryMessage?: AgentMessage,
+  ): AsyncGenerator<AgentEvent, ModelResponse> {
     const span = this.dependencies.observability.startSpan({
       name: 'model.reasoning', kind: 'llm', runId: context.runId, stepId,
       attributes: { stage: context.stage, iteration: context.budget.iteration },
     });
     const deadline = Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
-    const messages = loopHint === undefined ? context.messages : [
-      ...context.messages,
-      {
+    const messages: AgentMessage[] = [...context.messages];
+    if (loopHint !== undefined) messages.push({
         id: `loop-hint:${stepId}`,
         role: 'system' as const,
         createdAt: this.dependencies.clock.now().toISOString(),
         blocks: [{ type: 'text' as const, text: loopHint }],
-      },
-    ];
+      });
+    if (memoryMessage !== undefined) messages.push(memoryMessage);
     const stream = this.dependencies.model.stream(messages, this.dependencies.toolkit.list(), {
       signal,
       runId: context.runId,
@@ -1200,7 +1217,158 @@ export class AgentHarness implements DiagnosisAgent {
       contextVersion: 1,
       toolCallBudget: options.toolCallBudget ?? { remaining: maxToolCalls },
       ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: options.networkAttemptBudget }),
+      ...this.initialMemoryState(options.trustedMemoryControl),
       governance: createInitialRunGovernanceState({ profileId: options.profileId, capturedAt: now }),
+    };
+  }
+
+  private initialMemoryState(trusted: RunMemoryControl | undefined):
+    Pick<AgentContext, 'memoryControl' | 'memory'> | Record<string, never> {
+    const memory = this.dependencies.memory;
+    if (memory === undefined || trusted === undefined) return {};
+    const control = parseRunMemoryControl(trusted);
+    const recallAllowed = control.recall && memoryPolicyAllows(memory, control, 'recall');
+    return {
+      memoryControl: control,
+      ...(control.recall ? {
+        memory: recallAllowed
+          ? emptyMemoryState(control)
+          : { ...emptyMemoryState(control), availability: 'unavailable' as const, reasonCode: 'MEMORY_POLICY_DENIED' as const },
+      } : {}),
+    };
+  }
+
+  private async prepareMemoryView(frame: RunExecutionFrame, signal: AbortSignal): Promise<AgentMessage | undefined> {
+    const memory = this.dependencies.memory;
+    const control = frame.context.memoryControl;
+    if (memory === undefined || control === undefined || !control.recall) return undefined;
+    signal.throwIfAborted();
+    const nowDate = this.dependencies.clock.now();
+    const now = nowDate.toISOString();
+    const previous = frame.context.memory ?? emptyMemoryState(control);
+    const failClosed = (reasonCode: RunMemoryState['reasonCode']): RunMemoryState => ({
+      ...previous,
+      // Freeze an empty selection after any failed first attempt so a later
+      // iteration cannot turn a transient outage into an unbounded full search.
+      selectionState: 'selected',
+      selections: structuredClone(previous.selections),
+      ...(previous.selectedAt === undefined ? { selectedAt: now } : { selectedAt: previous.selectedAt }),
+      availability: 'unavailable',
+      hints: [],
+      validatedAt: now,
+      ...(reasonCode === undefined ? {} : { reasonCode }),
+    });
+    if (previous.availability === 'unavailable'
+      && previous.selectionState === 'selected' && previous.selections.length === 0) return undefined;
+    if (!memoryPolicyAllows(memory, control, 'recall')) {
+      frame.context.memory = failClosed('MEMORY_POLICY_DENIED');
+      await this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_FAILED', {
+        error: memoryEventError('MEMORY_POLICY_DENIED'),
+        fallbackPolicy: 'empty',
+      });
+      return undefined;
+    }
+
+    const operation = this.memoryOperation(frame.context, signal, nowDate, frame.loopHint);
+    const scopeKey = memoryScopeKey(control.scope);
+    if (memoryScopeKey(previous.scope) !== scopeKey) {
+      frame.context.memory = failClosed('MEMORY_SCOPE_INVALID');
+      await this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_FAILED', {
+        error: memoryEventError('MEMORY_SCOPE_INVALID'),
+        fallbackPolicy: 'empty',
+      });
+      return undefined;
+    }
+
+    const startedAt = nowDate.getTime();
+    await this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_STARTED', {
+      scopes: ['episodic'],
+      filters: {
+        profileId: control.scope.profileId,
+        serviceId: control.scope.serviceId,
+        faultType: control.scope.faultType,
+        environment: control.scope.environment,
+      },
+      limit: 5,
+    });
+    let next: RunMemoryState;
+    try {
+      next = parseRunMemoryState(await memory.recall.prepare({
+        runId: frame.context.runId,
+        text: currentUserQuery(frame.context.messages),
+        state: previous,
+      }, operation));
+      if (memoryScopeKey(next.scope) !== scopeKey) throw new TypeError('Memory recall returned a different scope.');
+      if (next.availability === 'unavailable' && previous.selectionState === 'unselected') {
+        next = {
+          ...next,
+          selectionState: 'selected',
+          selections: [],
+          hints: [],
+          selectedAt: now,
+        };
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      next = failClosed(error instanceof TypeError ? 'MEMORY_DATA_INVALID' : 'MEMORY_LOOKUP_FAILED');
+    }
+    frame.context.memory = next;
+    if (next.availability === 'unavailable') {
+      await this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_FAILED', {
+        error: memoryEventError(next.reasonCode ?? 'MEMORY_LOOKUP_FAILED'),
+        fallbackPolicy: 'empty',
+      });
+      return undefined;
+    }
+    await this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_COMPLETED', {
+      hitCount: next.hints.length,
+      memoryIds: next.hints.map((hint) => hint.memoryId),
+      durationMs: Math.max(0, this.dependencies.clock.now().getTime() - startedAt),
+    });
+    const availableMemoryTokens = operation.availableMemoryTokens ?? 0;
+    if (availableMemoryTokens <= 0 || next.availability !== 'ready' || next.hints.length === 0) return undefined;
+    try {
+      return memory.renderer.render(next, { ...operation, availableMemoryTokens }) ?? undefined;
+    } catch {
+      // Renderer failures are fail-closed; the selected snapshot remains available for audit/revalidation.
+      return undefined;
+    }
+  }
+
+  private memoryOperation(context: AgentContext, signal: AbortSignal, now: Date, loopHint?: string): MemoryOperation {
+    const configured = this.dependencies.memory;
+    const deadlineMs = Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
+    let baseBytes: number;
+    try {
+      const tools = this.dependencies.toolkit.list().map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: toolInputJsonSchema(tool),
+      }));
+      const messages = [...context.messages];
+      if (loopHint !== undefined) messages.push({
+        // Reserve more than the actual generated step id so the estimate stays conservative.
+        id: `loop-hint:${'x'.repeat(256)}`,
+        role: 'system',
+        createdAt: now.toISOString(),
+        blocks: [{ type: 'text', text: loopHint }],
+      });
+      baseBytes = Buffer.byteLength(JSON.stringify({ messages, tools }), 'utf8');
+    } catch {
+      baseBytes = Number.POSITIVE_INFINITY;
+    }
+    const rawAvailable = configured === undefined
+      ? 0
+      : configured.modelWindowTokens - configured.reservedOutputTokens - baseBytes;
+    const availableMemoryTokens = Number.isSafeInteger(rawAvailable) && rawAvailable > 0
+      ? Math.min(1_024, rawAvailable)
+      : 0;
+    return {
+      now: now.toISOString(),
+      signal,
+      deadlineMs,
+      availableMemoryTokens,
+      clock: this.dependencies.clock,
     };
   }
 
@@ -1296,6 +1464,7 @@ export class AgentHarness implements DiagnosisAgent {
     execution?: DurableExecutionTransition,
     governanceEffects?: readonly GovernanceEffect[],
     additionalEvents: readonly PendingAgentEventV2[] = [],
+    memoryCapture?: MemoryCaptureIntent,
   ): Promise<void> {
     const durable = this.dependencies.durableState;
     const v2 = this.dependencies.v2Events;
@@ -1303,6 +1472,7 @@ export class AgentHarness implements DiagnosisAgent {
       ? toolExecutionAttemptId(frame.context.streamId, stepId, toolCallId)
       : undefined;
     if (durable === undefined) {
+      if (memoryCapture !== undefined) throw new Error('Memory capture requires durable transition persistence.');
       if (v2 !== undefined) {
         await v2.publisher.publish(this.createPendingV2(type, frame.context, payload, stepId, toolCallId, attemptId));
         for (const event of additionalEvents) await v2.publisher.publish(event);
@@ -1317,16 +1487,59 @@ export class AgentHarness implements DiagnosisAgent {
     if (pending !== undefined && dispatcher === undefined) {
       throw new Error(`Durable V2 event dispatcher is not configured: ${type}`);
     }
+    const filteredGovernanceEffects = this.filterMemoryGovernanceEffects(frame.context, governanceEffects);
     const saved = await durable.transitions.commit({
       expectedRevision: frame.checkpointRevision ?? null,
       context: frame.context,
       ...(execution === undefined ? {} : { execution }),
-      ...(governanceEffects === undefined ? {} : { governanceEffects }),
+      ...(filteredGovernanceEffects === undefined ? {} : { governanceEffects: filteredGovernanceEffects }),
       outboxEvents: pending === undefined ? [] : [pending, ...additionalEvents],
+      ...(memoryCapture === undefined ? {} : { memoryCapture }),
     });
     this.adoptContext(frame, saved.context);
     frame.checkpointRevision = saved.revision;
     if (pending !== undefined && dispatcher !== undefined) await dispatcher.drainRun(frame.context.runId);
+  }
+
+  private filterMemoryGovernanceEffects(
+    context: AgentContext,
+    effects: readonly GovernanceEffect[] | undefined,
+  ): readonly GovernanceEffect[] | undefined {
+    if (effects === undefined) return undefined;
+    const control = context.memoryControl;
+    const memory = this.dependencies.memory;
+    if (control !== undefined && memory !== undefined && memoryPolicyAllows(memory, control, 'capture')) return effects;
+    return effects.filter((effect) => effect.type !== 'memory_signal');
+  }
+
+  private automaticMemoryCaptureIntent(context: AgentContext): MemoryCaptureIntent | undefined {
+    const memory = this.dependencies.memory;
+    const control = context.memoryControl;
+    if (memory === undefined || this.dependencies.v2Events === undefined || control === undefined
+      || context.status !== 'completed' || control.capture !== 'automatic') return undefined;
+    try {
+      if (!memoryPolicyAllows(memory, control, 'capture')) return undefined;
+      const events: MemoryEventFactory = {
+        create: <T extends AgentEventTypeV2>(
+          type: T,
+          runId: string,
+          payload: AgentEventPayloadMap[T],
+        ) => {
+          if (runId !== context.runId) throw new TypeError('Memory capture event run mismatch.');
+          return this.createPendingV2(type, context, payload);
+        },
+      };
+      return createMemoryCaptureIntent(context, {
+        candidateId: this.dependencies.ids.next('memory'),
+        now: this.dependencies.clock.now().toISOString(),
+        requiredSources: memory.requiredSources,
+        events,
+      }) ?? undefined;
+    } catch {
+      // Intent construction is optional and fails closed; it must not change
+      // diagnosis or action behavior when memory configuration is unavailable.
+      return undefined;
+    }
   }
 
   private lifecycleEffectsFor(frame: RunExecutionFrame, toolCallId: string): readonly GovernanceEffect[] {
@@ -1531,4 +1744,56 @@ function toUsagePayload(summary: RunUsageSummary): { inputTokens?: number; outpu
     ...(summary.cachedInputTokens === undefined ? {} : { cachedInputTokens: summary.cachedInputTokens }),
   };
   return Object.keys(usage).length === 0 ? undefined : usage;
+}
+
+function emptyMemoryState(control: RunMemoryControl): RunMemoryState {
+  return {
+    schemaVersion: 1,
+    scope: structuredClone(control.scope),
+    selectionState: 'unselected',
+    availability: 'empty',
+    selections: [],
+    hints: [],
+  };
+}
+
+function memoryEventError(category: NonNullable<RunMemoryState['reasonCode']>): AgentEventPayloadMap['MEMORY_RETRIEVAL_FAILED']['error'] {
+  return {
+    code: 'UNAVAILABLE',
+    message: 'Historical memory is unavailable.',
+    retryable: false,
+    details: { category },
+  };
+}
+
+function memoryPolicyAllows(
+  memory: AgentMemoryHarness,
+  control: RunMemoryControl,
+  capability: 'recall' | 'capture',
+): boolean {
+  try {
+    return memory.policy.allows(control, capability) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Only current user text may form the lexical query; tool output and prompts stay out. */
+function currentUserQuery(messages: readonly AgentMessage[]): string {
+  const source = messages
+    .filter((message) => message.role === 'user')
+    .flatMap((message) => message.blocks.flatMap((block) => block.type === 'text' ? [block.text] : []))
+    .join('\n');
+  const characters = [...source];
+  let bytes = 0;
+  let query = '';
+  for (let index = characters.length - 1; index >= 0; index -= 1) {
+    const character = characters[index];
+    if (character === undefined) continue;
+    const size = Buffer.byteLength(character, 'utf8');
+    if (bytes + size > 1_024) break;
+    query = character + query;
+    bytes += size;
+  }
+  return query;
 }

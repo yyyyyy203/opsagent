@@ -1,4 +1,5 @@
 import { AgentHarness } from '../agent/agent-harness.js';
+import type { AgentMemoryHarness } from '../agent/types.js';
 import type {
   ChatModel,
   CheckpointStore,
@@ -112,6 +113,8 @@ export type RuntimeToolFactory = (ports: RuntimeToolPorts) => readonly Tool[];
 
 export interface AgentRuntimeOptions {
   model: ChatModel;
+  /** Host/test-injected memory ports. Production assembly is owned by bootstrap. */
+  memoryHarness?: AgentMemoryHarness;
   /** Optional independent model used only for structured L2 history summaries. */
   compactModel?: ChatModel;
   workspaceRoots: string[];
@@ -206,6 +209,17 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ? new InMemoryDurableState(clock)
     : undefined;
   const durableState: DurableRunState | undefined = persistence ?? inMemoryDurable;
+  if (options.memoryHarness !== undefined) {
+    if (durableState === undefined) {
+      throw new Error('memoryHarness requires durable checkpoint and V2 transition persistence.');
+    }
+    const { modelWindowTokens, reservedOutputTokens } = options.memoryHarness;
+    if (!Number.isSafeInteger(modelWindowTokens) || modelWindowTokens <= 0
+      || !Number.isSafeInteger(reservedOutputTokens) || reservedOutputTokens <= 0
+      || reservedOutputTokens >= modelWindowTokens) {
+      throw new Error('memoryHarness token-window configuration is invalid.');
+    }
+  }
   const checkpoints = options.checkpoints
     ?? (durableState === undefined ? new InMemoryCheckpointStore() : new VersionedCheckpointStoreAdapter(durableState.checkpoints));
   const evidence = options.evidence ?? persistence?.evidence ?? inMemoryDurable?.evidence ?? new InMemoryEvidenceStore();
@@ -467,6 +481,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ...(options.enableGovernance === true && options.profileResolver !== undefined
       ? { profileResolver: options.profileResolver }
       : {}),
+    ...(options.memoryHarness === undefined ? {} : { memory: options.memoryHarness }),
     ...(durableState === undefined ? {} : { durableState }),
     hookRegistry,
     v2Events: v2EventDependencies,
