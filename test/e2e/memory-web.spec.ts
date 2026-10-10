@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Page, Request } from '@playwright/test';
 
 const agentUrl = `http://127.0.0.1:${process.env.AGENTOPS_MEMORY_E2E_AGENT_PORT ?? '45400'}`;
+const controlUrl = `http://127.0.0.1:${process.env.AGENTOPS_MEMORY_E2E_CONTROL_PORT ?? '45474'}`;
 
 test('manual capture, review, explicit recall, revocation, and later no-recall are independent', async ({ page }) => {
   await page.goto('/');
@@ -19,6 +20,11 @@ test('manual capture, review, explicit recall, revocation, and later no-recall a
   await expect(page.getByText('已保存候选')).toBeVisible();
   await expect(page.getByText('仅模拟环境可用，不可晋级')).toBeVisible();
   await page.getByRole('button', { name: '批准历史参考' }).click();
+  await expect(page.getByRole('article').filter({ hasText: firstRunId }).getByText('已批准', { exact: true })).toBeVisible();
+  expect(await runMemory(page, firstRunId)).toBeNull();
+
+  await restartMemoryRuntime(page, true);
+  await page.reload();
   await expect(page.getByRole('article').filter({ hasText: firstRunId }).getByText('已批准', { exact: true })).toBeVisible();
   expect(await runMemory(page, firstRunId)).toBeNull();
 
@@ -177,17 +183,7 @@ test('review conflict refreshes the candidate and never resubmits automatically'
 });
 
 test('memory controls recover after disabled capabilities become available', async ({ page }) => {
-  let restored = false;
-  await page.route('**/memory/capabilities?profileId=simulation', async (route) => {
-    if (restored) {
-      await route.continue();
-      return;
-    }
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-      enabled: false, kind: 'episodic', manualCapture: false, automaticCapture: false, recall: false,
-    }) });
-  });
-
+  await restartMemoryRuntime(page, false);
   await page.goto('/');
   await expect(page.getByLabel('本次沉淀')).toBeDisabled();
   await expect(page.getByText('记忆服务未启用；请管理员一次性启用后使用。')).toBeVisible();
@@ -195,7 +191,7 @@ test('memory controls recover after disabled capabilities become available', asy
   await page.getByRole('button', { name: '开始巡检' }).click();
   await expect(page.getByText('已完成')).toBeVisible();
 
-  restored = true;
+  await restartMemoryRuntime(page, true);
   await page.reload();
   await expect(page.getByLabel('本次沉淀')).toBeEnabled();
   const recoveredRunId = await startRun(page, '记忆服务恢复后可继续使用。');
@@ -270,6 +266,12 @@ async function runCapture(page: Page, runId: string): Promise<unknown> {
   const response = await page.request.get(`${agentUrl}/runs/${encodeURIComponent(runId)}/memory/capture`);
   expect(response.ok()).toBe(true);
   return response.json();
+}
+
+async function restartMemoryRuntime(page: Page, enabled: boolean): Promise<void> {
+  const response = await page.request.post(`${controlUrl}/restart`, { data: { memoryEnabled: enabled } });
+  expect(response.ok()).toBe(true);
+  expect(await response.json()).toMatchObject({ status: 'ready', memoryEnabled: enabled });
 }
 
 function isRunStartRequest(request: Request): boolean {

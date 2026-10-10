@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
 import { z } from 'zod';
 import { startAgentWebRuntime } from '../../dist/bootstrap/agent-web-runtime.js';
 import { createSqlitePersistence } from '../../dist/infrastructure/sqlite/persistence-bundle.js';
@@ -10,8 +11,9 @@ const dataDirectory = await mkdtemp(join(tmpdir(), 'agentops-memory-e2e-'));
 const databasePath = join(dataDirectory, 'agent.sqlite');
 const agentPort = Number(process.env.AGENTOPS_MEMORY_E2E_AGENT_PORT ?? 45400);
 const webPort = Number(process.env.AGENTOPS_MEMORY_E2E_WEB_PORT ?? 45473);
+const controlPort = Number(process.env.AGENTOPS_MEMORY_E2E_CONTROL_PORT ?? 45474);
 const clock = { now: () => new Date() };
-const persistence = createSqlitePersistence({ path: databasePath, clock });
+let persistence = createSqlitePersistence({ path: databasePath, clock });
 const evidenceCapturedAt = '2026-10-11T00:04:00.000Z';
 
 const fixtureTool = {
@@ -52,22 +54,69 @@ const model = new MemoryFixtureModel(responses);
 const profileScope = { profileId: 'simulation', profileRevision: 'sim-v1', serviceId: 'settlement',
   faultType: 'settlement_failure', targetFingerprint: 'a'.repeat(64), environment: 'simulation',
   dataClass: 'simulated', datasetId: 'memory-lab-v1' };
-const memoryConfig = process.env.AGENTOPS_MEMORY_E2E_DISABLED === '1' ? { enabled: false } : {
-  enabled: true, profiles: [{ scope: profileScope, profilePolicyRevision: 'policy-v1', captureDefault: 'manual',
+function diagnosticMemoryConfig(memoryEnabled) {
+  if (!memoryEnabled) return { enabled: false };
+  return { enabled: true, profiles: [{ scope: profileScope, profilePolicyRevision: 'policy-v1', captureDefault: 'manual',
     recallDefault: false, allowAutomaticCapture: true, allowRecall: true }], requiredSources: ['metric'],
-  modelWindowTokens: 32_768, reservedOutputTokens: 4_096,
-};
-const runtime = await startAgentWebRuntime({ dataDirectory, workspaceRoots: [dataDirectory], clock, model,
-  tools: [fixtureTool], profiles: [{ id: 'simulation', name: 'simulation', description: 'Isolated memory web test.' }],
-  diagnosticMemory: memoryConfig, host: '127.0.0.1', port: agentPort,
-  allowedOrigins: [`http://127.0.0.1:${webPort}`] });
+    modelWindowTokens: 32_768, reservedOutputTokens: 4_096 };
+}
+
+function runtimeOptions(memoryEnabled) {
+  return { dataDirectory, workspaceRoots: [dataDirectory], clock, model, tools: [fixtureTool],
+    profiles: [{ id: 'simulation', name: 'simulation', description: 'Isolated memory web test.' }],
+    diagnosticMemory: diagnosticMemoryConfig(memoryEnabled), host: '127.0.0.1', port: agentPort,
+    allowedOrigins: [`http://127.0.0.1:${webPort}`] };
+}
+
+let memoryEnabled = process.env.AGENTOPS_MEMORY_E2E_DISABLED !== '1';
+let runtime = await startAgentWebRuntime(runtimeOptions(memoryEnabled));
+let restarting = false;
+let closing = false;
+async function restartRuntime(nextMemoryEnabled) {
+  if (restarting || closing) throw new Error('MEMORY_E2E_RUNTIME_BUSY');
+  restarting = true;
+  try {
+    await runtime.close();
+    persistence.close();
+    memoryEnabled = nextMemoryEnabled;
+    persistence = createSqlitePersistence({ path: databasePath, clock });
+    runtime = await startAgentWebRuntime(runtimeOptions(memoryEnabled));
+  } finally {
+    restarting = false;
+  }
+}
+
+const controlServer = createServer(async (request, response) => {
+  if (request.method !== 'POST' || request.url !== '/restart') {
+    response.writeHead(404).end();
+    return;
+  }
+  try {
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+      if (chunks.reduce((size, value) => size + value.length, 0) > 1_024) throw new Error('MEMORY_E2E_REQUEST_TOO_LARGE');
+    }
+    const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (typeof payload.memoryEnabled !== 'boolean') throw new Error('MEMORY_E2E_REQUEST_INVALID');
+    await restartRuntime(payload.memoryEnabled);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ status: 'ready', memoryEnabled }));
+  } catch {
+    response.writeHead(503, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ status: 'failed', code: 'MEMORY_E2E_RESTART_FAILED' }));
+  }
+});
+await new Promise((resolve, reject) => {
+  controlServer.once('error', reject);
+  controlServer.listen(controlPort, '127.0.0.1', resolve);
+});
 
 process.stdout.write(`${JSON.stringify({ status: 'ready', url: runtime.url })}\n`);
-let closing = false;
 async function close() {
   if (closing) return;
   closing = true;
-  try { await runtime.close(); }
+  try { await new Promise((resolve) => controlServer.close(resolve)); await runtime.close(); }
   finally { persistence.close(); await rm(dataDirectory, { recursive: true, force: true }); }
 }
 process.once('SIGINT', () => { void close(); });
