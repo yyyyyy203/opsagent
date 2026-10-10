@@ -183,8 +183,15 @@ test('review conflict refreshes the candidate and never resubmits automatically'
 });
 
 test('memory controls recover after disabled capabilities become available', async ({ page }) => {
-  await restartMemoryRuntime(page, false);
   await page.goto('/');
+  const sourceRunId = await startRun(page, '关闭记忆服务前保存一个已审核案例：结算失败率升高，连接池等待增加。');
+  await page.getByRole('button', { name: '沉淀本次巡检' }).click();
+  const sourceCase = page.getByRole('article').filter({ hasText: sourceRunId });
+  await sourceCase.getByRole('button', { name: '批准历史参考' }).click();
+  await expect(sourceCase.getByText('已批准', { exact: true })).toBeVisible();
+
+  await restartMemoryRuntime(page, false);
+  await page.reload();
   await expect(page.getByLabel('本次沉淀')).toBeDisabled();
   await expect(page.getByText('记忆服务未启用；请管理员一次性启用后使用。')).toBeVisible();
   await page.getByLabel('巡检问题').fill('服务未启用时仍可继续巡检。');
@@ -194,7 +201,14 @@ test('memory controls recover after disabled capabilities become available', asy
   await restartMemoryRuntime(page, true);
   await page.reload();
   await expect(page.getByLabel('本次沉淀')).toBeEnabled();
-  const recoveredRunId = await startRun(page, '记忆服务恢复后可继续使用。');
+  const preservedCase = page.getByRole('article').filter({ hasText: sourceRunId });
+  await expect(preservedCase.getByText('已批准', { exact: true })).toBeVisible();
+  await page.getByLabel('使用已审核历史参考').check();
+  const recoveredRunId = await startRun(page, '记忆服务恢复后核对结算失败率升高、连接池等待增加。');
+  await expect.poll(async () => runMemory(page, recoveredRunId)).toMatchObject({
+    selectionState: 'selected', availability: 'ready',
+  });
+  await expect(page.getByText('历史参考已载入')).toBeVisible();
   await page.getByRole('button', { name: '沉淀本次巡检' }).click();
   await expect(page.getByRole('article').filter({ hasText: recoveredRunId }).getByText('待审核', { exact: true })).toBeVisible();
 });
