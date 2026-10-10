@@ -22,14 +22,14 @@ ContextRenderer 组装稳定系统指令、工具快照、历史消息及尾部�
 
 ## 记忆
 
-2026-10-10 的具体增量设计见 [受控诊断记忆一期 Spec R2](../superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md) 与 [实施计划](../superpowers/plans/2026-10-10-governed-diagnostic-memory.md)，两者当前待实施。下表是目标职责，不代表现有内存 Memory 原型已经具备持久化、审核或召回闭环。新方案保留旧 MemoryFacade，新增强制范围的捕获、审核、查询、召回小接口；实际接入以该 Spec 的兼容、事务和安全约束为准。
+2026-10-10 的具体设计见 [受控诊断记忆一期 Spec R2](../superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md) 与 [实施计划](../superpowers/plans/2026-10-10-governed-diagnostic-memory.md)。阶段 A 已完成离线联验：保留旧 MemoryFacade，新增强制范围的捕获、审核、查询、召回小接口；实际边界以该 Spec 的兼容、事务和安全约束为准。复现命令及数据边界见[记忆本地验收指南](../guides/diagnostic-memory-local.md)。
 
-部署能力与日常用户控制分离：未配置服务不改变旧行为，合法启用后默认 manual 保存/recall=false，前端可手动沉淀终态 Run、按允许策略自动保存，并独立决定是否使用已审核历史参考。保存先进入 observation，不要求先开启召回，不需每次找开发人员改环境变量；审核与工具执行授权完全分离。failed/cancelled 调查可手动归档但不可批准召回，已结束 Run 的 Checkpoint、状态和模型用量不因保存而改变。
+部署能力与日常用户控制分离：部署默认关闭，合法启用后默认 manual 保存/recall=false，前端可手动沉淀终态 Run、按 Profile 允许策略自动保存，并独立决定是否使用已审核历史参考。保存先进入 observation，不要求先开启召回；审核与工具执行授权完全分离。failed/cancelled 调查可手动归档但不可批准召回，已结束 Run 的 Checkpoint、状态和模型用量不因保存而改变。
 
 | 类型 | 内容 | V1 |
 |---|---|---|
-| Working | 当前 Run 结构化状态 | 复用既有 Checkpoint；控制/召回快照恢复增量待实施 |
-| Episodic | 历史报告、证据引用、结果质量 | 前端保存、审核、撤销、有界召回的完整闭环待实施 |
+| Working | 当前 Run 结构化状态 | 复用 Checkpoint；控制状态、冻结召回快照及重启后证据复核已实现 |
+| Episodic | 历史报告、证据引用、结果质量 | 前端保存、审核/撤销、范围隔离、有界召回已实现；离线模拟联验通过 |
 | Semantic | 拓扑、指标、阈值、Runbook | 既有 Profile 是受控来源，完整版本化知识库与检索仍未实现 |
 | Procedural | 审核后的经验模板 | 仅兼容候选接口；模板生命周期/召回仍未实现，不启用自动晋级 |
 
@@ -53,4 +53,4 @@ V1 单进程持久化优先，运行恢复使用存储 revision 和执行日志�
 
 ## 当前实现
 
-当前已实现：结构化 `AgentContext`、规则压缩器、内存 Memory，以及 Event/Message V2 的内存/SQLite EventStore、MessageStore、ReplayBuffer、MessageAssembler、投影 checkpoint、SQLite Run Checkpoint 和有界指标 EvidenceStore。L0 日志/Trace 基础已提供本地 gzip BlobStore、SQLite Manifest、流式 Recorder、受控 Reader/Tools，并通过 `toolFactories` 注入；端到端重启验收已覆盖指标和日志证据。完整 L0/L1/L2、可替换 MemoryFacade 生命周期、跨进程租约、生产对象存储/KMS、自动清理和关系化 runs/记忆存储仍未实现或未完整验收。
+当前已实现：结构化 `AgentContext`、规则压缩器、分层记忆职责边界，以及 Event/Message V2 的内存/SQLite EventStore、MessageStore、ReplayBuffer、MessageAssembler、投影 checkpoint、SQLite Run Checkpoint 和有界指标 EvidenceStore。受控诊断记忆阶段 A 已落地 SQLite 案例捕获/去重、人工审核与撤销、中文 bigram/英文词项检索、同 scope 前置过滤、证据校验、有限提示渲染、Run 内独立保存/召回策略、冻结选择与重启恢复复核、前端操作和关闭基线；使用 ScriptedModel 与临时 SQLite 的离线联验不调用外部模型或遥测。L0 日志/Trace 基础已提供本地 gzip BlobStore、SQLite Manifest、流式 Recorder、受控 Reader/Tools，并通过 `toolFactories` 注入；端到端重启验收已覆盖指标和日志证据。完整 Semantic/Procedural 知识库、真实向量实验、完整 L0/L1/L2、跨 Worker 租约、生产对象存储/KMS 和自动清理仍未实现或未完整验收。

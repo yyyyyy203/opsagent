@@ -8,7 +8,7 @@
 
 **Tech Stack:** 本分支 TypeScript、Node.js 24、pnpm 11.19.0、Zod 3、better-sqlite3/FTS5、Vitest、现有 React/Playwright；阶段 A 不增加 Embedding 或向量依赖。向量存储与对照验收见 [阶段 B 实施计划](./2026-10-10-memory-vector-feasibility.md)。
 
-**Spec:** [受控诊断记忆一期设计 R2](../specs/2026-10-10-governed-diagnostic-memory-design.md)。状态：阶段 A 实施中；T1–T5 已实现并通过任务级复审，T6–T9 待执行；R2 取代本计划初稿的开关与捕获范围。
+**Spec:** [受控诊断记忆一期设计 R2](../specs/2026-10-10-governed-diagnostic-memory-design.md)。状态：阶段 A 的 T1–T9 已实现并完成离线联合验收；这不代表完整记忆系统完成。向量可行性按独立阶段 B 计划实施，Semantic/Procedural 完整知识库仍有后续设计与实现工作；R2 取代本计划初稿的开关与捕获范围。
 
 ## Global Constraints
 
@@ -431,7 +431,7 @@ const trustedMemoryControl = resolveMemoryControl(
 - Produces: client `memoryCapabilities(profileId: string): Promise<MemoryCapabilities>`；`listMemoryCases(profileId: string, input: { status?: MemoryStatus; afterId?: string; limit: number }): Promise<readonly DiagnosticMemoryCase[]>`；`getRunMemory(runId: string): Promise<RunMemoryState | null>`；`getRunMemoryCapture(runId: string): Promise<MemoryCaptureTicket>`；`captureRunMemory(runId: string, command: { requestId: string; expectedCheckpointRevision: number }): Promise<MemoryCaptureTicket>`；`reviewMemory(id: string, command: { profileId: string; requestId: string; expectedRevision: number; decision: 'approved' | 'rejected'; claimCheck: 'supported' | 'unsupported' }): Promise<DiagnosticMemoryCase>`。命令不含 trusted actor/scope。
 - Produces: MemoryPanel props `{ profileId: string; runId?: string }`；Run 创建客户端增量传 MemoryPreferences。caps disabled 禁用保存并解释一次性部署未启用，旧巡检保持可用；recall 关闭不隐藏保存/审核。
 
-- [ ] Step 1：状态/客户端红测试覆盖独立策略、not_saved/queued/running/saved/failed、observation/approved/rejected、失败调查、409刷新、重复点击/刷新与禁用批准；E2E 先关闭历史参考，仍能点击沉淀：
+- [x] Step 1：状态/客户端红测试覆盖独立策略、not_saved/queued/running/saved/failed、observation/approved/rejected、失败调查、409刷新、重复点击/刷新与禁用批准；E2E 先关闭历史参考，仍能点击沉淀：
 
 ```ts
 await page.getByRole('button', { name: '沉淀本次巡检' }).click();
@@ -445,8 +445,8 @@ await expect(page.getByText('已拒绝')).toBeVisible();
 
 fixture 启动独立 SQLite memory API，只用 ScriptedModel；前端优先选择 manual+recall=false。批准仅在后端 sufficient+completed+有效引用案例可用，失败归档不能批准；服务关闭时按钮禁用，不提示用户每次重启。
 
-- [ ] Step 2：运行 `pnpm exec vitest run test/memory-web-view.test.ts test/web-api-client.test.ts --maxWorkers=2` 和 `pnpm exec playwright test --config playwright.memory.config.ts` 看红。
-- [ ] Step 3：增加独立沉淀选择器和历史参考开关；capabilities 限制 automatic/recall 可选。终态先 GET capture 获 revision，再 POST capture，保持本次 requestId，查询最新状态；提交期间禁止重复点击，刷新/重启回查不自动重发。展示有界 summary、sourceRunStatus、引用、质量/期限和模拟徽标；不显示 raw。审核带 expectedRevision，409刷新、不自动重批。
+- [x] Step 2：运行 `pnpm exec vitest run test/memory-web-view.test.ts test/web-api-client.test.ts --maxWorkers=2` 和 `pnpm exec playwright test --config playwright.memory.config.ts` 看红。
+- [x] Step 3：增加独立沉淀选择器和历史参考开关；capabilities 限制 automatic/recall 可选。终态先 GET capture 获 revision，再 POST capture，保持本次 requestId，查询最新状态；提交期间禁止重复点击，刷新/重启回查不自动重发。展示有界 summary、sourceRunStatus、引用、质量/期限和模拟徽标；不显示 raw。审核带 expectedRevision，409刷新、不自动重批。
 
 ```ts
 const command = { profileId, expectedRevision: item.revision, requestId,
@@ -456,7 +456,7 @@ await client.reviewMemory(item.id, command);
 
 `item` 来自安全 DTO；requestId 在用户发起一次操作时生成并保留至该请求结束，不每次网络重试生成新值。
 
-- [ ] Step 4：浏览器完整案例“首轮 manual+recall=false → 点击沉淀 → observation → 人工批准 → 第二轮显式 recall=true → 撤销 → 第三轮不召回”；另测 automatic 与 manual 去重、skip 事后保存、失败归档、服务关闭/恢复、刷新/重启、CAS/容量错误与引用跳转。只改本任务 hunks，保留已有熔断 UI。提交：`feat(web): add per-run memory capture and historical reference controls`。
+- [x] Step 4：浏览器完整案例“首轮 manual+recall=false → 点击沉淀 → observation → 人工批准 → 第二轮显式 recall=true → 撤销 → 第三轮不召回”；另测 automatic 与 manual 去重、skip 事后保存、失败归档、服务关闭/恢复、刷新/重启、CAS/容量错误与引用跳转。只改本任务 hunks，保留已有熔断 UI。提交：`feat(web): add per-run memory capture and historical reference controls`。
 
 ## Task 9：离线联合验收、基线防回归与文档收口
 
@@ -471,7 +471,7 @@ await client.reviewMemory(item.id, command);
 - Consumes: 完整 opt-in runtime 和 reviewer commands。
 - Produces: `pnpm acceptance:memory` 执行 build + `apps/acceptance/memory.mjs`；默认只创建独立临时库，输出脱敏 JSON `{ status, checks, modelRequestsSent: 0, externalRequestsSent: 0 }`，任一确定性检查失败 exit 1。
 
-- [ ] Step 1：联验红测试运行两个合法模拟 scope 和一个 live 负向 scope，检查 ManualCapture→Approve→Recall→Restart→Revoke、6种独立策略组合、自动/手动竞争、失败归档、非终态拒绝、源 Run 不变、oracle 与无权输入负例。用请求 spy 断言 externalRequestsSent=0，不仅相信脚本自行声明。
+- [x] Step 1：联验红测试运行两个合法模拟 scope 和一个 live 负向 scope，检查 ManualCapture→Approve→Recall→Restart→Revoke、6种独立策略组合、自动/手动竞争、失败归档、非终态拒绝、源 Run 不变、oracle 与无权输入负例。用请求 spy 断言 externalRequestsSent=0，不仅相信脚本自行声明。
 
 ```ts
 expect(result.checks.captureOnce).toBe(true);
@@ -489,8 +489,8 @@ expect(result.externalRequestsSent).toBe(0);
 
 `result` 是本脚本返回/测试捕获的 JSON；checks schema固定，还要包括 transactionRollback、staleWorkerRejected、noOracleLeak、disabledBaseline。
 
-- [ ] Step 2：运行 `pnpm exec vitest run test/memory-acceptance.integration.test.ts --maxWorkers=2` 看红。
-- [ ] Step 3：脚本显式禁用真实 model/LangSmith/export，注入 ScriptedModel、受控内存遥测 Tool 和独立 scoped stores；不使用用户现有 acceptance 数据库。review 用明确的 supported 标记，只评价 fixture 声明，不宣传模型准确率。
+- [x] Step 2：运行 `pnpm exec vitest run test/memory-acceptance.integration.test.ts --maxWorkers=2` 看红；另加 CLI 失败码测试，先观察到缺少导出导致的预期 RED，再实现后 2/2 通过。
+- [x] Step 3：脚本显式禁用真实 model/LangSmith/export，注入 ScriptedModel、受控内存遥测 Tool 和独立 scoped stores；不使用用户现有 acceptance 数据库。review 用明确的 supported 标记，只评价 fixture 声明，不宣传模型准确率。
 
 ```json
 "acceptance:memory": "pnpm build && node apps/acceptance/memory.mjs"
@@ -498,9 +498,9 @@ expect(result.externalRequestsSent).toBe(0);
 
 检索 fixture 至少覆盖中文/英文、同词错scope、同分排序、过期、版本变化、缺证、操作符输入、无匹配 12 种查询；输出 deterministic ranking 断言，不写未经评测的百分比。
 
-- [ ] Step 4：先运行 memory 全部单元、API和联验；再运行 `pnpm exec playwright test --config playwright.memory.config.ts`、`pnpm e2e:circuit`（原确定性 circuit Web E2E）；最后 `pnpm lint`、`pnpm typecheck`、`pnpm test -- --maxWorkers=2`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build`。失败按首次失败定位，不自动付费烟测。
-- [ ] Step 5：对无记忆真实烟测做本地契约回归：配置 disabled、模型输入前缀/工具 schema、请求预算、required evidence、token usage/trace 安全字段不变。只能说 scripted 基线通过；联网 DeepSeek/LangSmith 再验收需另行授权，不把本期离线测试说成真实模型通过。
-- [ ] Step 6：写本地操作指南、资源/保留限制、数据备份与回退边界，更新实现状态为已实现/未验证的准确条目；记录测试数量、命令/退出码、环境与未验证项。运行 `git diff --check`，审查依赖方向和所有数据出口。提交：`test(memory): verify isolated review recall and restart workflow`。
+- [x] Step 4：先运行 memory 全部单元、API和联验；再运行 `pnpm exec playwright test --config playwright.memory.config.ts`、`pnpm e2e:circuit`（原确定性 circuit Web E2E）；最后 `pnpm lint`、`pnpm typecheck`、`pnpm test -- --maxWorkers=2`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build`。全部命令均已执行；全仓 lint 仍有 51 条既有测试/fixture 诊断和两个 Playwright 文件 project 配置诊断，Task 9 相关文件 scoped lint 通过，详见验收记录。
+- [x] Step 5：对无记忆真实烟测做本地契约回归：配置 disabled、模型输入前缀/工具 schema、请求预算、required evidence、token usage/trace 安全字段不变。只能说 scripted 基线通过；联网 DeepSeek/LangSmith 再验收需另行授权，不把本期离线测试说成真实模型通过。
+- [x] Step 6：写本地操作指南、资源/保留限制、数据备份与回退边界，更新实现状态为已实现/未验证的准确条目；记录测试数量、命令/退出码、环境与未验证项。运行 `git diff --check`，审查依赖方向和所有数据出口。阶段 A Task 9 离线验收及文档收口完成；独立复审与 scoped commit 记录见本任务交付记录。提交：`test(memory): verify isolated review recall and restart workflow`。
 
 ## 执行检查点与实施完成定义
 
@@ -525,4 +525,4 @@ expect(result.externalRequestsSent).toBe(0);
 | §10 独立矩阵、无付费联验、效果边界 | T9 |
 | §2 阶段 B 向量存储可用性与对照 | 独立向量实验计划 V1/V2/V3，不是本计划隐藏任务 |
 
-计划交付时尚未执行任何任务。实施时使用本工作树，逐任务小步提交；未经明确请求，不把既有未提交修改或新提交一并推送远端。
+计划初稿交付时尚未执行任务；当前阶段 A T1–T9 已按任务逐步实施。后续阶段需按各自已批准的 Spec/计划继续，不能据此宣称完整记忆系统或生产记忆能力已闭环。实施时使用本工作树，逐任务小步提交；未经明确请求，不把既有未提交修改或新提交一并推送远端。

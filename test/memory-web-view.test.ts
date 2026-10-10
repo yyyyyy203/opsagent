@@ -7,15 +7,18 @@ describe('memory web view', () => {
   it('passes the selected per-Run capture and recall preferences to Run creation', async () => {
     let started: Parameters<RunViewClient['startRun']>[0] | undefined;
     const client = {
-      listProfiles: async () => [], listRuns: async () => ({ items: [] }),
-      getRun: async () => null, getMessages: async () => ({ items: [] }), listEvidence: async () => ({ items: [] }),
-      getConfirmation: async () => null, startRun: async (input: Parameters<RunViewClient['startRun']>[0]) => {
+      listProfiles: () => Promise.resolve([]), listRuns: () => Promise.resolve({ items: [] }),
+      getRun: () => Promise.resolve({ runId: 'run', profileId: 'simulation', status: 'completed', stage: 'triage',
+        contextVersion: 0, createdAt: '2026-10-10T00:00:00.000Z', updatedAt: '2026-10-10T00:00:00.000Z',
+        evidenceIds: [], missingEvidence: [], childRunIds: [] }),
+      getMessages: () => Promise.resolve({ items: [] }), listEvidence: () => Promise.resolve({ items: [] }),
+      getConfirmation: () => Promise.resolve(null), startRun: (input: Parameters<RunViewClient['startRun']>[0]) => {
         started = input;
-        return { runId: input.runId, status: 'running', eventsUrl: `/runs/${input.runId}/events` };
+        return Promise.resolve({ runId: input.runId, status: 'running', eventsUrl: `/runs/${input.runId}/events` });
       },
-      resumeRun: async () => ({ runId: 'run', status: 'running', eventsUrl: '/events' }),
-      cancelRun: async () => ({ runId: 'run', status: 'cancelled' }),
-      decideConfirmation: async () => ({ outcome: 'approved', revision: 2 }),
+      resumeRun: () => Promise.resolve({ runId: 'run', status: 'running', eventsUrl: '/events' }),
+      cancelRun: () => Promise.resolve({ runId: 'run', status: 'cancelled' }),
+      decideConfirmation: () => Promise.resolve({ outcome: 'approved', revision: 2 }),
       openRunEvents: () => ({ close: () => undefined }),
     } satisfies RunViewClient;
     const controller = new RunViewController(client);

@@ -226,3 +226,9 @@ Node v20.20.0，pnpm 11.19.0。执行结果：pnpm lint、pnpm typecheck、pnpm 
 当前通用 createAgentRuntime 仍保留早期外部 Bash 选项和默认行为。最新批次已新增专用 createInspectionRuntime 排除 Bash、动作和外部执行；实际巡检宿主应使用该只读入口。
 
 项目无 Git 元数据，未创建 commit。没有修改 group-buy-market。
+
+## 2026-10-11：受控诊断记忆阶段 A 离线联合验收
+
+Stage A 的 Episodic 保存/去重、审核/撤销、同 scope 有界召回、暂停恢复时对冻结选择重新验证、前端操作、关闭基线、事务回滚和 stale Worker fencing 已完成离线联合验收；新增 `pnpm acceptance:memory` 入口及安全固定错误码。Node 24.19.0 环境下 13/13 acceptance checks 通过，模型/外部请求计数均为 0。全仓 Vitest 179 文件通过、3 个 opt-in 文件跳过；1,613 项通过、7 项跳过。根 typecheck/build、Web typecheck/build、memory E2E（10/10 运行项通过，另 1 个关闭基线单测独立 1/1 通过）及确定性 circuit E2E 1/1 通过。
+
+全仓 ESLint 仍有 51 条测试/fixture 诊断（主要 `require-await` 与 `unbound-method`，另有两个 Playwright 文件未纳入 ESLint project）；Task 9 相关文件 scoped lint 通过。验收记录与 Node ABI 错误定位见[阶段 A 验收记录](./verification/2026-10-10-diagnostic-memory-plan-review.md)。该阶段使用 ScriptedModel、临时 SQLite 与模拟数据，没有请求在线模型、LangSmith、Prometheus/ELK 或目标业务系统；不能据此宣称完整记忆系统或生产巡检已完成。Semantic/Procedural 完整知识库、向量实验及真实数据源效果仍未实现/验收。
