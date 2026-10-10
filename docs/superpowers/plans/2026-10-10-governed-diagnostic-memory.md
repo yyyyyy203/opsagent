@@ -8,7 +8,7 @@
 
 **Tech Stack:** 本分支 TypeScript、Node.js 24、pnpm 11.19.0、Zod 3、better-sqlite3/FTS5、Vitest、现有 React/Playwright；阶段 A 不增加 Embedding 或向量依赖。向量存储与对照验收见 [阶段 B 实施计划](./2026-10-10-memory-vector-feasibility.md)。
 
-**Spec:** [受控诊断记忆一期设计 R2](../specs/2026-10-10-governed-diagnostic-memory-design.md)。状态：阶段 A 计划待执行，复选框不表示已实现；R2 取代本计划初稿的开关与捕获范围。
+**Spec:** [受控诊断记忆一期设计 R2](../specs/2026-10-10-governed-diagnostic-memory-design.md)。状态：阶段 A 实施中；T1–T5 已实现并通过任务级复审，T6–T9 待执行；R2 取代本计划初稿的开关与捕获范围。
 
 ## Global Constraints
 
@@ -281,7 +281,7 @@ const eligibleForPromotion = command.decision === 'approved'
 failed/cancelled observation 的批准固定 MEMORY_APPROVAL_DENIED，不能靠 supported=true 或客户端 quality 改写绕过。approved 案例不自动变为 Semantic/Procedural。
 
 - [x] Step 4：同事务写 EXPERIENCE_REVIEWED / MEMORY_UPDATE_COMPLETED；通过事件 ID 冲突注入验证 case/review/outbox 整体回滚，审核事件只包含候选 ID、决策和 reviewer。验证撤销移除 FTS、SQLite 重开后仍为 rejected、模拟 approved promotion=false。T4/T2 定向测试及全仓回归通过。
-- [ ] Commit：`feat(memory): add evidence-gated review and revocation`（尚未提交；工作树含其他已有未提交改动，需单独界定提交范围）。
+- [x] Commit：已随 `902155d feat(memory): implement governed capture and review` 提交；工作树中其他已有改动未纳入。
 
 验证备注：本次 `tsc -p tsconfig.build.json --noEmit`、T4 新增测试严格定向类型检查、记忆相关源文件 ESLint 及全仓 Vitest 均通过。全仓 `tsc --noEmit` 与全仓 ESLint 仍失败于现有测试/Playwright/Vitest 类型解析诊断；未通过修改全仓配置掩盖。
 
@@ -297,7 +297,7 @@ failed/cancelled observation 的批准固定 MEMORY_APPROVAL_DENIED，不能靠 
 - Consumes: `MemoryQueryStore.search/revalidate`、T4 `MemoryEvidenceValidator`。
 - Produces: `tokenizeMemoryText(text: string): readonly string[]`；`buildMemoryMatchQuery(text: string): string | null`；`BoundedMemoryRecall implements MemoryRecallPort`，constructor `{ queries: MemoryQueryStore; evidence: MemoryEvidenceValidator; maxHints?: number; maxBytes?: number; maxTokens?: number }`。
 
-- [ ] Step 1：分词红测试如下；召回红测试建立 3 个 scope、observation/rejected/approved、不同 revision/target/dataset、时间与源 Run；只允许当前完整 scope 的 approved sufficient 命中。
+- [x] Step 1：分词红测试如下；召回红测试建立 3 个 scope、observation/rejected/approved、不同 revision/target/dataset、时间与源 Run；只允许当前完整 scope 的 approved sufficient 命中。
 
 ```ts
 import { expect, it } from 'vitest';
@@ -307,8 +307,8 @@ it('indexes adjacent Chinese characters rather than whitespace only', () => {
 });
 ```
 
-- [ ] Step 2：运行 `pnpm exec vitest run test/memory-tokenizer.test.ts test/memory-recall.test.ts --maxWorkers=2` 看红。
-- [ ] Step 3：使用 Unicode code point 数组取中文 bigram，英文 NFKC/lowercase 后筛合法 token；禁止把用户 OR/NEAR/引号作为 FTS 语法。MATCH 用绑定的 quoted tokens OR 连接。SQL 范围条件完整在 WHERE 中：
+- [x] Step 2：运行 T5 聚焦测试确认红；由于沙箱不能解析 pnpm 链接依赖，使用 Node 24 直接运行 Vitest CLI。
+- [x] Step 3：使用 Unicode code point 数组取中文 bigram，英文 NFKC/lowercase 后筛合法 token；禁止把用户 OR/NEAR/引号作为 FTS 语法。MATCH 用绑定的 quoted tokens OR 连接。SQL 范围条件完整在 WHERE 中：
 
 ```sql
 SELECT c.case_json, bm25(diagnostic_memory_case_fts) AS rank
@@ -325,8 +325,8 @@ LIMIT @limit;
 
 @excludedRunIds 为有界 JSON 参数，不拼 SQL；返回前 strict parse 和完整 scope 再核验。内存端用同样 tokenizer/BM25 词频公式和 tie-break，共享 fixture 验证；不把简单 substring 伪称 BM25。
 
-- [ ] Step 4：首次查询包含 runId 排除，保存 selections；后续只 revalidate selections，不重新 search。撤销、过期、digest/revision 改动、证据缺失删除 active hint；lookup 抛错返回 unavailable/空 hints，signal aborted 则传播。
-- [ ] Step 5：测试 budget/token cap、空 query、混合语言、UTF-8、安全 MATCH、当前 Run/holdout 库排除、上限、tie-break、无跨库假数据；运行 T5 + T2/T4 测试，提交：`feat(memory): add scoped Chinese lexical recall and bounded snapshots`。
+- [x] Step 4：首次查询包含 runId 排除，保存 selections；后续只 revalidate selections，不重新 search。撤销、过期、digest/revision 改动、证据缺失删除 active hint；lookup 抛错返回 unavailable/空 hints，signal aborted 则传播。另覆盖无 clock 的累计 deadline、依赖 TimeoutError 语义和无证据引用。
+- [x] Step 5：T5+T2/T4 定向测试 5 个文件、75 项通过；T5 scoped ESLint、typecheck 和 build 通过。提交 `474856b feat(memory): add scoped Chinese lexical recall and bounded snapshots`，任务级复审通过后修复提交 `0b17310 fix(memory): distinguish recall deadlines from dependency timeouts`。
 
 ## Task 6：Harness、Renderer 与重启复核
 
