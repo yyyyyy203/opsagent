@@ -22,9 +22,9 @@
 
 完整 V1 设计基线见 [巡检诊断 Agent V1 设计规格](./superpowers/specs/2026-09-06-inspection-agent-v1-design.md)。
 
-受控诊断记忆一期见 [Spec R2](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)、[逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md) 和[本地验收指南](./guides/diagnostic-memory-local.md)。阶段 A 已实现 Episodic 保存、人工审核/撤销、同范围有界召回、SQLite 持久化与暂停恢复重新校验；部署默认关闭，保存与召回可独立设置。离线联合验收使用模拟数据，不代表真实业务诊断效果。Working 状态复用 Checkpoint；Semantic/Procedural 完整知识库、向量检索实验、自动晋级和自动动作仍未实现。
+受控诊断记忆一期见 [Spec R2](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)、[逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md) 和[本地验收指南](./guides/diagnostic-memory-local.md)。阶段 A 已实现 Episodic 保存、人工审核/撤销、同范围有界召回、SQLite 持久化与暂停恢复重新校验；部署默认关闭，保存与召回可独立设置。离线联合验收使用模拟数据，不代表真实业务诊断效果。Working 状态复用 Checkpoint；Semantic/Procedural 完整知识库、V3 影子检索与对照评测、自动晋级和自动动作仍未实现。
 
-向量存储可用性独立按 [向量实验 Spec](./superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 与 [向量实验计划](./superpowers/plans/2026-10-10-memory-vector-feasibility.md) 推进。计划验证 SQLite 向量落库、隔离、重启、降级和 BM25/向量/混合对照，默认关闭且不影响案例保存；无真实 Embedding 包不能宣称真实语义检索通过。该实验当前也未实施，不修改生产召回默认。
+向量存储可用性独立按 [向量实验 Spec](./superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 与 [向量实验计划](./superpowers/plans/2026-10-10-memory-vector-feasibility.md) 推进。V1 本地 Embedding 包解析、V2 SQLite Float32 索引/隔离/重启机制已实现；V3 影子检索、BM25 降级和 BM25/向量/混合对照尚待实现。实验默认关闭且不影响案例保存；无真实 Embedding 包不能宣称真实语义检索通过，也不修改生产召回默认。
 
 下一持久化增量的已确认方案见 [Durable Run State & Evidence V1 设计](./superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)。该文档目前是设计决策，不代表代码已经实现。
 

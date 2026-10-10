@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript、Node.js 24、pnpm 11.19.0、Zod 3、better-sqlite3、Float32/DataView、Vitest；不增加 native extension、Embedding SDK 或模型下载。
 
-**Spec:** [向量记忆可用性实验设计](../specs/2026-10-10-memory-vector-feasibility-design.md)。状态：待执行；与 [阶段 A 基础计划](./2026-10-10-governed-diagnostic-memory.md) 分开验收。
+**Spec:** [向量记忆可用性实验设计](../specs/2026-10-10-memory-vector-feasibility-design.md)。状态：V1/V2 已在当前分支实现并纳入全量测试；V3 影子检索与对照验收待实施。与 [阶段 A 基础计划](./2026-10-10-governed-diagnostic-memory.md) 分开验收。
 
 ## Global Constraints
 
@@ -83,7 +83,7 @@ export function vectorEntry(overrides: Partial<MemoryVectorEntry> = {}): MemoryV
 - Produces: VectorExperimentError，位于 src/memory/vector/vector-error.ts，readonly code: VectorExperimentErrorCode，固定 message 映射，不拼入原始异常。
 - Produces: FileEmbeddingProvider implements EmbeddingProvider；static load(input: { path: string; expectedSpace: EmbeddingSpace; corpusDigest: string; querySetDigest: string; clock: Clock }): Promise<FileEmbeddingProvider>；embed 签名见 Spec，Clock 从既有 src/contracts/common.ts 导入。
 
-- [ ] Step 1：写空间/包 strict parser 与 provider 红测试：缺来源、非法维度、unknown字段、重复digest、错space、oversize、零向量、缺 query 向量、禁止外部调用。数学正规化示例：
+- [x] Step 1：写空间/包 strict parser 与 provider 红测试：缺来源、非法维度、unknown字段、重复digest、错space、oversize、零向量、缺 query 向量、禁止外部调用。数学正规化示例：
 
 ```ts
 import { expect, it } from 'vitest';
@@ -96,8 +96,8 @@ it('normalizes valid float32 vectors and rejects zero vectors', () => {
 });
 ```
 
-- [ ] Step 2：运行 pnpm exec vitest run test/memory-vector-contract.test.ts test/file-embedding-provider.test.ts --maxWorkers=2，确认新增行为断言为红，不把环境错误算红。
-- [ ] Step 3：文本固定 NFKC、CRLF→LF、trim，不小写、不删除中文；UTF-8 SHA-256 作为 exact textDigest。spaceKey 对全部空间字段固定序列 canonical JSON。实现 pack 大小预检、strict parse、digest唯一、expected space/corpus/querySet 全匹配；embed 只按 digest 返回向量副本，缺失抛 VECTOR_EMBEDDING_MISSING。
+- [x] Step 2：运行 pnpm exec vitest run test/memory-vector-contract.test.ts test/file-embedding-provider.test.ts --maxWorkers=2，确认新增行为断言为红，不把环境错误算红。
+- [x] Step 3：文本固定 NFKC、CRLF→LF、trim，不小写、不删除中文；UTF-8 SHA-256 作为 exact textDigest。spaceKey 对全部空间字段固定序列 canonical JSON。实现 pack 大小预检、strict parse、digest唯一、expected space/corpus/querySet 全匹配；embed 只按 digest 返回向量副本，缺失抛 VECTOR_EMBEDDING_MISSING。
 
 ```ts
 const bytes = new TextEncoder().encode(normalizeMemoryEmbeddingText(text));
@@ -110,7 +110,7 @@ if (!Number.isFinite(magnitude) || magnitude === 0) {
 
 createHash 从 node:crypto 导入；纯 digest 是确定性工具，不含文件访问。VectorExperimentError 从本任务声明的 vector-error.ts 导入；message 无包内容或路径。维度/finite 检查必须在 magnitude 前；正规化后再 finite 校验。provider 文件系统仅存在于 infrastructure。
 
-- [ ] Step 4：跑上述测试与 pnpm typecheck；测试真实包标记/生成信息不代表来源已验证，synthetic 不得计入 semantic pass。只提交本任务文件，消息 feat(memory): add versioned local embedding experiment ports。
+- [x] Step 4：跑上述测试与 pnpm typecheck；测试真实包标记/生成信息不代表来源已验证，synthetic 不得计入 semantic pass。提交为 `f8dde4c feat(memory): add versioned local embedding experiment ports`。
 
 ## Task V2：SQLite Float32 索引与隔离/重启
 
@@ -124,7 +124,7 @@ createHash 从 node:crypto 导入；纯 digest 是确定性工具，不含文件
 - Consumes: V1 spaceKey/vector解析、VectorIndex。
 - Produces: MemoryVectorDatabase.open(path: string): MemoryVectorDatabase，含 raw/close，仅 infrastructure 使用；SqliteVectorIndex implements VectorIndex，constructor { database: MemoryVectorDatabase; clock: Clock }。index.close 停止接受调用，数据库由 bootstrap 的唯一 owner 关闭。
 
-- [ ] Step 1：红测试在独立临时库插入 scope A/B、同scope不同space、不同revision/digest；A 的 eligible 仅一个ID，B的相似度更高也不能抢占 Top-K：
+- [x] Step 1：红测试在独立临时库插入 scope A/B、同scope不同space、不同revision/digest；A 的 eligible 仅一个ID，B的相似度更高也不能抢占 Top-K：
 
 ```ts
 await index.upsert([vectorEntry(), vectorEntry({
@@ -141,8 +141,8 @@ expect(hits.map((hit) => hit.memoryId)).toEqual(['memory-1']);
 
 同文件还测去重upsert、wrong dimension、坏BLOB、事务回滚、容量边界、同分保序、删除隔离与关闭重开。index/database/fixtures 均由本任务声明的构造器与 V1 fixture 建立。
 
-- [ ] Step 2：运行 pnpm exec vitest run test/memory-vector-index.test.ts --maxWorkers=2 看红。
-- [ ] Step 3：实现 Spec §4 两表，WAL/schema=1；DataView.setFloat32(offset, value, true) 编码，读取按相同 endianness，校验 bytes/dimensions/hash。参数化 SQL 的 scope/space/kind + eligible ID/revision/digest 条件在取BLOB前；LIMIT 不能先对全库或未排序候选截断。
+- [x] Step 2：运行 pnpm exec vitest run test/memory-vector-index.test.ts --maxWorkers=2 看红。
+- [x] Step 3：实现 Spec §4 两表，WAL/schema=1；DataView.setFloat32(offset, value, true) 编码，读取按相同 endianness，校验 bytes/dimensions/hash。参数化 SQL 的 scope/space/kind + eligible ID/revision/digest 条件在取BLOB前；LIMIT 不能先对全库或未排序候选截断。
 
 ```sql
 SELECT v.memory_id, v.revision, v.digest, v.dimensions, v.vector_blob, v.vector_sha256
@@ -156,7 +156,7 @@ WHERE v.scope_key = @scopeKey AND v.space_key = @spaceKey AND v.kind = 'episodic
 
 eligible 限1000且去重，绑定 JSON，不拼接 SQL。先验证候选总字节/条数，再计算余弦；score 降序、同分memoryId升序，保留数组顺序。upsert单批校验后同事务，降低revision/同revision不同digest拒绝；损坏/超预算固定错误，不能绕过 scope 或静默返回看似完整的结果。
 
-- [ ] Step 4：增加预先 aborted signal、循环 deadline、未知schema、重建新space失败不污染旧space和重开恢复的测试。运行 V1/V2 与 typecheck，消息 feat(memory): add bounded scoped sqlite vector experiment index。
+- [x] Step 4：增加预先 aborted signal、循环 deadline、未知schema、重建新space失败不污染旧space和重开恢复的测试。V1/V2 测试已随当前分支全量 Vitest 通过；V2 与阶段 A Store 同批提交，提交包含 `902155d feat(memory): implement governed capture and review`。
 
 ## Task V3：影子检索、RRF、离线对照与操作指南
 
@@ -215,4 +215,4 @@ setup 注入 queries/corpus/evidence 的已批准同scope fixture 与拒绝HTTP�
 
 完成必须有实际向量写入/重开/查询/删除/故障测试，不仅有接口。没有真实包可以交付机制验证，但真实Embedding质量项保持未验证；不得掩盖这个差别。生产在线接入、实时Embedding Provider和Semantic/Procedural的完整库仍不在本计划中；不因实验通过自动修改基础配置。
 
-计划尚未执行；先由用户审核修订后的 Spec/计划，再按依赖任务实施。当前不生成向量包、不下载模型、不联网调用或推送。
+V1/V2 已实现并验证存储、范围、空间版本和重启机制；V3 尚未实现，包含影子检索、RRF、BM25 降级、离线对照评测与验收 CLI。当前不生成向量包、不下载模型、不联网调用或推送；缺少真实 Embedding 包时，真实语义质量仍明确保持未验证。
