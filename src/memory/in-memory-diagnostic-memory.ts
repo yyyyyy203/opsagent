@@ -1,7 +1,10 @@
 import type { Clock } from '../contracts/common.js';
+import type { DiagnosticMemoryCase, MemorySearch } from '../contracts/diagnostic-memory.js';
 import type { InMemoryDiagnosticTransaction, InMemoryDiagnosticRecords } from './diagnostic-memory-state.js';
 import { cloneInMemoryDiagnosticRecords, createInMemoryDiagnosticRecords,
   createInMemoryDiagnosticRepository, DiagnosticMemoryStoreCore } from './diagnostic-memory-state.js';
+import { indexedMemoryWords, isRecallableMemory, memoryBm25, prepareMemorySearch } from './lexical-search.js';
+import { MemoryError } from './memory-error.js';
 
 /** Test/runtime adapter with copy-on-write transactions matching the SQLite store. */
 export class InMemoryDiagnosticMemoryStore extends DiagnosticMemoryStoreCore {
@@ -13,6 +16,31 @@ export class InMemoryDiagnosticMemoryStore extends DiagnosticMemoryStoreCore {
       checkpointRecords: new Map(), executionRecords: new Map(), outboxRecords: new Map(),
       memory: createInMemoryDiagnosticRecords(),
     };
+  }
+
+  public override search(input: MemorySearch): Promise<readonly DiagnosticMemoryCase[]> {
+    return this.read(repo => {
+      const query = prepareMemorySearch(input);
+      if (query.tokens.length === 0) return [];
+      // Use the same approved FTS corpus statistics as SQLite, including other scopes.
+      // Eligibility is still applied before sorting and Top-K; no statistics escape.
+      const indexes = [...this.transaction.memory.indexes];
+      const scores = memoryBm25(indexes.map(([, text]) => indexedMemoryWords(text)), query.tokens);
+      const candidates = indexes.flatMap(([id], i) => {
+        const entry = this.transaction.memory.cases.get(id);
+        if (entry === undefined) throw new MemoryError('MEMORY_DATA_INVALID');
+        if (!isRecallableMemory(entry.value, query.scopeKey, query.now, query.excluded) || scores[i] == null) return [];
+        const value = repo.getCase(id, query.scopeKey);
+        if (value === null) throw new MemoryError('MEMORY_DATA_INVALID');
+        const rank = scores[i];
+        if (rank === undefined || rank === null) return [];
+        return [{ value, rank }];
+      });
+      return candidates.sort((a, b) => a.rank - b.rank
+        || Date.parse(b.value.capturedAt) - Date.parse(a.value.capturedAt)
+        || Buffer.compare(Buffer.from(a.value.id), Buffer.from(b.value.id)))
+        .slice(0, query.limit).map(c => structuredClone(c.value));
+    });
   }
 
   protected read<T>(operation: (repo: ReturnType<typeof createInMemoryDiagnosticRepository>) => T): Promise<T> {

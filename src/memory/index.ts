@@ -6,3 +6,5 @@ export * from './case-builder.js';
 export * from './capture-service.js';
 export * from './capture-worker.js';
 export * from './review-service.js';
+export * from './chinese-tokenizer.js';
+export * from './bounded-recall.js';

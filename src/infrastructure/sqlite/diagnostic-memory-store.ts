@@ -1,5 +1,5 @@
 import type { Clock } from '../../contracts/common.js';
-import type { DiagnosticMemoryCase, MemoryStatus } from '../../contracts/diagnostic-memory.js';
+import type { DiagnosticMemoryCase, MemorySearch, MemoryStatus } from '../../contracts/diagnostic-memory.js';
 import { parseAgentContext } from '../../storage/durable-codec.js';
 import { parseAgentEventV2 } from '../../contracts/event-v2/schema.js';
 import type { PendingAgentEventV2 } from '../../contracts/event-store.js';
@@ -13,6 +13,8 @@ import {
   parseMemorySignal, parseMemoryTicket,
 } from '../../memory/diagnostic-memory-state.js';
 import { MemoryError } from '../../memory/memory-error.js';
+import { isRecallableMemory, prepareMemorySearch } from '../../memory/lexical-search.js';
+import { buildMemoryMatchQuery } from '../../memory/chinese-tokenizer.js';
 import type { SqliteDatabase } from './database.js';
 import { enqueueOutboxEvents } from './event-outbox-store.js';
 
@@ -39,6 +41,34 @@ interface ReviewRow {
 /** SQLite implementation of the governed case, review, job, and signal repository. */
 export class SqliteDiagnosticMemoryStore extends DiagnosticMemoryStoreCore {
   public constructor(private readonly database: SqliteDatabase, input: { clock: Clock }) { super(input.clock); }
+
+  public override search(input: MemorySearch): Promise<readonly DiagnosticMemoryCase[]> {
+    return this.read(repo => {
+      const query = prepareMemorySearch(input);
+      const match = buildMemoryMatchQuery(input.text);
+      if (match === null) return [];
+      const rows = this.database.raw.prepare(`
+        SELECT c.id, bm25(diagnostic_memory_case_fts) AS rank
+        FROM diagnostic_memory_case_fts
+        JOIN diagnostic_memory_cases c ON c.id = diagnostic_memory_case_fts.memory_id
+        WHERE diagnostic_memory_case_fts MATCH @match
+          AND c.scope_key = @scopeKey
+          AND c.status = 'approved' AND c.quality = 'sufficient' AND c.source_run_status = 'completed'
+          AND c.valid_until > @now
+          AND c.source_run_id NOT IN (SELECT value FROM json_each(@excludedRunIds))
+        ORDER BY rank ASC, c.captured_at DESC, c.id COLLATE BINARY ASC
+        LIMIT @limit`).all({ match, scopeKey: query.scopeKey, now: query.now,
+          excludedRunIds: JSON.stringify([...query.excluded]), limit: query.limit }) as { id: string; rank: number }[];
+      return rows.map(row => {
+        // Repository reads strictly parse/checksum the JSON and verify the persisted index.
+        const value = repo.getCase(row.id, query.scopeKey);
+        if (value === null || !isRecallableMemory(value, query.scopeKey, query.now, query.excluded)) {
+          throw new MemoryError('MEMORY_DATA_INVALID');
+        }
+        return value;
+      });
+    });
+  }
 
   protected read<T>(operation: (repo: DiagnosticMemoryRepository) => T): Promise<T> {
     return Promise.resolve().then(() => operation(createSqliteDiagnosticMemoryRepository(this.database)));
