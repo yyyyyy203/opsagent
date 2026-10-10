@@ -41,16 +41,17 @@ export class BoundedMemoryRecall implements MemoryRecallPort {
       ...(previous.selectedAt === undefined ? selected ? { selectedAt: now } : {} : { selectedAt: previous.selectedAt }),
       validatedAt: now, ...(reasonCode === undefined ? {} : { reasonCode }),
     });
-    if (byteBudget <= 0 || expired(operation)) return result([], 'empty');
+    const deadline = createRecallDeadline(operation);
     try {
+      if (byteBudget <= 0 || deadline.isExpired()) return result([], 'empty');
       let candidates: readonly DiagnosticMemoryCase[];
       if (!selected) {
         // Even a failed first query is frozen: later rounds cannot retry a full search.
         selected = true;
-        candidates = await withinOperation(() => this.options.queries.search({ scope: previous.scope, text: input.text,
-          excludeRunIds: [input.runId], limit: 5, now }), operation);
+        candidates = await deadline.run(() => this.options.queries.search({ scope: previous.scope, text: input.text,
+          excludeRunIds: [input.runId], limit: 5, now }));
       } else {
-        candidates = await withinOperation(() => this.options.queries.revalidate({ scope: previous.scope, selections, now }), operation);
+        candidates = await deadline.run(() => this.options.queries.revalidate({ scope: previous.scope, selections, now }));
       }
       if (candidates.length > 10) throw new MemoryError('MEMORY_DATA_INVALID');
       const scopeKey = memoryScopeKey(previous.scope);
@@ -77,20 +78,22 @@ export class BoundedMemoryRecall implements MemoryRecallPort {
       const hints: MemoryHint[] = [];
       for (const value of candidates) {
         if (value.evidenceRefs.length === 0) continue;
-        const valid = await withinOperation(() => this.options.evidence.validate({ sourceRunId: value.sourceRunId,
-          refs: value.evidenceRefs, scope: previous.scope }, operation), operation);
+        const valid = await deadline.run(() => this.options.evidence.validate({ sourceRunId: value.sourceRunId,
+          refs: value.evidenceRefs, scope: previous.scope }, deadline.operation));
         if (!valid) continue;
         const hint = hintOf(value);
         // UTF-8 bytes conservatively upper-bound tokens without a model tokenizer.
         if (hints.length < this.maxHints && Buffer.byteLength(JSON.stringify([...hints, hint]), 'utf8') <= byteBudget) hints.push(hint);
       }
-      if (expired(operation)) return result([], 'empty');
+      if (deadline.isExpired()) return result([], 'empty');
       return parseRunMemoryState(result(hints, hints.length > 0 ? 'ready' : 'empty'));
     } catch (error) {
       operation.signal?.throwIfAborted();
       if (error instanceof Error && error.name === 'AbortError') throw error;
-      if (expired(operation) || (error instanceof Error && error.name === 'TimeoutError')) return result([], 'empty');
+      if (error instanceof RecallDeadlineExpired) return result([], 'empty');
       return result([], 'unavailable', 'MEMORY_LOOKUP_FAILED');
+    } finally {
+      deadline.dispose();
     }
   }
 }
@@ -103,37 +106,70 @@ function hintOf(value: DiagnosticMemoryCase): MemoryHint {
     validUntil: value.validUntil, summary: value.summary, limitations: value.limitations,
     evidenceRefs: value.evidenceRefs, diagnosisOnly: true };
 }
-function remainingTime(operation: MemoryOperation): number {
-  const time = operation.clock?.now().getTime() ?? Date.parse(operation.now);
-  return Number.isFinite(time) && Number.isFinite(operation.deadlineMs) ? operation.deadlineMs - time : 0;
-}
-function expired(operation: MemoryOperation): boolean { return remainingTime(operation) <= 0; }
-
-/** Bound dependencies that ignore cancellation; losing promises remain handled. */
-async function withinOperation<T>(call: () => Promise<T>, operation: MemoryOperation): Promise<T> {
-  operation.signal?.throwIfAborted();
-  const remaining = remainingTime(operation);
-  if (remaining <= 0) throw new DOMException('Memory deadline exceeded.', 'TimeoutError');
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  const cancelled = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => reject(new DOMException('Memory deadline exceeded.', 'TimeoutError')), Math.min(remaining, 2_147_483_647));
-    if (operation.signal !== undefined) {
-      onAbort = () => reject(new DOMException('Memory operation aborted.', 'AbortError'));
-      operation.signal.addEventListener('abort', onAbort, { once: true });
-    }
-  });
-  try {
-    const value = await Promise.race([Promise.resolve().then(() => {
-      // Abort may happen after prepare() returns but before this microtask runs.
-      operation.signal?.throwIfAborted();
-      return call();
-    }), cancelled]);
-    operation.signal?.throwIfAborted();
-    if (expired(operation)) throw new DOMException('Memory deadline exceeded.', 'TimeoutError');
-    return value;
-  } finally {
-    clearTimeout(timeout);
-    if (onAbort !== undefined) operation.signal?.removeEventListener('abort', onAbort);
+/** Private sentinel: dependency TimeoutError values must remain ordinary failures. */
+class RecallDeadlineExpired extends Error {
+  public constructor() {
+    super('Memory recall deadline exceeded.');
+    this.name = 'RecallDeadlineExpired';
   }
+}
+
+interface RecallDeadline {
+  operation: MemoryOperation;
+  run<T>(call: () => Promise<T>): Promise<T>;
+  isExpired(): boolean;
+  dispose(): void;
+}
+
+/** One timer and cancellation signal cover search plus every evidence check. */
+function createRecallDeadline(operation: MemoryOperation): RecallDeadline {
+  const startMs = operation.clock?.now().getTime() ?? Date.parse(operation.now);
+  const remainingMs = Number.isFinite(startMs) && Number.isFinite(operation.deadlineMs)
+    ? operation.deadlineMs - startMs : 0;
+  const controller = new AbortController();
+  const deadlineError = new RecallDeadlineExpired();
+  let deadlineExpired = remainingMs <= 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  let rejectInterruption: ((reason: Error) => void) | undefined;
+  const interruption = new Promise<never>((_, reject) => { rejectInterruption = reject; });
+  if (operation.signal !== undefined) {
+    onAbort = () => {
+      controller.abort(operation.signal?.reason);
+      rejectInterruption?.(new DOMException('Memory operation aborted.', 'AbortError'));
+    };
+    operation.signal.addEventListener('abort', onAbort, { once: true });
+    if (operation.signal.aborted) onAbort();
+  }
+  if (!deadlineExpired) {
+    timer = setTimeout(() => {
+      deadlineExpired = true;
+      controller.abort(deadlineError);
+      rejectInterruption?.(deadlineError);
+    }, Math.min(remainingMs, 2_147_483_647));
+  }
+  const isExpired = (): boolean => deadlineExpired || (operation.clock !== undefined
+    && operation.clock.now().getTime() >= operation.deadlineMs);
+  const sharedOperation: MemoryOperation = { ...operation, signal: controller.signal };
+  return {
+    operation: sharedOperation,
+    isExpired,
+    dispose: () => {
+      clearTimeout(timer);
+      if (onAbort !== undefined) operation.signal?.removeEventListener('abort', onAbort);
+    },
+    run: async <T>(call: () => Promise<T>): Promise<T> => {
+      operation.signal?.throwIfAborted();
+      if (isExpired()) throw deadlineError;
+      const pending = Promise.resolve().then(() => {
+        operation.signal?.throwIfAborted();
+        if (isExpired()) throw deadlineError;
+        return call();
+      });
+      const value = await Promise.race([pending, interruption]);
+      operation.signal?.throwIfAborted();
+      if (isExpired()) throw deadlineError;
+      return value;
+    },
+  };
 }

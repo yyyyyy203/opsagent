@@ -172,6 +172,20 @@ describe('bounded recall snapshots', () => {
     await recall.prepare({ runId: 'current', text: 'timeout', state: first }, operation);
     expect(search).toHaveBeenCalledTimes(1);
   });
+  it('returns unavailable when the search dependency throws TimeoutError within the budget', async () => {
+    const h = setup();
+    vi.spyOn(h.store, 'search').mockRejectedValue(new DOMException('dependency timeout', 'TimeoutError'));
+    const result = await new BoundedMemoryRecall({ queries: h.store, evidence }).prepare(
+      { runId: 'current', text: 'timeout', state: state() }, operation);
+    expect(result).toMatchObject({ availability: 'unavailable', reasonCode: 'MEMORY_LOOKUP_FAILED', hints: [] });
+  });
+  it('returns unavailable when the evidence dependency throws TimeoutError within the budget', async () => {
+    const h = setup();
+    const result = await new BoundedMemoryRecall({ queries: h.store, evidence: {
+      validate: () => Promise.reject(new DOMException('dependency timeout', 'TimeoutError')),
+    } }).prepare({ runId: 'current', text: 'timeout', state: state() }, operation);
+    expect(result).toMatchObject({ availability: 'unavailable', reasonCode: 'MEMORY_LOOKUP_FAILED', hints: [] });
+  });
   it('keeps selections on revalidation failure and can recover the same revision', async () => {
     const h = setup();
     const recall = new BoundedMemoryRecall({ queries: h.store, evidence });
@@ -256,6 +270,25 @@ describe('bounded recall snapshots', () => {
     vi.spyOn(h.store, 'search').mockImplementation(() => new Promise(() => {}));
     const result = await new BoundedMemoryRecall({ queries: h.store, evidence }).prepare(
       { runId: 'current', text: 'timeout', state: state() }, { ...operation, deadlineMs: Date.parse(memoryNow) + 10 });
+    expect(result).toMatchObject({ selectionState: 'selected', availability: 'empty', hints: [] });
+  });
+  it('shares one deadline across sequential dependencies when no clock is injected', async () => {
+    const h = setup([candidate('first'), candidate('second')]);
+    const realSearch = h.store.search.bind(h.store);
+    vi.spyOn(h.store, 'search').mockImplementation(async input => {
+      await new Promise(resolve => setTimeout(resolve, 40));
+      return realSearch(input);
+    });
+    const validate = vi.fn(async () => {
+      await new Promise(resolve => setTimeout(resolve, 40));
+      return true;
+    });
+    const { clock: _clock, ...withoutClock } = operation;
+    void _clock;
+    const result = await new BoundedMemoryRecall({ queries: h.store, evidence: { validate } }).prepare(
+      { runId: 'current', text: 'timeout', state: state() },
+      { ...withoutClock, deadlineMs: Date.parse(memoryNow) + 100 });
+    expect(validate).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ selectionState: 'selected', availability: 'empty', hints: [] });
   });
   it('does not launch a query when cancelled before its async invocation', async () => {
