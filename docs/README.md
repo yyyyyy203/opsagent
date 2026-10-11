@@ -22,6 +22,8 @@
 
 完整 V1 设计基线见 [巡检诊断 Agent V1 设计规格](./superpowers/specs/2026-09-06-inspection-agent-v1-design.md)。
 
+多项目适配的待审核草案见 [多项目巡检适配设计 Spec](./superpowers/specs/2026-10-11-multi-project-adaptation-design.md)。建议采用可信 Target 绑定、场景包与数据源映射、单宿主持久化所有者和严格归属校验；第一轮仅验证两个模拟项目。该草案不代表多项目运行、完整知识库或多人权限已经实现，也不改变既有 simulation 验收入口。
+
 受控诊断记忆一期见 [Spec R2](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)、[逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md) 和[本地验收指南](./guides/diagnostic-memory-local.md)。阶段 A 已实现 Episodic 保存、人工审核/撤销、同范围有界召回、SQLite 持久化与暂停恢复重新校验；部署默认关闭，保存与召回可独立设置。离线联合验收使用模拟数据，不代表真实业务诊断效果。Working 状态复用 Checkpoint；Semantic/Procedural 完整知识库、V3 影子检索与对照评测、自动晋级和自动动作仍未实现。
 
 向量存储可用性独立按 [向量实验 Spec](./superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 与 [向量实验计划](./superpowers/plans/2026-10-10-memory-vector-feasibility.md) 推进。V1 本地 Embedding 包解析、V2 SQLite Float32 索引/隔离/重启机制已实现；V3 影子检索、BM25 降级和 BM25/向量/混合对照尚待实现。实验默认关闭且不影响案例保存；无真实 Embedding 包不能宣称真实语义检索通过，也不修改生产召回默认。
