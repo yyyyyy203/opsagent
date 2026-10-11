@@ -107,7 +107,7 @@ targetFingerprint 必须唯一对应项目、部署世代和实际数据域；�
 
 无效配置只使对应 Target 不可启动，其他已验证 Target 可用。认证密钥值不在配置目录预览中显示；连接测试保持惰性，不因一个数据源暂时掉线而使所有项目无法启动。
 
-重名 ID 的所有冲突项必须隔离，不采用“最后一项覆盖前一项”；目录整体无法解析时不发布半份未校验目录。第一版推荐注册 Target 上限 20，配置文件和引用数量有独立上限；数值可经宿主配置调整，但不能由模型请求增加。
+重名 ID 的所有冲突项必须隔离，不采用“最后一项覆盖前一项”；目录整体无法解析时不发布半份未校验目录。第一版 `maxRegisteredTargets` 推荐默认值为 200，作为宿主部署配置中的有界资源上限；它与活跃父 Run 数和每 Target 并发上限相互独立，不能由模型或浏览器请求增加。若实际注册规模超过 200，先在目标规模基准测试后再调整上限；配置文件大小、引用数和目录 DTO 仍须独立设限。多目标记忆配置必须按 Target 派生或采用等价隔离方式，不能被现有 memory-policy 对 profile 数量的解析上限悄然截断；M1/M4 和验收需证明至少 200 个 Target 均可注册、解析并保持正确记忆范围。第一版是单一可信操作者模式，不以未定义的用户身份增加每用户 Target 配额。
 
 ## 5. 新项目接入到底改什么
 
@@ -139,7 +139,7 @@ targetFingerprint 必须唯一对应项目、部署世代和实际数据域；�
 - 模型可读的背景说明、诊断限制与 Runbook 引用。
 - 模拟样本、异常/缺失/边界样本以及独立验收断言。
 
-场景包是仓库内经审核的 TypeScript 实现，通过小接口注册；不是从 JSON 动态执行代码。新增后要同步公共投影与前端安全摘要 Schema，不能把任意事实 JSON 直接透传出去。
+场景包是仓库内经审核的 TypeScript 实现，通过小接口注册；不是从 JSON 动态执行代码。每个包有显式版本和内容 digest，解析后的绑定快照固定记录其版本/digest；新增后要同步公共投影与前端安全摘要 Schema，不能把任意事实 JSON 直接透传出去。场景包不自动升级，包括 patch 版本，因为版本变化可能改变分析结果并破坏 Run 可复现性。发现不安全版本时可撤销该版本，阻止新的来源/模型操作；历史结果仍可只读查看。受影响的暂停 Run 必须通过单独、可审计的兼容性迁移或在修复版本上新建 Run 处理，禁止静默改变旧 Run 的事实语义。
 
 现有 SettlementMetricsProfile/Fact 保留，不扩大其中 simulation/checkout 的字面量来假装通用化。新增场景包及适配器独立实现，旧实验可用兼容映射或继续走原入口。
 
@@ -227,7 +227,7 @@ SQLite、Outbox dispatcher、V2 Publisher/Projectors 和回放管理由宿主唯
 
 同时重新检查当前限制：目标是否禁用、来源权限是否撤销、部署/数据集世代是否改变、知识是否撤销、HITL 是否过期。旧快照只保证可复现，不授予永久权限。收紧立即生效，放宽不会自动扩大旧 Run 的权限。
 
-原场景包或绑定版本不存在时拒绝执行并返回固定错误码，提供只读历史结果；不能隐式迁移到新版本。普通密钥轮换可重新解析同一权限/数据范围的 secretRef；如果访问的是另一数据域，必须改变来源/部署世代并阻止旧 Run 再取证。
+原场景包或绑定版本不存在、已被撤销或无法校验 digest 时，拒绝继续执行并返回固定错误码，提供只读历史结果；不能隐式迁移到新版本。需要变更版本时只能走显式、审计过的兼容性迁移或新建 Run。普通密钥轮换可重新解析同一权限/数据范围的 secretRef；如果访问的是另一数据域，必须改变来源/部署世代并阻止旧 Run 再取证。
 
 ## 8. 隔离不仅是记忆隔离
 
@@ -246,6 +246,8 @@ SQLite、Outbox dispatcher、V2 Publisher/Projectors 和回放管理由宿主唯
 来源状态不按全局字符串 prometheus 或 elk 存。宿主 SourcePartitionRegistry 的分区键至少包含 projectId、deploymentId/generation、sourceBindingId 和 sourceGeneration。
 
 同部署、同权限/数据域的多个场景共享同一来源分区的客户端、熔断器和并发配额，避免通过切换场景绕过熔断；不同项目/部署/数据域不得共用分区，即使连接到了同一个 Prometheus/MCP 服务。
+
+第一版不增加跨来源分区共享 HTTP 连接池的配置。连接复用只有在性能剖析证明有必要后才另行评审；即使底层传输可复用连接，熔断器、限流、凭据身份、租约和数据域仍必须按 SourcePartition 隔离。复用前需证明 origin、TLS/代理/mTLS 和安全身份兼容，不能以共享连接池合并故障或授权边界。
 
 保留当前默认“3 次逻辑操作失败 → 熔断 30 秒 → 一个半开探测”的语义，不按每个 retry attempt 重复计失败。取消不计来源故障，旧 epoch 的成功不能关闭新熔断。换 Run、切页面或释放 Toolkit 租约不重置共享熔断器。
 
@@ -294,7 +296,7 @@ Target Resolver 生成 trustedMemoryControl，浏览器只提交现有 capture/r
 
 所有访问 Run 的入口都要经过归属判断，包括列表、详情、证据、消息、SSE、用量、取消、恢复、确认以及记忆查看/审核。不得只校验创建 Run。不存在与不属于该 Target 的资源返回统一安全结果，避免利用错误详情探测另一目标。
 
-旧 `/profiles`、`/runs` 等入口保留 legacy simulation 兼容行为；不能成为访问任意新 Target 的无作用域后门。legacy 路由携带新的 Run ID 时也必须拒绝跨范围访问。
+旧 `/profiles`、`/runs` 等入口保留 legacy simulation 兼容行为；不能成为访问任意新 Target 的无作用域后门。legacy 路由携带新的 Run ID 时也必须拒绝跨范围访问。新 Run 一律使用 Target 绑定入口；旧 Run 默认只读，不能按当前 profile 名称或 `profileId` 推断绑定。只有旧记录中存在可核验的来源、部署/数据集世代等不可变元数据时，才可列为显式恢复候选。Legacy 的退役应先盘点调用量、备份/保留策略和验收覆盖，再由独立评审决定只读、归档或删除路由；本 Spec 不设未经使用数据支持的固定六个月截止日期，也不允许批量静默补造绑定。
 
 前端提供“项目 → 环境/部署 → 场景”选择，报告始终展示所查目标与绑定规则版本。证据页继续只显示摘要、引用、覆盖率和缺失项；不是重新开放原始 ELK 数据。
 
@@ -312,13 +314,13 @@ LangSmith/审计中的父子 Trace 关联与模型用量继续按 Run 收集；�
 
 历史迁移：
 
-- 原有 simulation Run 可通过已确认的 legacy 映射获得目标标签，不重写历史证据。
+- 原有 simulation Run 可继续通过 legacy 路由查看历史标签；只有宿主持有并核实旧运行实际来源/数据集元信息时，才可为其标注只读 Target 标签，不重写历史证据、不补造证据，也不能仅凭 `profileId` 推断绑定。
 - 其他旧 Run 仅标为 legacy/unbound，不能根据当下同名 profileId 猜部署、记忆范围或新目标归属。
 - 新 Target Run 缺少绑定/快照时 fail closed，不自动回退 legacy。
 - 最初提交事务失败不允许执行模型/来源请求；Outbox 投影暂时失败不改变已经持久化的归属事实。
 - 原有只读、Dry Run、HITL、工具四道闸门、压缩完整性与动作幂等不因多项目而放宽。
 
-建议固定原因码：TARGET_NOT_FOUND、TARGET_DISABLED、TARGET_BINDING_INVALID、TARGET_SCOPE_MISMATCH、TARGET_SNAPSHOT_UNAVAILABLE、TARGET_GENERATION_CHANGED、SCENARIO_VERSION_UNSUPPORTED、SOURCE_MAPPING_INVALID。按现有 AgentError 的分类承载并只投影经白名单审核的原因码；不能把连接报错或配置原文当公共错误详情。
+建议固定原因码：TARGET_NOT_FOUND、TARGET_DISABLED、TARGET_BINDING_INVALID、TARGET_SCOPE_MISMATCH、TARGET_SNAPSHOT_UNAVAILABLE、TARGET_GENERATION_CHANGED、SCENARIO_VERSION_UNSUPPORTED、SCENARIO_VERSION_REVOKED、SCENARIO_MIGRATION_REQUIRED、SOURCE_MAPPING_INVALID。按现有 AgentError 的分类承载并只投影经白名单审核的原因码；不能把连接报错或配置原文当公共错误详情。
 
 一般来源失败复用现有超时/重试/熔断标准结果，产出 partial/unavailable 与 missingEvidence；语义/归属校验失败不可重试为另一个目标。不存在来源与运行中不可用是不同状态。
 
@@ -327,12 +329,13 @@ LangSmith/审计中的父子 Trace 关联与模型用量继续按 Run 收集；�
 | 增量 | 交付 | 必须依赖 |
 | --- | --- | --- |
 | M1 身份与配置 | 严格目录、TargetResolver、场景/来源绑定校验、安全目录 DTO、两项目静态样本 | 本 Spec 审核；不调用模型 |
-| M2 归属与恢复 | 完整持久化注入、快照和 Run 归属的原子写入、scope 门面、旧 Run 兼容、重启恢复 | M1；先确认 codec/事务迁移测试 |
-| M3 场景适配 | window_failure_rate.v1、确定性分析、受控 Prometheus 映射、来源分区/租约、子 Run 继承 | M1+M2；保留旧 settlement 实验 |
-| M4 Web 与知识接线 | 目标选择、所有读写入口范围校验、有限知识快照、独立记忆策略和熔断展示 | M2+M3；不新建完整知识库 |
-| M5 联合验收 | 两项目并发/故障/恢复/隔离测试、浏览器验收及 legacy 回归 | M1–M4 |
+| M2a 新 Run 归属与恢复 | 完整持久化注入、新快照和 Run 归属的原子写入、scope 门面、新 Run 重启恢复；旧 Run 暂保持只读 legacy | M1；先确认 codec/事务迁移测试 |
+| M2b 可选旧 Run 恢复 | 盘点并报告具备可核验来源元数据的旧 Run；仅对通过审核且可证明兼容的记录执行显式、审计迁移；其余保持只读 | M2a；不得按 profile 名称猜绑定；不作为 M3–M5 的前置条件 |
+| M3 场景适配 | window_failure_rate.v1、确定性分析、受控 Prometheus 映射、来源分区/租约、子 Run 继承 | M1+M2a；保留旧 settlement 实验 |
+| M4 Web 与知识接线 | 目标选择、所有读写入口范围校验、有限知识快照、独立记忆策略和熔断展示 | M2a+M3；不新建完整知识库 |
+| M5 联合验收 | 两项目并发/故障/恢复/隔离测试、浏览器验收及 legacy 回归；若实施 M2b，额外覆盖其迁移路径 | M1–M4；M2b 可选 |
 
-M1/M2 通过后才能在新 Target 发起模型或来源操作；不能先做界面选择，再用单个共享可变配置凑多项目运行。完整 Semantic/Procedural 管理、Counter 场景、真实 group-buy-market 接入、多人 ACL 和真实动作分别另立增量。
+M1/M2a 通过后才能在新 Target 发起模型或来源操作；不能先做界面选择，再用单个共享可变配置凑多项目运行。M2b 是可选的历史恢复增量，不阻塞新 Target 能力；Legacy 兼容入口何时退役需依据实际使用与保留策略另行评审。完整 Semantic/Procedural 管理、Counter 场景、真实 group-buy-market 接入、多人 ACL 和真实动作分别另立增量。
 
 ## 13. 第一版验收矩阵
 
@@ -351,6 +354,9 @@ M1/M2 通过后才能在新 Target 发起模型或来源操作；不能先做界
 11. 未审核/过期/撤销知识不注入；知识不能充当观测证据，历史案例也不能使当前缺失来源变成完整。
 12. 预算耗尽或单项目大量请求不压垮其他目标；父子调用没有信号量死锁，内存和注册表有界。
 13. 现有 simulation 烟测断言、V1 Generator/V2 Publisher 一致性、公共摘要脱敏、父子证据归属、模型用量、Pause/Resume、记忆和熔断测试保持通过。
+14. 在具名、版本化的基准环境中注册并解析至少 200 个 Target；Target 目录首屏查询 p95 < 100 ms。记录硬件、数据规模、冷热状态和运行版本，容量配置上调时按声明的最大规模重新测量。
+15. 注册至少 50 个 SourcePartition；仅内存中的分区状态查找 p95 < 10 ms，且该测量不得触发外部数据源请求。
+16. 在 opt-in 压测配置下（并发上限可覆盖生产默认值 2），使用确定性模型/数据源桩执行 10 个并发父 Run，验证范围隔离、公平调度和有界资源，并报告 p50/p95/p99 排队及 Agent 自身调度开销。性能门槛在固定硬件/运行时基准环境测量；不以外部模型/网络的端到端延迟作为回归阈值，也不调用真实模型做性能压测。
 
 提交实现前执行仓库既有 lint/typecheck/test/build 与相关浏览器验收，并区分既有失败与新增回归。本次 Markdown 设计只做文档一致性与 diff 检查，不声明上述能力已通过。
 
