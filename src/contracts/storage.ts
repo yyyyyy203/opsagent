@@ -3,6 +3,7 @@ import type { JsonValue } from './common.js';
 import type { GovernanceEffect } from './hooks.js';
 import type { PendingAgentEventV2 } from './event-store.js';
 import type { MemoryCaptureIntent } from './diagnostic-memory.js';
+import type { TargetBindingStore, TargetBindingTransition } from './target.js';
 import type { ToolCall, ToolExecutionResult, ToolKind } from './tool.js';
 
 export interface CheckpointStore {
@@ -87,6 +88,8 @@ export interface DurableTransitionUnitOfWork {
     governanceEffects?: readonly GovernanceEffect[];
     /** Optional bounded sidecar, staged atomically with the terminal checkpoint. */
     memoryCapture?: MemoryCaptureIntent;
+    /** Root snapshot/Run binding is committed atomically with its first checkpoint and RUN_STARTED event. */
+    targetBinding?: TargetBindingTransition;
   }): Promise<StoredRunCheckpoint>;
 }
 
@@ -113,6 +116,7 @@ export interface DurableRunState {
   stateUnitOfWork: AgentStateUnitOfWork;
   transitions: DurableTransitionUnitOfWork;
   outbox: DurableEventOutbox;
+  targetBindings: TargetBindingStore;
 }
 
 export interface EvidenceRecord {

@@ -60,6 +60,7 @@ export interface SourceSubagentExecution {
   childRunId: string;
   profileId: string;
   profileRevision?: string;
+  targetBindingId?: string;
   sessionId?: string;
   replyId?: string;
   streamId?: string;

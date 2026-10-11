@@ -45,6 +45,7 @@ export function createMetricsWebSource(
     evidence: ports.evidence,
     evidenceRecorder: ports.evidenceRecorder,
     sharedEvents: ports.sharedEvents,
+    ...(ports.durableState === undefined ? {} : { targetBindings: ports.durableState.targetBindings }),
     clock: ports.clock,
     ids: ports.ids,
   });
@@ -53,6 +54,7 @@ export function createMetricsWebSource(
     settlementTool: lazySettlement.tool,
     childAgentFactory,
     checkpoints: ports.checkpoints,
+    ...(ports.durableState === undefined ? {} : { targetBindings: ports.durableState.targetBindings }),
     clock: ports.clock,
     ...(options.sourceWindow === undefined ? {} : { sourceWindow: options.sourceWindow }),
     lifecycle: { ...ports.events, ids: ports.ids },

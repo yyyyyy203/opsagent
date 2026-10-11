@@ -7,6 +7,7 @@ import type {
   MemoryRecallPort,
   RunMemoryControl,
 } from '../contracts/diagnostic-memory.js';
+import type { TrustedTargetBinding } from '../contracts/target.js';
 
 /** Host-injected memory ports; concrete stores and policy assembly stay outside the Harness. */
 export interface AgentMemoryHarness {
@@ -39,6 +40,8 @@ export interface ReplyOptions {
   trustedSystemContext?: string;
   /** @internal Host-only memory scope and policy; never accept from an external request parser. */
   trustedMemoryControl?: RunMemoryControl;
+  /** @internal Host-only Target snapshot binding; never accept from an external request parser. */
+  trustedTargetBinding?: TrustedTargetBinding;
   /** External preferences select only capabilities allowed by the host Profile policy. */
   memoryPreferences?: MemoryPreferences;
 }

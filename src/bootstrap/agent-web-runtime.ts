@@ -1,7 +1,8 @@
 import { mkdir } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { isAbsolute, join } from 'node:path';
-import type { ChatModel, Clock, IdGenerator, Observability, Tool } from '../contracts/index.js';
+import type { ChatModel, Clock, DurableRunState, IdGenerator, InspectionQueryService, Observability, Tool } from '../contracts/index.js';
+import type { TargetResolver } from '../contracts/target.js';
 import type { ModelIdentity } from './model-identity.js';
 import type { RuntimeToolPorts } from '../application/create-runtime.js';
 import type { ReplyOptions } from '../agent/types.js';
@@ -13,6 +14,7 @@ import { createOpenAICompatibleModel, type CreateOpenAICompatibleModelOptions } 
 import { OpaqueMessageCursorCodec } from '../application/message-cursor-codec.js';
 import { WebQueryService, type ConfiguredWebProfile } from '../application/web-query-service.js';
 import { RunExecutionCoordinator } from '../application/run-execution-coordinator.js';
+import { TargetRunService, type TargetRunStarter } from '../application/target-run-service.js';
 import { WebConfirmationService } from '../application/web-confirmation-service.js';
 import { startInspectionHttpServer, type InspectionHttpServer } from '../api/http-server.js';
 import { SourceInvocationLimiter } from '../tool/source-invocation-limiter.js';
@@ -59,6 +61,15 @@ export interface AgentWebRuntimeOptions {
   /** Smoke-only exact window shared by the simulator snapshot and both source agents. */
   sourceWindow?: { start: string; end: string };
   profiles?: readonly AgentWebProfileConfig[];
+  /**
+   * Host-owned Target resolver and optional scope-aware execution composition.
+   * A catalog can be displayed without a starter, but Target Runs stay disabled
+   * until the host explicitly supplies a Target-capable execution boundary.
+   */
+  targetRuntime?: {
+    resolver: TargetResolver;
+    createStarter?: (ports: TargetRunStarterFactoryPorts) => TargetRunStarter;
+  };
   host?: string;
   port?: number;
   allowedOrigins?: readonly string[];
@@ -71,6 +82,13 @@ export interface AgentWebRuntimeOptions {
   /** Opt-in per-parent-Run limit for the source smoke acceptance only. */
   sourceInvocationLimit?: 1;
   diagnosticMemory?: DiagnosticMemoryConfig;
+}
+
+export interface TargetRunStarterFactoryPorts {
+  execution: RunExecutionCoordinator;
+  durableState: DurableRunState;
+  queries: InspectionQueryService;
+  prepareStart: (options: ReplyOptions) => ReplyOptions;
 }
 
 export interface AgentWebRuntime {
@@ -187,6 +205,21 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       runtime.checkpoints,
       { prepareStart, ...(runtime.memory === undefined ? {} : { afterTerminal: scheduleMemory }) },
     );
+    const targetRuns = options.targetRuntime === undefined ? undefined : new TargetRunService({
+      resolver: options.targetRuntime.resolver,
+      bindings: runtime.durableState.targetBindings,
+      queries: runtime.queries,
+      clock,
+      ids,
+      ...(options.targetRuntime.createStarter === undefined ? {} : {
+        start: options.targetRuntime.createStarter({
+          execution,
+          durableState: runtime.durableState,
+          queries: runtime.queries,
+          prepareStart,
+        }),
+      }),
+    });
     const confirmation = new WebConfirmationService(runtime.hitl, runtime.durableState.checkpoints, clock);
     const server = await startInspectionHttpServer({
       agent: runtime.agent,
@@ -211,6 +244,8 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       },
       memory: { ...(runtime.memory === undefined ? {} : { runtime: runtime.memory }),
         checkpoints: runtime.durableState.checkpoints, runQueries: runtime.queries, clock, schedule: scheduleMemory },
+      targetBindings: runtime.durableState.targetBindings,
+      ...(targetRuns === undefined ? {} : { targetRuns }),
     });
     let closed = false;
     return {

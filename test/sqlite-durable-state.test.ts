@@ -173,7 +173,7 @@ describe('SQLite durable-state persistence', () => {
     }
   });
 
-  it('loads a legacy checkpoint checksum and upgrades its next write to schema 3', async () => {
+  it('loads a legacy checkpoint checksum and upgrades its next write to the latest schema', async () => {
     const path = await databasePath();
     const legacy = context('run-legacy');
     const database = SqliteDatabase.open(path);
@@ -207,7 +207,7 @@ describe('SQLite durable-state persistence', () => {
         SELECT checkpoint_schema_version, checkpoint_json
         FROM agent_checkpoints WHERE run_id = ?
       `).get('run-legacy') as { checkpoint_schema_version: number; checkpoint_json: string };
-      expect(row.checkpoint_schema_version).toBe(3);
+      expect(row.checkpoint_schema_version).toBe(4);
       expect(JSON.parse(row.checkpoint_json)).toMatchObject({ governance: { schemaVersion: 1 } });
     } finally {
       upgraded.close();
@@ -257,11 +257,11 @@ describe('SQLite durable-state persistence', () => {
     const database = SqliteDatabase.open(path);
     try {
       const row = database.raw.prepare('SELECT checkpoint_schema_version FROM agent_checkpoints WHERE run_id = ?').get(stored.runId);
-      expect(row).toEqual({ checkpoint_schema_version: 3 });
+      expect(row).toEqual({ checkpoint_schema_version: 4 });
     } finally { database.close(); }
   });
 
-  it.each(['control-only', 'full-memory'])('writes and reopens schema 3 with %s', async (kind) => {
+  it.each(['control-only', 'full-memory'])('writes and reopens schema 4 with %s', async (kind) => {
     const path = await databasePath();
     const memoryControl = { schemaVersion: 1 as const, scope: simulationMemoryScope(), profilePolicyRevision: 'policy-v1', capture: 'manual' as const, recall: kind === 'full-memory' };
     const candidate = memoryCase();
@@ -286,7 +286,7 @@ describe('SQLite durable-state persistence', () => {
     const database = SqliteDatabase.open(path);
     try {
       expect(database.raw.prepare('SELECT checkpoint_schema_version FROM agent_checkpoints WHERE run_id = ?').get('v3'))
-        .toEqual({ checkpoint_schema_version: 3 });
+        .toEqual({ checkpoint_schema_version: 4 });
     } finally { database.close(); }
   });
 
@@ -317,7 +317,7 @@ describe('SQLite durable-state persistence', () => {
 
   it('rejects a future checkpoint version with a valid payload and checksum', async () => {
     const path = await databasePath();
-    insertCheckpoint(path, context('future'), 4);
+    insertCheckpoint(path, context('future'), 5);
     const persistence = createSqlitePersistence({ path, clock });
     try {
       await expect(persistence.checkpoints.load('future')).rejects.toMatchObject({ recordType: 'checkpoint' });

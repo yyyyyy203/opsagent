@@ -312,7 +312,8 @@ export function createSqliteDiagnosticMemoryRepository(database: SqliteDatabase)
     try {
       const decoded: unknown = JSON.parse(row.checkpoint_json) as unknown;
       if (checkpointChecksum(decoded) !== row.checksum) throw new Error('checksum mismatch');
-      if (row.checkpoint_schema_version !== 1 && row.checkpoint_schema_version !== 2 && row.checkpoint_schema_version !== 3) {
+      if (row.checkpoint_schema_version !== 1 && row.checkpoint_schema_version !== 2
+        && row.checkpoint_schema_version !== 3 && row.checkpoint_schema_version !== 4) {
         throw new Error('unsupported checkpoint schema');
       }
       const context = parseAgentContext(decoded, row.checkpoint_schema_version);

@@ -29,3 +29,5 @@ export * from './source-subagent.js';
 export * from './tool.js';
 export * from './memory-vector.js';
 export * from './memory-vector-schema.js';
+export * from './target.js';
+export * from './target-schema.js';

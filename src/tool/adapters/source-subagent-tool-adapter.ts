@@ -271,6 +271,7 @@ function createExecutionBase(
     parentStepId: options.stepId,
     profileId: options.profileId,
     ...(options.profileRevision === undefined ? {} : { profileRevision: options.profileRevision }),
+    ...(options.targetBindingId === undefined ? {} : { targetBindingId: options.targetBindingId }),
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     ...(options.replyId === undefined ? {} : { replyId: options.replyId }),
     ...(options.streamId === undefined ? {} : { streamId: options.streamId }),

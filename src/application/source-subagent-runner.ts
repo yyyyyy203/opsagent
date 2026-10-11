@@ -10,6 +10,9 @@ import type {
   SourceSubagentResult,
   SourceSubagentRunner,
   SourceSubagentType,
+  TargetBindingStore,
+  TargetRunBindingRecord,
+  TrustedTargetBinding,
   ToolResponseChunk,
 } from '../contracts/index.js';
 import { projectSourceMissingEvidenceCodes } from '../contracts/missing-evidence.js';
@@ -37,6 +40,7 @@ export interface SourceChildAgent {
     maxToolCalls: number;
     maxDurationMs: number;
     networkAttemptBudget?: { remaining: number };
+    trustedTargetBinding?: TrustedTargetBinding;
   }): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
   resumeStream(
     runId: string,
@@ -55,6 +59,7 @@ export interface SourceChildAgentFactory {
     maxDurationMs: number;
     profileId: string;
     profileRevision?: string;
+    targetBindingId?: string;
     toolCallBudget?: { remaining: number };
     networkAttemptBudget?: { remaining: number };
   }): SourceChildAgent;
@@ -83,6 +88,8 @@ export interface SourceSubagentRunnerOptions {
   childAgentFactory: SourceChildAgentFactory;
   childTools: SourceChildToolsFactory;
   checkpoints?: CheckpointStore;
+  /** Shared Target ownership registry; Target-bound children fail closed without it. */
+  targetBindings?: TargetBindingStore;
   clock?: Clock;
   collector?: SourceReportCollectorFactory;
   renderPrompt?: SourcePromptRenderer;
@@ -114,6 +121,23 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
     const maxToolCalls = Math.min(8, remainingToolCalls);
     const maxDurationMs = Math.min(30_000, parentRemainingMs);
     const existingCheckpoint = await this.options.checkpoints?.load(execution.childRunId);
+    const trustedTargetBinding = await resolveInheritedTargetBinding(
+      execution, this.options.targetBindings, this.clock.now().toISOString(),
+    );
+    if (execution.targetBindingId !== undefined && existingCheckpoint !== null && existingCheckpoint !== undefined) {
+      const persistedChild = await this.options.targetBindings?.getBinding(execution.childRunId);
+      if (persistedChild === null || persistedChild === undefined
+        || persistedChild.bindingId !== trustedTargetBinding?.binding.bindingId
+        || persistedChild.rootRunId !== trustedTargetBinding.binding.rootRunId
+        || persistedChild.snapshotDigest !== trustedTargetBinding.snapshot.digest) {
+        throw new SourceSubagentFailure('STORAGE_ERROR', 'Target-bound child Run ownership could not be restored.', false);
+      }
+    }
+    if (execution.targetBindingId !== undefined
+      && (existingCheckpoint === null || existingCheckpoint === undefined)
+      && await this.options.targetBindings?.getBinding(execution.childRunId) !== null) {
+      throw new SourceSubagentFailure('STORAGE_ERROR', 'Target-bound child Run already has an unexpected binding.', false);
+    }
     const checkpointEvidenceIds = existingCheckpoint?.evidenceIds ?? [];
     const collector = this.options.collector?.({ request, execution }) ?? new DefaultSourceReportCollector({
       knownEvidenceIds: [...new Set([...request.evidenceIds, ...checkpointEvidenceIds])],
@@ -139,6 +163,7 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
       maxDurationMs,
       profileId: execution.profileId,
       ...(execution.profileRevision === undefined ? {} : { profileRevision: execution.profileRevision }),
+      ...(execution.targetBindingId === undefined ? {} : { targetBindingId: execution.targetBindingId }),
       ...(execution.toolCallBudget === undefined ? {} : { toolCallBudget: execution.toolCallBudget }),
       ...(execution.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: execution.networkAttemptBudget }),
     });
@@ -155,6 +180,7 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
         maxDurationMs,
         ...(execution.toolCallBudget === undefined ? {} : { toolCallBudget: execution.toolCallBudget }),
         ...(execution.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: execution.networkAttemptBudget }),
+        ...(trustedTargetBinding === undefined ? {} : { trustedTargetBinding }),
       })
       : child.resumeStream(
         execution.childRunId,
@@ -222,6 +248,32 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
     }
     return finalize();
   }
+}
+
+async function resolveInheritedTargetBinding(
+  execution: SourceSubagentExecution,
+  store: TargetBindingStore | undefined,
+  createdAt: string,
+): Promise<TrustedTargetBinding | undefined> {
+  if (execution.targetBindingId === undefined) return undefined;
+  if (store === undefined) throw new SourceSubagentFailure('STORAGE_ERROR', 'Target-bound child persistence is unavailable.', false);
+  const parent = await store.getBinding(execution.parentRunId);
+  if (parent === null || parent.bindingId !== execution.targetBindingId) {
+    throw new SourceSubagentFailure('STORAGE_ERROR', 'Parent Target binding could not be verified.', false);
+  }
+  const snapshot = await store.getSnapshot(parent.bindingId);
+  if (snapshot === null || snapshot.digest !== parent.snapshotDigest || snapshot.targetId !== parent.targetId) {
+    throw new SourceSubagentFailure('STORAGE_ERROR', 'Parent Target snapshot could not be restored.', false);
+  }
+  const binding: TargetRunBindingRecord = {
+    bindingId: parent.bindingId,
+    targetId: parent.targetId,
+    runId: execution.childRunId,
+    rootRunId: parent.rootRunId,
+    snapshotDigest: parent.snapshotDigest,
+    createdAt,
+  };
+  return { binding, snapshot };
 }
 
 export class SourceSubagentFailure extends Error {

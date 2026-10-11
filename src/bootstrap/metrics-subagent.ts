@@ -6,6 +6,7 @@ import type {
   SourceSubagentExecution,
   SourceSubagentRequest,
   SubagentLifecyclePorts,
+  TargetBindingStore,
   Tool,
 } from '../contracts/index.js';
 import {
@@ -37,6 +38,7 @@ export interface MetricsSubagentOptions {
   settlementTool: Tool;
   childAgentFactory: SourceChildAgentFactory;
   checkpoints?: CheckpointStore;
+  targetBindings?: TargetBindingStore;
   clock?: Clock;
   sourceWindow?: { start: string; end: string };
   lifecycle?: SubagentLifecyclePorts;
@@ -60,6 +62,7 @@ export function createMetricsSubagentTool(options: MetricsSubagentOptions): Tool
     renderPrompt: renderMetricsPrompt,
     clock,
     ...(options.checkpoints === undefined ? {} : { checkpoints: options.checkpoints }),
+    ...(options.targetBindings === undefined ? {} : { targetBindings: options.targetBindings }),
   });
   const descriptor: SourceSubagentDescriptor = {
     publicToolName: 'metrics_subagent',

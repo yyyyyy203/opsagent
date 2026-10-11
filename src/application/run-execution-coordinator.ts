@@ -1,4 +1,4 @@
-import type { AgentContext, CheckpointStore } from '../contracts/index.js';
+import type { AgentContext, AgentEvent, CheckpointStore } from '../contracts/index.js';
 import { USER_RUN_CANCELLATION_REASON } from '../agent/types.js';
 import type { DiagnosisAgent, ReplyOptions } from '../agent/types.js';
 
@@ -20,6 +20,8 @@ export class RunExecutionError extends Error {
 export class RunExecutionCoordinator {
   private readonly active = new Map<string, Promise<void>>();
   private readonly controllers = new Map<string, AbortController>();
+  private readonly startedRuns = new Set<string>();
+  private readonly startAcceptance = new Map<string, Promise<void>>();
   /** Retained after completion so an uncertain accepted request cannot be replayed by another tab. */
   private readonly accepted = new Set<string>();
   private closing = false;
@@ -32,6 +34,61 @@ export class RunExecutionCoordinator {
   ) {}
 
   public start(options: ReplyOptions): Promise<void> {
+    return this.startInternal(options);
+  }
+
+  /** Starts a Run and resolves only after its first RUN_STARTED event is yielded. */
+  public startAccepted(options: ReplyOptions): Promise<void> {
+    const runId = options.runId;
+    if (runId === undefined || runId.length === 0) {
+      return Promise.reject(new RunExecutionError('RUN_ID_REQUIRED', 'runId is required.', 400));
+    }
+    if (this.startedRuns.has(runId)) return Promise.resolve();
+    const pendingAcceptance = this.startAcceptance.get(runId);
+    if (pendingAcceptance !== undefined) return pendingAcceptance;
+    if (this.active.has(runId) || this.accepted.has(runId)) {
+      return Promise.reject(new RunExecutionError('RUN_CONFLICT', 'Run acceptance is already in progress or uncertain.', 409));
+    }
+
+    let resolveAcceptance!: () => void;
+    let rejectAcceptance!: (error: unknown) => void;
+    let settled = false;
+    const acceptance = new Promise<void>((resolve, reject) => {
+      resolveAcceptance = resolve;
+      rejectAcceptance = reject;
+    });
+    this.startAcceptance.set(runId, acceptance);
+    const completion = this.startInternal(options, (event) => {
+      if (event.type !== 'RUN_STARTED') throw new RunExecutionError('RUN_CONFLICT', 'Run failed before its initial transition.', 409);
+      settled = true;
+      this.startedRuns.add(runId);
+      resolveAcceptance();
+    });
+    void completion.then(() => {
+      if (!settled) {
+        settled = true;
+        rejectAcceptance(new RunExecutionError('RUN_CONFLICT', 'Run ended before its initial transition.', 409));
+      }
+    }, async (error: unknown) => {
+      if (!settled) {
+        let checkpoint: AgentContext | null = null;
+        try {
+          checkpoint = await this.checkpoints.load(runId);
+        } catch {
+          // Keep the Run ID reserved if the durable state cannot establish that no transition committed.
+        }
+        if (checkpoint === null) this.accepted.delete(runId);
+        settled = true;
+        if (this.startAcceptance.get(runId) === acceptance) this.startAcceptance.delete(runId);
+        rejectAcceptance(error);
+      }
+    }).finally(() => {
+      if (this.startAcceptance.get(runId) === acceptance) this.startAcceptance.delete(runId);
+    }).catch(() => undefined);
+    return acceptance;
+  }
+
+  private startInternal(options: ReplyOptions, onFirstEvent?: (event: AgentEvent) => void): Promise<void> {
     if (this.closing) return Promise.reject(new RunExecutionError('RUN_CONFLICT', 'Runtime is shutting down.', 409));
     const runId = options.runId;
     if (runId === undefined || runId.length === 0) {
@@ -49,7 +106,7 @@ export class RunExecutionCoordinator {
         throw new RunExecutionError('RUN_CONFLICT', 'Run already exists and cannot be started again.', 409);
       }
       const preparedOptions = this.prepareStart(options);
-      await this.drain(this.agent.replyStream({ ...preparedOptions, signal }));
+      await this.drain(this.agent.replyStream({ ...preparedOptions, signal }), onFirstEvent);
       await this.afterTerminal(runId);
     }, options.signal);
   }
@@ -138,8 +195,24 @@ export class RunExecutionCoordinator {
     return task;
   }
 
-  private async drain(stream: AsyncGenerator<unknown, unknown>): Promise<void> {
-    for await (const event of stream) void event;
+  private async drain(stream: AsyncGenerator<AgentEvent, unknown>, onFirstEvent?: (event: AgentEvent) => void): Promise<void> {
+    let first = true;
+    let completed = false;
+    try {
+      while (true) {
+        const item = await stream.next();
+        if (item.done) {
+          completed = true;
+          return;
+        }
+        if (first) {
+          first = false;
+          onFirstEvent?.(item.value);
+        }
+      }
+    } finally {
+      if (!completed) await stream.return(undefined as never).catch(() => undefined);
+    }
   }
 
   private async afterTerminal(runId: string): Promise<void> {

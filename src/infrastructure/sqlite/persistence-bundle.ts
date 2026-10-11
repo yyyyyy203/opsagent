@@ -16,6 +16,7 @@ import type { ProjectionCheckpointStoreV2 } from '../../event/v2/projection-runn
 import type { ProjectionFailureSinkV2 } from '../../event/v2/event-publisher.js';
 import type { InspectionQueryService } from '../../contracts/read-model.js';
 import type { MessageCursorCodec, WebMessageQueries } from '../../contracts/web-read-model.js';
+import type { TargetBindingStore } from '../../contracts/target.js';
 import { SqliteDatabase } from './database.js';
 import { SqliteDurableStateStore } from './durable-state-store.js';
 import { SqliteEventOutboxStore } from './event-outbox-store.js';
@@ -50,6 +51,7 @@ export interface SqlitePersistenceBundle {
   stateUnitOfWork: AgentStateUnitOfWork;
   transitions: DurableTransitionUnitOfWork;
   outbox: DurableEventOutbox;
+  targetBindings: TargetBindingStore;
   evidence: EvidenceStore & EvidenceQueryStore;
   evidenceManifests: EvidenceManifestStore;
   evidenceBlobs?: EvidenceBlobStore;
@@ -94,6 +96,7 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       stateUnitOfWork: durable,
       transitions: durable,
       outbox,
+      targetBindings: durable,
       evidence,
       evidenceManifests,
       ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),

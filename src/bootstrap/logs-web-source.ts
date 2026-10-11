@@ -67,6 +67,7 @@ export function createLogsWebSource(
     evidence: ports.evidence,
     evidenceRecorder: ports.evidenceRecorder,
     sharedEvents: ports.sharedEvents,
+    ...(ports.durableState === undefined ? {} : { targetBindings: ports.durableState.targetBindings }),
     clock: ports.clock,
     ids: ports.ids,
   });
@@ -79,6 +80,7 @@ export function createLogsWebSource(
     clock: ports.clock,
     childAgentFactory,
     checkpoints: ports.checkpoints,
+    ...(ports.durableState === undefined ? {} : { targetBindings: ports.durableState.targetBindings }),
     lifecycle: { ...ports.events, ids: ports.ids },
     validateRequest: (request, execution) => validateLogsRequest(request, execution, ports, options.sourceWindow),
     ...(options.sourceWindow === undefined ? {} : { sourceWindow: options.sourceWindow }),

@@ -22,11 +22,16 @@ import {
   type VersionedCheckpointStore,
 } from '../contracts/storage.js';
 import type { ToolExecutionResult } from '../contracts/tool.js';
+import { TargetConfigurationError, type ResolvedTargetSnapshot, type TargetBindingStore,
+  type TargetBindingTransition, type TargetRunBindingRecord, type TargetRunBindingPage,
+  type TargetRunRequestRecord } from '../contracts/target.js';
+import { parseResolvedTargetSnapshot, parseTargetRunRequestRecord } from '../contracts/target-schema.js';
 import { checkpointChecksum, parseAgentContext } from './durable-codec.js';
 import type { InMemoryDiagnosticTransaction } from '../memory/diagnostic-memory-state.js';
 import { cloneInMemoryDiagnosticRecords, createInMemoryDiagnosticRecords, createInMemoryDiagnosticRepository,
   stageAutomaticMemoryCapture, stageMemorySignals } from '../memory/diagnostic-memory-state.js';
 import { InMemoryDiagnosticMemoryStore } from '../memory/in-memory-diagnostic-memory.js';
+import { sameTargetRecord, validateTargetBindingState } from './target-binding-state.js';
 
 const DEFAULT_EVIDENCE_PAGE_SIZE = 50;
 const MAX_EVIDENCE_PAGE_SIZE = 100;
@@ -35,10 +40,14 @@ const MAX_EVIDENCE_PAGE_SIZE = 100;
  * Deterministic in-memory implementation of the durable Run state contracts.
  * It is intentionally a test/default-runtime implementation, not a persistence fallback.
  */
-export class InMemoryDurableState implements DurableRunState, VersionedCheckpointStore, ToolExecutionJournal, AgentStateUnitOfWork, DurableTransitionUnitOfWork, DurableEventOutbox {
+export class InMemoryDurableState implements DurableRunState, VersionedCheckpointStore, ToolExecutionJournal,
+  AgentStateUnitOfWork, DurableTransitionUnitOfWork, DurableEventOutbox, TargetBindingStore {
   private readonly checkpointRecords = new Map<string, StoredRunCheckpoint>();
   private readonly executionRecords = new Map<string, ToolExecutionRecord>();
   private readonly outboxRecords = new Map<string, DurableOutboxRecord>();
+  private readonly targetSnapshots = new Map<string, ResolvedTargetSnapshot>();
+  private readonly targetBindingRecords = new Map<string, TargetRunBindingRecord>();
+  private readonly targetRequestRecords = new Map<string, TargetRunRequestRecord>();
   private readonly diagnosticState: InMemoryDiagnosticTransaction;
 
   public readonly checkpoints: VersionedCheckpointStore = this;
@@ -46,6 +55,7 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
   public readonly stateUnitOfWork: AgentStateUnitOfWork = this;
   public readonly transitions: DurableTransitionUnitOfWork = this;
   public readonly outbox: DurableEventOutbox = this;
+  public readonly targetBindings: TargetBindingStore = this;
 
   public readonly evidence = new InMemoryEvidenceRepository();
   public readonly memory: InMemoryDiagnosticMemoryStore;
@@ -58,11 +68,18 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
 
   public load(runId: string): Promise<StoredRunCheckpoint | null> {
     const checkpoint = this.checkpointRecords.get(runId);
-    return Promise.resolve(checkpoint === undefined ? null : clone(checkpoint));
+    if (checkpoint === undefined) return Promise.resolve(null);
+    try {
+      validateTargetBindingState(checkpoint.context, undefined, this.targetBindingReader());
+      return Promise.resolve(clone(checkpoint));
+    } catch {
+      return Promise.reject(new TargetConfigurationError('TARGET_BINDING_INVALID'));
+    }
   }
 
   public save(context: AgentContext, expectedRevision: number | null): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => {
+      validateTargetBindingState(context, undefined, this.targetBindingReader());
       const checkpoint = this.nextCheckpoint(context, expectedRevision);
       this.checkpointRecords.set(context.runId, clone(checkpoint));
       return clone(checkpoint);
@@ -86,6 +103,54 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
   public get(toolCallId: string): Promise<ToolExecutionRecord | null> {
     const execution = this.executionRecords.get(toolCallId);
     return Promise.resolve(execution === undefined ? null : clone(execution));
+  }
+
+  public reserveRequest(record: TargetRunRequestRecord): Promise<{ record: TargetRunRequestRecord; created: boolean }> {
+    return Promise.resolve().then(() => {
+      const normalized = parseTargetRunRequestRecord(record);
+      const existing = this.targetRequestRecords.get(normalized.requestId);
+      if (existing !== undefined) {
+        if (!sameRequestIdentity(existing, normalized)) throw new TargetConfigurationError('TARGET_REQUEST_CONFLICT');
+        return { record: clone(existing), created: false };
+      }
+      const runCollision = [...this.targetRequestRecords.values()].some(item => item.runId === normalized.runId)
+        || this.targetBindingRecords.has(normalized.runId);
+      if (runCollision) throw new TargetConfigurationError('TARGET_REQUEST_CONFLICT');
+      this.targetRequestRecords.set(normalized.requestId, clone(normalized));
+      return { record: clone(normalized), created: true };
+    });
+  }
+
+  public getRequest(requestId: string): Promise<TargetRunRequestRecord | null> {
+    const record = this.targetRequestRecords.get(requestId);
+    return Promise.resolve(record === undefined ? null : clone(record));
+  }
+
+  public getBinding(runId: string): Promise<TargetRunBindingRecord | null> {
+    const record = this.targetBindingRecords.get(runId);
+    return Promise.resolve(record === undefined ? null : clone(record));
+  }
+
+  public getSnapshot(bindingId: string): Promise<ResolvedTargetSnapshot | null> {
+    const snapshot = this.targetSnapshots.get(bindingId);
+    return Promise.resolve(snapshot === undefined ? null : parseResolvedTargetSnapshot(snapshot));
+  }
+
+  public listByTarget(input: { targetId: string; cursor?: string; limit: number }): Promise<TargetRunBindingPage> {
+    return Promise.resolve().then(() => {
+      if (input.targetId.length === 0 || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+        throw new RangeError('Target Run page request is invalid.');
+      }
+      const after = input.cursor;
+      const rows = [...this.targetBindingRecords.values()]
+        .filter(record => record.targetId === input.targetId && (after === undefined || record.runId > after))
+        .sort((left, right) => left.runId.localeCompare(right.runId));
+      const page = rows.slice(0, input.limit + 1);
+      const hasMore = page.length > input.limit;
+      const items = page.slice(0, input.limit).map(record => clone(record));
+      const last = items.at(-1);
+      return { items, ...(hasMore && last !== undefined ? { nextCursor: last.runId } : {}) };
+    });
   }
 
   public commitToolResult(input: {
@@ -123,12 +188,16 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
     outboxEvents: readonly PendingAgentEventV2[];
     governanceEffects?: readonly GovernanceEffect[];
     memoryCapture?: MemoryCaptureIntent;
+    targetBinding?: TargetBindingTransition;
   }): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => {
       const transition = input.execution;
       const nextContext = transition?.kind === 'completed'
         ? appendCompletedResult(input.context, transition.result)
         : clone(input.context);
+      const stagedTargetSnapshots = cloneMap(this.targetSnapshots);
+      const stagedTargetBindings = cloneMap(this.targetBindingRecords);
+      this.stageTargetBinding(nextContext, input.targetBinding, stagedTargetSnapshots, stagedTargetBindings);
       let existing: ToolExecutionRecord | undefined;
       let nextExecution: ToolExecutionRecord | undefined;
       // Preserve the legacy CAS-first error contract for completed results:
@@ -166,6 +235,8 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
       replaceMap(this.executionRecords, working.executionRecords);
       replaceMap(this.outboxRecords, working.outboxRecords);
       replaceMemoryRecords(this.diagnosticState.memory, working.memory);
+      replaceMap(this.targetSnapshots, stagedTargetSnapshots);
+      replaceMap(this.targetBindingRecords, stagedTargetBindings);
       return clone(checkpoint);
     });
   }
@@ -230,6 +301,38 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
     };
   }
 
+  private stageTargetBinding(
+    context: AgentContext,
+    transition: TargetBindingTransition | undefined,
+    snapshots: Map<string, ResolvedTargetSnapshot>,
+    bindings: Map<string, TargetRunBindingRecord>,
+  ): void {
+    const validated = validateTargetBindingState(context, transition, {
+      bindingByRunId: runId => bindings.get(runId) ?? null,
+      snapshotByBindingId: bindingId => snapshots.get(bindingId) ?? null,
+      requestById: requestId => this.targetRequestRecords.get(requestId) ?? null,
+    });
+    if (transition === undefined || validated.binding === undefined) return;
+    const current = bindings.get(validated.binding.runId);
+    if (current !== undefined && !sameTargetRecord(current, validated.binding)) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    if (validated.snapshot !== undefined) snapshots.set(validated.binding.bindingId, clone(validated.snapshot));
+    bindings.set(validated.binding.runId, clone(validated.binding));
+  }
+
+  private targetBindingReader(): {
+    bindingByRunId: (runId: string) => TargetRunBindingRecord | null;
+    snapshotByBindingId: (bindingId: string) => ResolvedTargetSnapshot | null;
+    requestById: (requestId: string) => TargetRunRequestRecord | null;
+  } {
+    return {
+      bindingByRunId: runId => this.targetBindingRecords.get(runId) ?? null,
+      snapshotByBindingId: bindingId => this.targetSnapshots.get(bindingId) ?? null,
+      requestById: requestId => this.targetRequestRecords.get(requestId) ?? null,
+    };
+  }
+
   private planOutbox(
     events: readonly PendingAgentEventV2[],
     createdAt: string,
@@ -253,6 +356,14 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
       return { event: normalized, enqueuedAt: createdAt };
     });
   }
+}
+
+function sameRequestIdentity(
+  left: TargetRunRequestRecord,
+  right: TargetRunRequestRecord,
+): boolean {
+  return left.requestId === right.requestId && left.targetId === right.targetId
+    && left.requestDigest === right.requestDigest;
 }
 
 function cloneMap<K, V>(source: Map<K, V>): Map<K, V> {

@@ -8,6 +8,8 @@ import { encodeSseFrame } from './sse-encoder.js';
 import { EventStreamCursorError, type EventStreamService } from './event-stream-service.js';
 import type { RunExecutionCoordinator } from '../application/run-execution-coordinator.js';
 import type { WebConfirmationDecisionInput, WebConfirmationService } from '../application/web-confirmation-service.js';
+import type { TargetRunService } from '../application/target-run-service.js';
+import type { TargetBindingStore } from '../contracts/target.js';
 import { handleMemoryRoute, type MemoryRoutePorts } from './memory-routes.js';
 import { parseMemoryPreferences } from '../contracts/diagnostic-memory-schema.js';
 import { systemClock } from '../contracts/common.js';
@@ -27,6 +29,10 @@ export interface InspectionHttpServerOptions {
   allowedHosts?: readonly string[];
   allowedProfileIds?: readonly string[];
   memory?: MemoryRoutePorts;
+  /** Optional Target-scoped application facade; target routes never accept bindings from JSON. */
+  targetRuns?: TargetRunService;
+  /** Always pass the host-owned registry when available, even if Target start is not enabled. */
+  targetBindings?: Pick<TargetBindingStore, 'getBinding'>;
   /** Synchronous host validation before the transport accepts a Run. */
   prepareRun?: (options: ReplyOptions) => ReplyOptions;
   heartbeatTimer?: {
@@ -55,7 +61,7 @@ export async function startInspectionHttpServer(options: InspectionHttpServerOpt
   const server = createServer((request, response) => {
     void handleRequest(request, response, options, maxBodyBytes, shutdown.signal).catch((error: unknown) => {
       if (response.headersSent) { response.destroy(); return; }
-      const status = typeof error === 'object' && error !== null && 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
+      const status = statusForError(error);
       const clientVisible = status >= 400 && status < 500;
       writeJson(response, status, {
         error: errorCode(error, status, clientVisible),
@@ -83,7 +89,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   const parsed = new URL(request.url ?? '/', 'http://localhost');
   if (!applyHost(request, response, options.allowedHosts)) return;
   if (!applyCors(request, response, options.allowedOrigins)) return;
-  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID');
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID, Idempotency-Key');
   response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (method === 'OPTIONS') { response.writeHead(204); response.end(); return; }
   if (method === 'GET' && parsed.pathname === '/health') { writeJson(response, 200, { status: 'ok' }); return; }
@@ -94,6 +100,97 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     if (options.webQueries === undefined) throw unavailable();
     writeJson(response, 200, options.webQueries.listProfiles());
     return;
+  }
+
+  if (method === 'GET' && parsed.pathname === '/targets') {
+    if (options.targetRuns === undefined) throw unavailable();
+    writeJson(response, 200, options.targetRuns.listCatalog());
+    return;
+  }
+
+  const targetRunCollection = /^\/targets\/([^/]+)\/runs$/u.exec(parsed.pathname);
+  if (targetRunCollection !== null) {
+    if (options.targetRuns === undefined) throw unavailable();
+    const targetId = decodePath(targetRunCollection[1]!);
+    if (method === 'GET') {
+      try {
+        const page = await options.targetRuns.listRuns(targetId, {
+          ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
+          limit: parsed.searchParams.get('limit') === null ? 20 : parseWebPageLimit(parsed.searchParams.get('limit')!),
+        });
+        writeJson(response, 200, page);
+      } catch (error) {
+        if (error instanceof RangeError) throw Object.assign(new Error(error.message), { statusCode: 400 });
+        throw error;
+      }
+      return;
+    }
+    if (method === 'POST') {
+      const body = await readJson(request, maxBodyBytes);
+      if (Object.keys(body).some(key => key !== 'message')) {
+        throw Object.assign(new Error('Target Run body accepts only message.'), { statusCode: 400 });
+      }
+      const requestIds = request.headers['idempotency-key'];
+      if (typeof requestIds !== 'string' || requestIds.trim().length === 0 || requestIds.length > 256) {
+        throw Object.assign(new Error('A valid Idempotency-Key header is required.'), { statusCode: 400 });
+      }
+      if (typeof body.message !== 'string') {
+        throw Object.assign(new Error('message is required.'), { statusCode: 400 });
+      }
+      const accepted = await options.targetRuns.start({ targetId, requestId: requestIds, message: body.message });
+      const encodedTarget = encodeURIComponent(targetId);
+      const encodedRun = encodeURIComponent(accepted.runId);
+      writeJson(response, 202, {
+        runId: accepted.runId,
+        status: accepted.status === 'reused' ? 'existing' : 'started',
+        eventsUrl: `/targets/${encodedTarget}/runs/${encodedRun}/events`,
+      });
+      return;
+    }
+  }
+
+  const targetEventsMatch = method === 'GET'
+    ? /^\/targets\/([^/]+)\/runs\/([^/]+)\/events$/u.exec(parsed.pathname)
+    : null;
+  if (targetEventsMatch?.[1] !== undefined && targetEventsMatch[2] !== undefined) {
+    if (options.targetRuns === undefined) throw unavailable();
+    const targetId = decodePath(targetEventsMatch[1]);
+    const runId = decodePath(targetEventsMatch[2]);
+    if (!await options.targetRuns.ownsRun(targetId, runId)) {
+      writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' });
+      return;
+    }
+    const snapshots = parsed.searchParams.getAll('snapshots');
+    if (snapshots.length > 1 || (snapshots[0] !== undefined && snapshots[0] !== 'none')) {
+      throw Object.assign(new Error('snapshots must be none.'), { statusCode: 400 });
+    }
+    const headerLastEventId = request.headers['last-event-id'];
+    const lastEventId = typeof headerLastEventId === 'string' ? headerLastEventId : parsed.searchParams.get('lastEventId') ?? undefined;
+    await streamEvents(request, response, options.events, runId, lastEventId, snapshots[0] !== 'none', options.heartbeatTimer, shutdownSignal);
+    return;
+  }
+
+  const targetRunDetailMatch = method === 'GET'
+    ? /^\/targets\/([^/]+)\/runs\/([^/]+)$/u.exec(parsed.pathname)
+    : null;
+  if (targetRunDetailMatch?.[1] !== undefined && targetRunDetailMatch[2] !== undefined) {
+    if (options.targetRuns === undefined) throw unavailable();
+    const run = await options.targetRuns.getRun(decodePath(targetRunDetailMatch[1]), decodePath(targetRunDetailMatch[2]));
+    if (run === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return; }
+    writeJson(response, 200, run);
+    return;
+  }
+
+  const legacyBindingStore = options.targetBindings ?? (options.targetRuns === undefined
+    ? undefined
+    : { getBinding: (runId: string) => options.targetRuns!.bindingForRun(runId) });
+  const legacyRunPath = /^\/runs\/([^/]+)(?:\/|$)/u.exec(parsed.pathname);
+  if (legacyRunPath?.[1] !== undefined && legacyBindingStore !== undefined) {
+    const runId = decodePath(legacyRunPath[1]);
+    if (await legacyBindingStore.getBinding(runId) !== null) {
+      writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' });
+      return;
+    }
   }
 
   const eventMatch = method === 'GET' ? /^\/runs\/([^/]+)\/events$/u.exec(parsed.pathname) : null;
@@ -154,7 +251,17 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
       ...(parsed.searchParams.get('limit') === null ? {} : { limit: parsePageLimit(parsed.searchParams.get('limit')!, 'limit') }),
     };
-    writeJson(response, 200, await queries.listRuns(query));
+    const page = await queries.listRuns(query);
+    if (legacyBindingStore === undefined) writeJson(response, 200, page);
+    else {
+      const items = await Promise.all(page.items.map(async item => (
+        await legacyBindingStore.getBinding(item.runId) === null ? item : null
+      )));
+      writeJson(response, 200, {
+        items: items.filter((item): item is typeof page.items[number] => item !== null),
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+      });
+    }
     return;
   }
 
@@ -381,6 +488,9 @@ async function readJson(request: IncomingMessage, maxBytes: number): Promise<Rec
 }
 
 function toReplyOptions(body: Record<string, unknown>): ReplyOptions {
+  if (['targetId', 'targetBindingId', 'trustedTargetBinding'].some(key => Object.hasOwn(body, key))) {
+    throw Object.assign(new Error('Target fields are not accepted on the legacy Run route.'), { statusCode: 400 });
+  }
   if (['trustedMemoryControl', 'memoryControl', 'memory', 'actorId', 'scope', 'eligibleForPromotion', 'raw', 'report']
     .some(key => Object.hasOwn(body, key))) {
     throw Object.assign(new Error('Trusted memory fields are not accepted.'), { code: 'MEMORY_DATA_INVALID', statusCode: 400 });
@@ -429,6 +539,20 @@ function writeJson(response: ServerResponse, status: number, value: unknown): vo
 function errorCode(error: unknown, status: number, clientVisible: boolean): string {
   if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string') return error.code;
   return status === 500 ? 'INTERNAL_ERROR' : status === 503 ? 'QUERY_UNAVAILABLE' : status === 404 ? 'NOT_FOUND' : clientVisible ? 'INVALID_REQUEST' : 'REQUEST_FAILED';
+}
+
+function statusForError(error: unknown): number {
+  if (typeof error === 'object' && error !== null && 'statusCode' in error
+    && typeof error.statusCode === 'number') return error.statusCode;
+  if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string') {
+    if (error.code === 'TARGET_NOT_FOUND') return 404;
+    if (error.code === 'TARGET_REQUEST_CONFLICT' || error.code === 'TARGET_DISABLED'
+      || error.code === 'TARGET_SCOPE_MISMATCH') return 409;
+    if (error.code === 'TARGET_RUN_UNAVAILABLE' || error.code === 'TARGET_SNAPSHOT_UNAVAILABLE') return 503;
+    if (['TARGET_BINDING_INVALID', 'TARGET_CATALOG_INVALID', 'TARGET_CATALOG_LIMIT_EXCEEDED',
+      'SCENARIO_VERSION_UNSUPPORTED', 'SOURCE_MAPPING_INVALID'].includes(error.code)) return 400;
+  }
+  return 500;
 }
 
 function decodePath(value: string): string {

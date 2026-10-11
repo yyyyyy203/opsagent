@@ -176,6 +176,9 @@ const agentContext = legacyAgentContext.extend({
   memoryControl: runMemoryControlSchema.optional(),
   memory: runMemoryStateSchema.optional(),
 }).strict();
+const agentContextV4 = agentContext.extend({
+  targetBindingId: z.string().min(1).max(256).optional(),
+}).strict();
 
 const toolExecutionRecord = z.object({
   toolCallId: z.string().min(1),
@@ -222,9 +225,11 @@ export function parsePendingToolBatch(value: unknown): PendingToolBatch {
   return structuredClone(parsed) as PendingToolBatch;
 }
 
-export function parseAgentContext(value: unknown, schemaVersion: 1 | 2 | 3 = 3): AgentContext {
-  // Legacy codecs remain closed to memory fields; migration must not infer scope.
-  const parsed = schemaVersion === 3 ? agentContext.parse(value) : legacyAgentContext.parse(value);
+export function parseAgentContext(value: unknown, schemaVersion: 1 | 2 | 3 | 4 = 4): AgentContext {
+  // Legacy codecs remain closed to later fields; migration must never infer memory or Target scope.
+  const parsed = schemaVersion === 4
+    ? agentContextV4.parse(value)
+    : schemaVersion === 3 ? agentContext.parse(value) : legacyAgentContext.parse(value);
   if (parsed.pendingToolBatch?.governance !== undefined) parseToolBatchGovernanceSnapshot(parsed.pendingToolBatch.governance);
   const migrated = {
     ...parsed,

@@ -37,6 +37,8 @@ export interface AgentContext {
   status: RunStatus;
   stage: DiagnosisStage;
   profileId: string;
+  /** Opaque reference to a host-owned Target snapshot; absent means legacy/unbound Run. */
+  targetBindingId?: string;
   messages: AgentMessage[];
   pendingToolCalls: ToolCall[];
   /** Additive durable representation; legacy pendingToolCalls remains during migration. */

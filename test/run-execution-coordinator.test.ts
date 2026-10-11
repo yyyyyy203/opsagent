@@ -30,6 +30,48 @@ function fakeAgent(
 }
 
 describe('RunExecutionCoordinator', () => {
+  it('awaits the first RUN_STARTED yield while keeping the accepted Run active', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const agent = fakeAgent(
+      async function* (options) {
+        yield { type: 'RUN_STARTED', payload: {} } as AgentEvent;
+        await gate;
+        return result(options.runId!);
+      },
+      async function* (runId) { await Promise.resolve(); yield* []; return result(runId); },
+    );
+    const coordinator = new RunExecutionCoordinator(agent, checkpointStore(new Map()));
+
+    await coordinator.startAccepted({ runId: 'accepted-run', message: 'inspect', profileId: 'target-profile' });
+
+    expect(coordinator.isActive('accepted-run')).toBe(true);
+    release();
+    await coordinator.close();
+    expect(coordinator.isActive('accepted-run')).toBe(false);
+  });
+
+  it('allows retrying an acceptance that failed before a checkpoint or RUN_STARTED transition existed', async () => {
+    let calls = 0;
+    const agent = fakeAgent(
+      async function* (options) {
+        await Promise.resolve();
+        calls += 1;
+        if (calls === 1) throw new Error('failed before initial transition');
+        yield { type: 'RUN_STARTED', payload: {} } as AgentEvent;
+        return result(options.runId!);
+      },
+      async function* (runId) { await Promise.resolve(); yield* []; return result(runId); },
+    );
+    const coordinator = new RunExecutionCoordinator(agent, checkpointStore(new Map()));
+    const options = { runId: 'retry-before-acceptance', message: 'inspect', profileId: 'target-profile' };
+
+    await expect(coordinator.startAccepted(options)).rejects.toThrow('failed before initial transition');
+    await expect(coordinator.startAccepted(options)).resolves.toBeUndefined();
+    expect(calls).toBe(2);
+    await coordinator.close();
+  });
+
   it('registers a start before awaiting the agent and drains one stream for duplicate requests', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

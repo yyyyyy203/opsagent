@@ -6,6 +6,9 @@ import type { AgentMessage, ChatModel, ModelResponse, ModelStreamEvent } from '.
 import { startAgentWebRuntime } from '../src/bootstrap/agent-web-runtime.js';
 import { stableSourceChildRunId } from '../src/bootstrap/source-subagent-identity.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
+import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
+import { multiProjectConnectionRegistry, multiProjectProfiles, multiProjectTargetCatalog } from '../src/profiles/target-samples.js';
+import { StaticProfileResolver } from '../src/profiles/profile-resolver.js';
 import { RecordingObservability } from './fixtures/recording-observability.js';
 
 const roots: string[] = [];
@@ -115,6 +118,43 @@ describe('local Agent web runtime', () => {
       expect(await detail.json()).toMatchObject({ runId: 'web-run', status: 'completed' });
     } finally {
       await second.close();
+    }
+  });
+
+  it('mounts the Target catalog through host bootstrap but keeps Target starts disabled without a scope-aware starter', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsangent-web-targets-'));
+    roots.push(root);
+    const resolver = await createStaticTargetResolver({
+      catalog: multiProjectTargetCatalog,
+      connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles),
+      installedScenarios: [{ id: 'window_failure_rate.v1', version: '1.0.0' }],
+      installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+      validationTime: '2026-10-11T10:00:00.000Z',
+    });
+    const runtime = await startFetchableRuntime(() => startAgentWebRuntime({
+      dataDirectory: root, workspaceRoots: [root], model: new ScriptedModel([]), port: 0,
+      targetRuntime: { resolver },
+    }));
+    try {
+      const catalogResponse = await fetch(`${runtime.url}/targets`);
+      expect(catalogResponse.status).toBe(200);
+      const catalog = await catalogResponse.json() as Array<Record<string, unknown>>;
+      expect(catalog).toEqual(expect.arrayContaining([
+        expect.objectContaining({ targetId: 'market-a-sim', canStart: false, readOnly: true }),
+        expect.objectContaining({ targetId: 'market-b-sim', canStart: false, readOnly: true }),
+      ]));
+      expect(JSON.stringify(catalog)).not.toContain('secretRef');
+      expect(JSON.stringify(catalog)).not.toContain('endpoint');
+
+      const response = await fetch(`${runtime.url}/targets/market-a-sim/runs`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'not-enabled' },
+        body: JSON.stringify({ message: 'inspect' }),
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ error: 'TARGET_RUN_UNAVAILABLE' });
+    } finally {
+      await runtime.close();
     }
   });
 

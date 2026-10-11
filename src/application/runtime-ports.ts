@@ -2,6 +2,7 @@ import type { AgentEventEnvelopeV2 } from '../contracts/event-v2/index.js';
 import type { EventPublisherV2Dependencies, EventPublisherV2Like } from '../contracts/event-publisher.js';
 import type { EventStore, MessageStore } from '../contracts/event-store.js';
 import type { ReplayBufferV2 } from '../event/v2/replay-buffer.js';
+import type { DurableRunState } from '../contracts/storage.js';
 
 export interface SharedRuntimeEventSource extends EventPublisherV2Like {
   subscribe(projector: {
@@ -20,6 +21,8 @@ export interface SharedRuntimeEventPorts {
   source?: SharedRuntimeEventSource;
   /** Parent-owned transient replay buffer used by child stream helpers. */
   replay?: ReplayBufferV2;
+  /** Parent-owned persistence bundle used to atomically bind delegated child Runs. */
+  durableState?: DurableRunState;
 }
 
 export interface RuntimeShutdownRegistry {

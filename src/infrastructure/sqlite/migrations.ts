@@ -219,6 +219,40 @@ const MIGRATIONS = [
     CREATE INDEX diagnostic_memory_signals_run ON diagnostic_memory_signals(run_id, observed_at, signal_key);
     CREATE INDEX diagnostic_memory_signals_expiry ON diagnostic_memory_signals(observed_at, signal_key);
   `,
+  `
+    CREATE TABLE target_run_requests (
+      request_id TEXT PRIMARY KEY,
+      target_id TEXT NOT NULL,
+      request_digest TEXT NOT NULL,
+      run_id TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX target_run_requests_target_created ON target_run_requests(target_id, created_at, request_id);
+
+    CREATE TABLE target_snapshots (
+      binding_id TEXT PRIMARY KEY,
+      target_id TEXT NOT NULL,
+      snapshot_digest TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE run_target_bindings (
+      run_id TEXT PRIMARY KEY,
+      binding_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      root_run_id TEXT NOT NULL,
+      snapshot_digest TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      request_id TEXT,
+      request_digest TEXT,
+      CHECK ((request_id IS NULL) = (request_digest IS NULL)),
+      FOREIGN KEY (binding_id) REFERENCES target_snapshots(binding_id) ON DELETE RESTRICT,
+      FOREIGN KEY (request_id) REFERENCES target_run_requests(request_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX run_target_bindings_target_run ON run_target_bindings(target_id, run_id);
+    CREATE INDEX run_target_bindings_root ON run_target_bindings(root_run_id, run_id);
+  `,
 ] as const;
 
 export function migrateSqlite(database: Database.Database): void {

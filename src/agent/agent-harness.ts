@@ -27,9 +27,11 @@ import type {
   ToolExecutionRecord,
   RiskSeverity,
 } from '../contracts/index.js';
+import type { TargetBindingTransition, TrustedTargetBinding } from '../contracts/target.js';
 import { visibilityForV2Event } from '../event/v2/visibility.js';
 import { toolExecutionAttemptId } from '../event/v2/attempt-id.js';
-import { CheckpointConflictError, checkpointChecksum, createInitialRunGovernanceState, toAgentError } from '../contracts/index.js';
+import { CheckpointConflictError, TargetConfigurationError, checkpointChecksum, createInitialRunGovernanceState,
+  parseResolvedTargetSnapshot, parseTargetRunBindingRecord, toAgentError } from '../contracts/index.js';
 import type { CompressionResult, ContextCompressor } from '../context-compressor/types.js';
 import type { EventBus } from '../event/event-bus.js';
 import type { EventFactory } from '../event/event-factory.js';
@@ -81,6 +83,8 @@ type RunTerminalOutcome = 'completed' | 'paused' | 'failed' | 'cancelled';
 
 interface RunExecutionFrame {
   context: AgentContext;
+  /** Host-owned Target binding staged for the first durable RUN_STARTED transition. */
+  targetBinding?: TargetBindingTransition;
   finalText: string;
   activeStepId?: string;
   activeStepStartedAt?: number;
@@ -104,8 +108,25 @@ export class AgentHarness implements DiagnosisAgent {
   }
 
   public async *replyStream(options: ReplyOptions): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+    const runId = options.runId ?? this.dependencies.ids.next('run');
+    const trustedTargetBinding = options.trustedTargetBinding === undefined
+      ? undefined
+      : validateTrustedTargetBinding(options.trustedTargetBinding, runId, options.profileId);
+    if (trustedTargetBinding !== undefined
+      && (this.dependencies.durableState === undefined || this.dependencies.v2Events?.dispatcher === undefined)) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    const normalizedOptions: ReplyOptions = {
+      ...options,
+      runId,
+      ...(trustedTargetBinding === undefined ? {} : { trustedTargetBinding }),
+    };
     const frame: RunExecutionFrame = {
-      context: this.createContext(options),
+      context: this.createContext(normalizedOptions),
+      ...(trustedTargetBinding === undefined ? {} : { targetBinding: {
+        binding: trustedTargetBinding.binding,
+        snapshot: trustedTargetBinding.snapshot,
+      } }),
       finalText: '',
       naturalExit: false,
       lifecycleEffects: new Map(),
@@ -187,7 +208,13 @@ export class AgentHarness implements DiagnosisAgent {
     });
     try {
       if (!resumed) {
-        if (this.dependencies.profileResolver !== undefined) {
+        if (frame.targetBinding !== undefined) {
+          const governance = frame.context.governance ?? createInitialRunGovernanceState({
+            profileId: frame.context.profileId,
+            capturedAt: frame.targetBinding.snapshot!.capturedAt,
+          });
+          frame.context.governance = { ...governance, profile: frame.targetBinding.snapshot!.profile };
+        } else if (this.dependencies.profileResolver !== undefined) {
           const capturedAt = frame.context.governance?.profile.capturedAt ?? this.dependencies.clock.now().toISOString();
           const profile = await this.dependencies.profileResolver.resolve({
             profileId: frame.context.profileId,
@@ -1199,6 +1226,9 @@ export class AgentHarness implements DiagnosisAgent {
       status: 'running',
       stage: 'triage',
       profileId: options.profileId,
+      ...(options.trustedTargetBinding === undefined ? {} : {
+        targetBindingId: options.trustedTargetBinding.binding.bindingId,
+      }),
       messages: trustedSystemMessage === undefined ? [userMessage] : [trustedSystemMessage, userMessage],
       pendingToolCalls: [],
       confirmedToolCallIds: [],
@@ -1218,7 +1248,13 @@ export class AgentHarness implements DiagnosisAgent {
       toolCallBudget: options.toolCallBudget ?? { remaining: maxToolCalls },
       ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: options.networkAttemptBudget }),
       ...this.initialMemoryState(options.trustedMemoryControl),
-      governance: createInitialRunGovernanceState({ profileId: options.profileId, capturedAt: now }),
+      governance: options.trustedTargetBinding === undefined
+        ? createInitialRunGovernanceState({ profileId: options.profileId, capturedAt: now })
+        : {
+          ...createInitialRunGovernanceState({ profileId: options.profileId,
+            capturedAt: options.trustedTargetBinding.snapshot.capturedAt }),
+          profile: options.trustedTargetBinding.snapshot.profile,
+        },
     };
   }
 
@@ -1472,6 +1508,7 @@ export class AgentHarness implements DiagnosisAgent {
       ? toolExecutionAttemptId(frame.context.streamId, stepId, toolCallId)
       : undefined;
     if (durable === undefined) {
+      if (frame.targetBinding !== undefined) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
       if (memoryCapture !== undefined) throw new Error('Memory capture requires durable transition persistence.');
       if (v2 !== undefined) {
         await v2.publisher.publish(this.createPendingV2(type, frame.context, payload, stepId, toolCallId, attemptId));
@@ -1487,6 +1524,9 @@ export class AgentHarness implements DiagnosisAgent {
     if (pending !== undefined && dispatcher === undefined) {
       throw new Error(`Durable V2 event dispatcher is not configured: ${type}`);
     }
+    if (frame.targetBinding !== undefined && type !== 'RUN_STARTED') {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
     const filteredGovernanceEffects = this.filterMemoryGovernanceEffects(frame.context, governanceEffects);
     const saved = await durable.transitions.commit({
       expectedRevision: frame.checkpointRevision ?? null,
@@ -1494,10 +1534,12 @@ export class AgentHarness implements DiagnosisAgent {
       ...(execution === undefined ? {} : { execution }),
       ...(filteredGovernanceEffects === undefined ? {} : { governanceEffects: filteredGovernanceEffects }),
       outboxEvents: pending === undefined ? [] : [pending, ...additionalEvents],
+      ...(frame.targetBinding === undefined ? {} : { targetBinding: frame.targetBinding }),
       ...(memoryCapture === undefined ? {} : { memoryCapture }),
     });
     this.adoptContext(frame, saved.context);
     frame.checkpointRevision = saved.revision;
+    if (frame.targetBinding !== undefined) delete frame.targetBinding;
     if (pending !== undefined && dispatcher !== undefined) await dispatcher.drainRun(frame.context.runId);
   }
 
@@ -1776,6 +1818,20 @@ function memoryPolicyAllows(
   } catch {
     return false;
   }
+}
+
+function validateTrustedTargetBinding(
+  value: TrustedTargetBinding,
+  runId: string,
+  profileId: string,
+): TrustedTargetBinding {
+  const binding = parseTargetRunBindingRecord(value.binding);
+  const snapshot = parseResolvedTargetSnapshot(value.snapshot);
+  if (binding.runId !== runId || binding.targetId !== snapshot.targetId
+    || binding.snapshotDigest !== snapshot.digest || profileId !== snapshot.profile.profileId) {
+    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  }
+  return { binding, snapshot };
 }
 
 /** Only current user text may form the lexical query; tool output and prompts stay out. */

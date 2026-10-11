@@ -29,7 +29,9 @@ export function createSharedSourceChildAgentFactory(
         workspaceRoots: [...options.workspaceRoots],
         tools,
         allowedToolNames: tools.map((tool: Tool) => tool.name),
-        checkpoints: options.checkpoints,
+        ...(options.sharedEvents.durableState === undefined
+          ? { checkpoints: options.checkpoints }
+          : { durableState: options.sharedEvents.durableState }),
         evidence: options.evidence,
         evidenceRecorder: options.evidenceRecorder,
         eventMessageStore: options.sharedEvents.store,

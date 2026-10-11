@@ -10,6 +10,7 @@ import type {
   ToolCallOptions,
   ToolResponse,
   ToolResponseChunk,
+  TargetBindingStore,
 } from '../contracts/index.js';
 import { attachSourceEvidenceObservation } from '../application/source-evidence-observation.js';
 import type { SourceReportCollector } from '../application/source-report-collector.js';
@@ -39,6 +40,7 @@ export const logsSubagentInputSchema = z.object({
 export interface LogsSubagentOptions extends Omit<LogEvidenceToolOptions, 'maxModelBytes'> {
   childAgentFactory: SourceChildAgentFactory;
   checkpoints?: CheckpointStore;
+  targetBindings?: TargetBindingStore;
   clock?: Clock;
   sourceWindow?: { start: string; end: string };
   lifecycle?: SubagentLifecyclePorts;
@@ -66,6 +68,7 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
     childAgentFactory: options.childAgentFactory,
     childTools,
     ...(options.checkpoints === undefined ? {} : { checkpoints: options.checkpoints }),
+    ...(options.targetBindings === undefined ? {} : { targetBindings: options.targetBindings }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.collector === undefined ? {} : { collector: options.collector }),
     renderPrompt: renderLogsPrompt,

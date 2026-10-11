@@ -53,6 +53,8 @@ export interface ToolCallOptions {
   /** Immutable host scope captured from the parent AgentContext. */
   profileId?: string;
   profileRevision?: string;
+  /** Host-owned Target binding scope inherited from the current Run. */
+  targetBindingId?: string;
   signal: AbortSignal;
   mode: 'dry_run' | 'execute';
   deadline?: number;

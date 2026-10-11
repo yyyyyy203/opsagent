@@ -14,6 +14,10 @@ import {
   type VersionedCheckpointStore,
 } from '../../contracts/storage.js';
 import type { ToolExecutionResult } from '../../contracts/tool.js';
+import { TargetConfigurationError, type ResolvedTargetSnapshot, type TargetBindingStore,
+  type TargetBindingTransition, type TargetRunBindingRecord, type TargetRunBindingPage,
+  type TargetRunRequestRecord } from '../../contracts/target.js';
+import { parseResolvedTargetSnapshot, parseTargetRunBindingRecord, parseTargetRunRequestRecord } from '../../contracts/target-schema.js';
 import {
   checkpointChecksum,
   parseAgentContext,
@@ -22,8 +26,9 @@ import {
 import type { SqliteDatabase } from './database.js';
 import { enqueueOutboxEvents } from './event-outbox-store.js';
 import { enqueueMemoryCapture, persistMemorySignals } from './memory-job-store.js';
+import { validateTargetBindingState } from '../../storage/target-binding-state.js';
 
-const CHECKPOINT_SCHEMA_VERSION = 3;
+const CHECKPOINT_SCHEMA_VERSION = 4;
 
 interface CheckpointRow {
   run_id: string;
@@ -53,8 +58,35 @@ interface ExecutionRow {
   finished_at: string | null;
 }
 
+interface RequestRow {
+  request_id: string;
+  target_id: string;
+  request_digest: string;
+  run_id: string;
+  created_at: string;
+}
+
+interface BindingRow {
+  run_id: string;
+  binding_id: string;
+  target_id: string;
+  root_run_id: string;
+  snapshot_digest: string;
+  created_at: string;
+  request_id: string | null;
+  request_digest: string | null;
+}
+
+interface SnapshotRow {
+  binding_id: string;
+  target_id: string;
+  snapshot_digest: string;
+  snapshot_json: string;
+}
+
 /** SQLite control-plane implementation for checkpoint CAS and execution journal transitions. */
-export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolExecutionJournal, AgentStateUnitOfWork, DurableTransitionUnitOfWork {
+export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolExecutionJournal, AgentStateUnitOfWork,
+  DurableTransitionUnitOfWork, TargetBindingStore {
   public constructor(
     private readonly database: SqliteDatabase,
     private readonly clock: Clock,
@@ -95,6 +127,73 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     });
   }
 
+  public reserveRequest(record: TargetRunRequestRecord): Promise<{ record: TargetRunRequestRecord; created: boolean }> {
+    return Promise.resolve().then(() => this.database.raw.transaction(() => {
+      const normalized = parseTargetRunRequestRecord(record);
+      const existing = this.requestRow(normalized.requestId);
+      if (existing !== undefined) {
+        const parsed = this.parseRequest(existing);
+        if (!sameRequestIdentity(parsed, normalized)) throw new TargetConfigurationError('TARGET_REQUEST_CONFLICT');
+        return { record: parsed, created: false };
+      }
+      const runCollision = this.database.raw.prepare('SELECT request_id FROM target_run_requests WHERE run_id = ?')
+        .get(normalized.runId) as { request_id: string } | undefined;
+      if (runCollision !== undefined || this.bindingRow(normalized.runId) !== undefined) {
+        throw new TargetConfigurationError('TARGET_REQUEST_CONFLICT');
+      }
+      this.database.raw.prepare(`INSERT INTO target_run_requests(request_id, target_id, request_digest, run_id, created_at)
+        VALUES (?, ?, ?, ?, ?)`).run(normalized.requestId, normalized.targetId, normalized.requestDigest,
+        normalized.runId, normalized.createdAt);
+      return { record: structuredClone(normalized), created: true };
+    }).immediate());
+  }
+
+  public getRequest(requestId: string): Promise<TargetRunRequestRecord | null> {
+    return Promise.resolve().then(() => {
+      const row = this.requestRow(requestId);
+      return row === undefined ? null : this.parseRequest(row);
+    });
+  }
+
+  public getBinding(runId: string): Promise<TargetRunBindingRecord | null> {
+    return Promise.resolve().then(() => {
+      const row = this.bindingRow(runId);
+      return row === undefined ? null : this.parseBinding(row);
+    });
+  }
+
+  public getSnapshot(bindingId: string): Promise<ResolvedTargetSnapshot | null> {
+    return Promise.resolve().then(() => {
+      const row = this.database.raw.prepare(`SELECT binding_id, target_id, snapshot_digest, snapshot_json
+        FROM target_snapshots WHERE binding_id = ?`).get(bindingId) as SnapshotRow | undefined;
+      if (row === undefined) return null;
+      try {
+        const parsed = parseResolvedTargetSnapshot(JSON.parse(row.snapshot_json) as unknown);
+        if (parsed.targetId !== row.target_id || parsed.digest !== row.snapshot_digest) throw new Error('snapshot row mismatch');
+        return parsed;
+      } catch {
+        throw new TargetConfigurationError('TARGET_SNAPSHOT_UNAVAILABLE');
+      }
+    });
+  }
+
+  public listByTarget(input: { targetId: string; cursor?: string; limit: number }): Promise<TargetRunBindingPage> {
+    return Promise.resolve().then(() => {
+      if (input.targetId.length === 0 || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+        throw new RangeError('Target Run page request is invalid.');
+      }
+      const rows = input.cursor === undefined
+        ? this.database.raw.prepare(`SELECT * FROM run_target_bindings WHERE target_id = ? ORDER BY run_id LIMIT ?`)
+          .all(input.targetId, input.limit + 1) as BindingRow[]
+        : this.database.raw.prepare(`SELECT * FROM run_target_bindings WHERE target_id = ? AND run_id > ? ORDER BY run_id LIMIT ?`)
+          .all(input.targetId, input.cursor, input.limit + 1) as BindingRow[];
+      const hasMore = rows.length > input.limit;
+      const items = rows.slice(0, input.limit).map(row => this.parseBinding(row));
+      const last = items.at(-1);
+      return { items, ...(hasMore && last !== undefined ? { nextCursor: last.runId } : {}) };
+    });
+  }
+
   public commitToolResult(input: {
     expectedRevision: number;
     context: AgentContext;
@@ -130,12 +229,14 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     outboxEvents: readonly PendingAgentEventV2[];
     governanceEffects?: readonly GovernanceEffect[];
     memoryCapture?: MemoryCaptureIntent;
+    targetBinding?: TargetBindingTransition;
   }): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => this.database.raw.transaction(() => {
       const transition = input.execution;
       const context = transition?.kind === 'completed'
         ? appendCompletedResult(input.context, transition.result)
         : structuredClone(input.context);
+      this.persistTargetBinding(context, input.targetBinding);
       let existing: ToolExecutionRecord | undefined;
       let execution: ToolExecutionRecord | undefined;
       // Keep the established CAS-first result contract.  The checkpoint write
@@ -180,6 +281,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     forceRevisionAdvance = false,
   ): StoredRunCheckpoint {
     const normalized = parseAgentContext(context);
+    validateTargetBindingState(normalized, undefined, this.targetBindingReader());
     const row = this.checkpointRow(normalized.runId);
     const current = row === undefined ? undefined : this.parseCheckpoint(row);
     const checksum = checkpointChecksum(normalized);
@@ -245,6 +347,83 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     `).get(toolCallId) as ExecutionRow | undefined;
   }
 
+  private requestRow(requestId: string): RequestRow | undefined {
+    return this.database.raw.prepare(`SELECT request_id, target_id, request_digest, run_id, created_at
+      FROM target_run_requests WHERE request_id = ?`).get(requestId) as RequestRow | undefined;
+  }
+
+  private bindingRow(runId: string): BindingRow | undefined {
+    return this.database.raw.prepare(`SELECT run_id, binding_id, target_id, root_run_id, snapshot_digest, created_at,
+      request_id, request_digest FROM run_target_bindings WHERE run_id = ?`).get(runId) as BindingRow | undefined;
+  }
+
+  private parseRequest(row: RequestRow): TargetRunRequestRecord {
+    try {
+      return parseTargetRunRequestRecord({ requestId: row.request_id, targetId: row.target_id,
+        requestDigest: row.request_digest, runId: row.run_id, createdAt: row.created_at });
+    } catch {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+  }
+
+  private parseBinding(row: BindingRow): TargetRunBindingRecord {
+    try {
+      return parseTargetRunBindingRecord({ bindingId: row.binding_id, targetId: row.target_id, runId: row.run_id,
+        rootRunId: row.root_run_id, snapshotDigest: row.snapshot_digest, createdAt: row.created_at,
+        ...(row.request_id === null ? {} : { requestId: row.request_id }),
+        ...(row.request_digest === null ? {} : { requestDigest: row.request_digest }) });
+    } catch {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+  }
+
+  private targetBindingReader(): {
+    bindingByRunId: (runId: string) => TargetRunBindingRecord | null;
+    snapshotByBindingId: (bindingId: string) => ResolvedTargetSnapshot | null;
+    requestById: (requestId: string) => TargetRunRequestRecord | null;
+  } {
+    return {
+      bindingByRunId: runId => {
+        const row = this.bindingRow(runId);
+        return row === undefined ? null : this.parseBinding(row);
+      },
+      snapshotByBindingId: bindingId => this.getSnapshotSync(bindingId),
+      requestById: requestId => {
+        const row = this.requestRow(requestId);
+        return row === undefined ? null : this.parseRequest(row);
+      },
+    };
+  }
+
+  private getSnapshotSync(bindingId: string): ResolvedTargetSnapshot | null {
+    const row = this.database.raw.prepare(`SELECT binding_id, target_id, snapshot_digest, snapshot_json
+      FROM target_snapshots WHERE binding_id = ?`).get(bindingId) as SnapshotRow | undefined;
+    if (row === undefined) return null;
+    try {
+      const parsed = parseResolvedTargetSnapshot(JSON.parse(row.snapshot_json) as unknown);
+      if (parsed.targetId !== row.target_id || parsed.digest !== row.snapshot_digest) throw new Error('snapshot row mismatch');
+      return parsed;
+    } catch {
+      throw new TargetConfigurationError('TARGET_SNAPSHOT_UNAVAILABLE');
+    }
+  }
+
+  private persistTargetBinding(context: AgentContext, transition: TargetBindingTransition | undefined): void {
+    const validated = validateTargetBindingState(context, transition, this.targetBindingReader());
+    if (validated.binding === undefined) return;
+    if (validated.snapshot !== undefined) {
+      this.database.raw.prepare(`INSERT OR IGNORE INTO target_snapshots(binding_id, target_id, snapshot_digest, snapshot_json, created_at)
+        VALUES (?, ?, ?, ?, ?)`).run(validated.binding.bindingId, validated.snapshot.targetId,
+        validated.snapshot.digest, JSON.stringify(validated.snapshot), validated.snapshot.capturedAt);
+    }
+    this.database.raw.prepare(`INSERT OR IGNORE INTO run_target_bindings(
+      run_id, binding_id, target_id, root_run_id, snapshot_digest, created_at, request_id, request_digest
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(validated.binding.runId, validated.binding.bindingId, validated.binding.targetId,
+      validated.binding.rootRunId, validated.binding.snapshotDigest, validated.binding.createdAt,
+      validated.binding.requestId ?? null, validated.binding.requestDigest ?? null);
+  }
+
   private insertExecution(record: ToolExecutionRecord): void {
     this.database.raw.prepare(`
       INSERT INTO tool_executions(
@@ -277,6 +456,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
         case 1: context = parseAgentContext(decoded, 1); break;
         case 2: context = parseAgentContext(decoded, 2); break;
         case 3: context = parseAgentContext(decoded, 3); break;
+        case 4: context = parseAgentContext(decoded, 4); break;
         default: throw new Error('unsupported checkpoint schema version');
       }
       if (!Number.isSafeInteger(row.revision) || row.revision <= 0
@@ -287,6 +467,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
         || context.profileId !== row.profile_id) {
         throw new Error('checkpoint row integrity mismatch');
       }
+      validateTargetBindingState(context, undefined, this.targetBindingReader());
       return { context, revision: row.revision, savedAt: row.updated_at, checksum: row.checksum };
     } catch {
       throw new StoredDataCorruptionError('checkpoint', row.run_id);
@@ -380,6 +561,11 @@ function sameExecutionIdentity(left: ToolExecutionRecord, right: ToolExecutionRe
     && left.toolName === right.toolName
     && left.toolKind === right.toolKind
     && left.inputDigest === right.inputDigest;
+}
+
+function sameRequestIdentity(left: TargetRunRequestRecord, right: TargetRunRequestRecord): boolean {
+  return left.requestId === right.requestId && left.targetId === right.targetId
+    && left.requestDigest === right.requestDigest;
 }
 
 function sameJson(left: unknown, right: unknown): boolean {

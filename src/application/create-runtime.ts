@@ -106,6 +106,8 @@ export interface RuntimeToolPorts {
   /** Shared V2 lifecycle ports for late-bound source/subagent Tools. */
   events: EventPublisherV2Dependencies;
   checkpoints: CheckpointStore;
+  /** Shared host-owned durable state for child Runs that must atomically inherit Target scope. */
+  durableState?: DurableRunState;
   clock: Clock;
   ids: IdGenerator;
 }
@@ -130,6 +132,8 @@ export interface AgentRuntimeOptions {
   hooks?: ToolHook[];
   lifecycleObservers?: ToolLifecycleObserver[];
   checkpoints?: CheckpointStore;
+  /** Inject one host-owned durable state into nested runtimes; the child never owns or closes it. */
+  durableState?: DurableRunState;
   evidence?: EvidenceStore;
   evidenceRecorder?: EvidenceRecorder;
   observability?: Observability;
@@ -207,6 +211,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   if (options.sqlitePath !== undefined && (options.checkpoints !== undefined || options.eventMessageStore !== undefined)) {
     throw new Error('sqlitePath cannot be combined with partial persistence injection');
   }
+  if (options.durableState !== undefined && (options.sqlitePath !== undefined || options.checkpoints !== undefined)) {
+    throw new Error('durableState cannot be combined with sqlitePath or a separate checkpoint store.');
+  }
   const persistence = options.sqlitePath === undefined ? undefined : createSqlitePersistence({
     path: options.sqlitePath,
     clock,
@@ -217,7 +224,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     && persistence === undefined && options.checkpoints === undefined
     ? new InMemoryDurableState(clock)
     : undefined;
-  const durableState: DurableRunState | undefined = persistence ?? inMemoryDurable;
+  const durableState: DurableRunState | undefined = options.durableState ?? persistence ?? inMemoryDurable;
   if (options.memoryHarness !== undefined) {
     if (durableState === undefined) {
       throw new Error('memoryHarness requires durable checkpoint and V2 transition persistence.');
@@ -370,6 +377,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     events: v2EventDependencies,
     source: eventPublisherV2,
     replay: replayV2,
+    ...(durableState === undefined ? {} : { durableState }),
   };
   let factoryTools: Tool[] = [];
   try {
@@ -384,6 +392,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       toolResultCompactor,
       events: v2EventDependencies,
       checkpoints,
+      ...(durableState === undefined ? {} : { durableState }),
       clock,
       ids,
     })]);
