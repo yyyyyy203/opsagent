@@ -40,6 +40,8 @@ export interface KnowledgeSourceTransitionCommand {
 
 export interface KnowledgeDraftWriteCommand {
   readonly requestId: string;
+  /** Optional caller-stable intent digest; lets an orchestrator replay across generated ID/time changes. */
+  readonly intentDigest?: string;
   readonly actorId: string;
   readonly naturalKey: string;
   readonly sourceDomainId: string;
@@ -114,8 +116,13 @@ export interface KnowledgeRevisionStateSnapshot {
   readonly kind: KnowledgeKind;
   readonly contentRevision: number;
   readonly governanceVersion: number;
+  /** Immutable payload digest; exposed to governance services without returning draft content. */
+  readonly contentDigest: string;
   readonly status: KnowledgeStatus;
+  /** Source epoch captured by the immutable revision. */
   readonly sourceEpoch: number;
+  /** Current host source epoch at inspection time; null means the source is missing. */
+  readonly currentSourceEpoch: number | null;
   readonly sourceValidity: KnowledgeSourceValidity | 'missing';
   readonly sourceDigestMatches: boolean;
   readonly validUntil?: string | undefined;

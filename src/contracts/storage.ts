@@ -3,6 +3,7 @@ import type { JsonValue } from './common.js';
 import type { GovernanceEffect } from './hooks.js';
 import type { PendingAgentEventV2 } from './event-store.js';
 import type { MemoryCaptureIntent } from './diagnostic-memory.js';
+import type { KnowledgePublicationInspectionPort } from './knowledge-memory-storage.js';
 import type { TargetBindingStore, TargetBindingTransition, TargetIdentityRegistry, TargetKnowledgePolicyStore,
   TargetStartStore } from './target.js';
 import type { ToolCall, ToolExecutionResult, ToolKind } from './tool.js';
@@ -121,6 +122,7 @@ export interface DurableRunState {
   /** Optional Target catalog history stores, present when owned durable persistence is configured. */
   targetIdentityRegistry?: TargetIdentityRegistry;
   targetKnowledgePolicies?: TargetKnowledgePolicyStore;
+  targetKnowledgeBindings?: KnowledgePublicationInspectionPort;
   /** Durable owner/epoch/lease claims for the first Target Run transition. */
   targetStarts?: TargetStartStore;
 }

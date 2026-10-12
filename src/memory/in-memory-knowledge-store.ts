@@ -117,7 +117,8 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
     return Promise.resolve().then(() => this.inTransaction(() => {
       const normalized = normalizeDraftCommand(command);
       const digest = commandDigest('draft', normalized);
-      const replay = this.replayReceipt(normalized.requestId, 'draft', digest);
+      const receiptDigest = draftReceiptDigest(normalized);
+      const replay = this.replayReceipt(normalized.requestId, 'draft', receiptDigest);
       if (replay) return this.currentRevision(replay.knowledgeId, replay.contentRevision);
 
       const revision = parseKnowledgeRecord(normalized.revision);
@@ -146,10 +147,9 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
         }
         const previous = this.revisions.get(revisionKey(revision.id, normalized.expectedContentRevision));
         const existingItem = this.items.get(revision.id);
-        if (!previous || !existingItem || existingItem.latestContentRevision !== normalized.expectedContentRevision
-          || previous.governanceVersion !== normalized.expectedGovernanceVersion) {
-          throw error('KNOWLEDGE_GOVERNANCE_CONFLICT');
-        }
+        if (!previous || !existingItem) throw error('KNOWLEDGE_NOT_FOUND');
+        if (existingItem.latestContentRevision !== normalized.expectedContentRevision) throw error('KNOWLEDGE_REVISION_CONFLICT');
+        if (previous.governanceVersion !== normalized.expectedGovernanceVersion) throw error('KNOWLEDGE_GOVERNANCE_CONFLICT');
         if (previous.immutable.kind !== revision.kind || scopeDigest(previous.immutable.scope) !== scopeKey
           || previous.naturalKey !== normalized.naturalKey) throw error('KNOWLEDGE_SCOPE_INVALID');
         item = { ...existingItem, latestContentRevision: revision.contentRevision };
@@ -169,7 +169,7 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
       this.itemsByNaturalKey.set(itemKey, revision.id);
       this.revisions.set(revisionKey(revision.id, revision.contentRevision), stored);
       this.appendWithinTransaction(audit);
-      this.saveReceipt({ requestId: normalized.requestId, operation: 'draft', commandDigest: digest,
+      this.saveReceipt({ requestId: normalized.requestId, operation: 'draft', commandDigest: receiptDigest,
         knowledgeId: revision.id, contentRevision: revision.contentRevision, resultJson: '{}' });
       return this.materialize(stored);
     }));
@@ -365,7 +365,9 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
       return {
         knowledgeId: revision.immutable.id, kind: revision.immutable.kind,
         contentRevision: revision.immutable.contentRevision, governanceVersion: revision.governanceVersion,
+        contentDigest: revision.immutable.contentDigest,
         status: revision.status, sourceEpoch: revision.sourceEpoch,
+        currentSourceEpoch: source?.sourceEpoch ?? null,
         sourceValidity: source?.validity ?? 'missing',
         sourceDigestMatches: source?.sourceDigest === revision.immutable.provenance.sourceDigest,
         ...(revision.immutable.validUntil === undefined ? {} : { validUntil: revision.immutable.validUntil }),
@@ -589,6 +591,7 @@ function normalizeDraftCommand(command: KnowledgeDraftWriteCommand): KnowledgeDr
     || typeof command.actorId !== 'string' || command.actorId.trim() === ''
     || typeof command.naturalKey !== 'string' || command.naturalKey.trim() === ''
     || typeof command.sourceDomainId !== 'string' || command.sourceDomainId.trim() === '') throw error('KNOWLEDGE_RECORD_INVALID');
+  if (command.intentDigest !== undefined && !/^[a-f0-9]{64}$/u.test(command.intentDigest)) throw error('KNOWLEDGE_RECORD_INVALID');
   if ((command.expectedContentRevision === null) !== (command.expectedGovernanceVersion === null)) throw error('KNOWLEDGE_REVISION_CONFLICT');
   return { ...structuredClone(command), revision: parseKnowledgeRecord(command.revision) };
 }
@@ -649,6 +652,18 @@ function auditTargetId(event: KnowledgeGovernanceAuditV1): string | undefined {
 
 function commandDigest(operation: string, command: unknown): string {
   return checkpointChecksum({ operation, command });
+}
+
+function draftReceiptDigest(command: KnowledgeDraftWriteCommand): string {
+  return command.intentDigest === undefined ? commandDigest('draft', command)
+    : commandDigest('draft_intent', { ...command, revision: {
+      ...command.revision,
+      // Only the initial identity and authoring timestamps are generated on retries.
+      // Revision updates must retain their existing knowledge identity.
+      id: command.expectedContentRevision === null ? null : command.revision.id,
+      createdAt: null,
+      provenance: { ...command.revision.provenance, importedAt: null },
+    } });
 }
 
 function scopeDigest(scope: KnowledgeScope): string {

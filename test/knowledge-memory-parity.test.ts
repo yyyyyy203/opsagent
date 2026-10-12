@@ -5,6 +5,7 @@ import { SqliteDatabase } from '../src/infrastructure/sqlite/database.js';
 import { SqliteGovernedKnowledgeStore } from '../src/infrastructure/sqlite/knowledge-memory-store.js';
 import { SqliteTargetKnowledgeBindingStore } from '../src/infrastructure/sqlite/target-knowledge-binding-store.js';
 import { InMemoryGovernedKnowledgeStore } from '../src/memory/in-memory-knowledge-store.js';
+import type { KnowledgeDraftWriteCommand } from '../src/contracts/knowledge-memory-storage.js';
 
 const digest = 'a'.repeat(64);
 const scope: KnowledgeScope = {
@@ -67,6 +68,50 @@ function searchInput(revisions: readonly SemanticKnowledgeRevision[], query = 's
 }
 
 describe.each(['sqlite', 'memory'] as const)('%s governed knowledge regressions', (backend) => {
+  it.each(['content', 'actor', 'scope', 'source', 'source-domain', 'source-epoch', 'expected-versions',
+    'natural-key', 'valid-until', 'content-revision'] as const)(
+    'binds draft replay to stable %s even when the supplied intent digest is unchanged', async field => {
+      const { store, database } = fixture(backend);
+      try {
+        await store.registerSource({ sourceId: 'profile-source', dataDomainId: 'domain-one', sourceDigest: digest,
+          registeredAt: '2026-10-10T00:00:00.000Z' });
+        const command: KnowledgeDraftWriteCommand = { requestId: 'stable-draft', intentDigest: 'c'.repeat(64),
+          actorId: 'operator', naturalKey: 'stable-item', sourceDomainId: 'domain-one',
+          expectedContentRevision: null, expectedGovernanceVersion: null, revision: draft('stable-draft-id') };
+        await store.saveDraft(command);
+        let changed: KnowledgeDraftWriteCommand = structuredClone(command);
+        if (field === 'content') changed = { ...changed, revision: draft('stable-draft-id', 'Changed definition.') };
+        if (field === 'actor') changed = { ...changed, actorId: 'different-operator' };
+        if (field === 'scope') changed = { ...changed, revision: { ...changed.revision,
+          scope: { ...scope, targetId: 'another-target' } } };
+        if (field === 'source') changed = { ...changed, revision: { ...changed.revision,
+          provenance: { ...changed.revision.provenance, sourceId: 'another-source' } } };
+        if (field === 'source-domain') changed = { ...changed, sourceDomainId: 'another-domain' };
+        if (field === 'source-epoch') changed = { ...changed, revision: { ...changed.revision, sourceEpoch: 1 } };
+        if (field === 'expected-versions') changed = { ...changed, expectedContentRevision: 1, expectedGovernanceVersion: 1 };
+        if (field === 'natural-key') changed = { ...changed, naturalKey: 'another-item' };
+        if (field === 'valid-until') changed = { ...changed, revision: { ...changed.revision, validUntil: '2026-10-13T00:00:00.000Z' } };
+        if (field === 'content-revision') changed = { ...changed, revision: { ...changed.revision, contentRevision: 2 } };
+        await expect(store.saveDraft(changed)).rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+        expect(await store.listPending(20)).toHaveLength(1);
+      } finally { database.close(); }
+    });
+
+  it('replays a stable initial draft across generated identity and import/creation times only', async () => {
+    const { store, database } = fixture(backend);
+    try {
+      await store.registerSource({ sourceId: 'profile-source', dataDomainId: 'domain-one', sourceDigest: digest,
+        registeredAt: '2026-10-10T00:00:00.000Z' });
+      const command: KnowledgeDraftWriteCommand = { requestId: 'generated-replay', intentDigest: 'c'.repeat(64),
+        actorId: 'operator', naturalKey: 'stable-item', sourceDomainId: 'domain-one',
+        expectedContentRevision: null, expectedGovernanceVersion: null, revision: draft('generated-first') };
+      const saved = await store.saveDraft(command);
+      expect(await store.saveDraft({ ...command, revision: { ...command.revision, id: 'generated-second',
+        createdAt: '2026-10-11T00:00:00.000Z', provenance: { ...command.revision.provenance,
+          importedAt: '2026-10-11T00:00:00.000Z' } } })).toEqual(saved);
+      expect(await store.listPending(20)).toHaveLength(1);
+    } finally { database.close(); }
+  });
   it('replays approval after revocation as the current revoked revision without another audit', async () => {
     const { store, database } = fixture(backend);
     try {

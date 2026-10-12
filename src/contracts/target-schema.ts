@@ -169,6 +169,7 @@ const snapshotV2Base = z.object({
   unavailableOptionalSourceIds: z.array(identifier).max(8),
   knowledgeRefs: z.array(knowledgeRef).max(20),
   knowledgePolicy,
+  publicationVersion: z.number().int().nonnegative().safe().optional(),
   memoryScope: memoryScopeSchema,
   capturedAt: timestamp,
   digest: snapshotDigestV2,

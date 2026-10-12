@@ -3,7 +3,8 @@ import { isIP } from 'node:net';
 import { isAbsolute, join } from 'node:path';
 import type { ChatModel, Clock, DurableRunState, IdGenerator, InspectionQueryService, Observability, Tool } from '../contracts/index.js';
 import type { TargetIdentityRegistry, TargetKnowledgePolicyStore, TargetOperationPolicy, TargetResolver,
-  TargetRuntimeProvider } from '../contracts/target.js';
+  TargetRuntimeProvider, TargetKnowledgeCapabilityPort } from '../contracts/target.js';
+import type { KnowledgePublicationInspectionPort } from '../contracts/knowledge-memory-storage.js';
 import type { ModelIdentity } from './model-identity.js';
 import type { RuntimeToolPorts } from '../application/create-runtime.js';
 import type { ReplyOptions } from '../agent/types.js';
@@ -30,6 +31,9 @@ const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
   enabled: true,
   readOnly: true,
 }]);
+const disabledTargetKnowledgeCapabilities: TargetKnowledgeCapabilityPort = {
+  getForTarget: () => Promise.resolve({ semanticEnabled: false, proceduralEnabled: false }),
+};
 
 export interface AgentWebProfileConfig {
   id: string;
@@ -70,6 +74,8 @@ export interface AgentWebRuntimeOptions {
    */
   targetRuntime?: {
     createResolver: (ports: TargetResolverFactoryPorts) => TargetResolver | Promise<TargetResolver>;
+    /** Host-owned flags. Omitted means Semantic and Procedural remain disabled. */
+    knowledgeCapabilities?: TargetKnowledgeCapabilityPort;
     /** Both factories are required before Target execution can be enabled. */
     createOperationPolicy?: (ports: TargetRecoveryFactoryPorts) => TargetOperationPolicy;
     createRuntimeProvider?: (ports: TargetRecoveryFactoryPorts) => TargetRuntimeProvider;
@@ -100,6 +106,8 @@ export interface TargetRunStarterFactoryPorts {
 export interface TargetResolverFactoryPorts {
   identityRegistry: TargetIdentityRegistry;
   knowledgePolicies: TargetKnowledgePolicyStore;
+  knowledgePublications: KnowledgePublicationInspectionPort;
+  knowledgeCapabilities: TargetKnowledgeCapabilityPort;
 }
 
 export interface TargetRecoveryFactoryPorts extends TargetResolverFactoryPorts {
@@ -227,18 +235,22 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     if (options.targetRuntime !== undefined) {
       const identityRegistry = runtime.durableState.targetIdentityRegistry;
       const knowledgePolicies = runtime.durableState.targetKnowledgePolicies;
-      if (identityRegistry === undefined || knowledgePolicies === undefined || runtime.durableState.targetStarts === undefined) {
-        throw new Error('Target Resolver factory requires persistent identity, knowledge-policy, and start-claim stores.');
+      const knowledgePublications = runtime.durableState.targetKnowledgeBindings;
+      if (identityRegistry === undefined || knowledgePolicies === undefined || knowledgePublications === undefined
+        || runtime.durableState.targetStarts === undefined) {
+        throw new Error('Target Resolver factory requires persistent identity, knowledge-policy, publication, and start-claim stores.');
       }
-      targetResolver = await options.targetRuntime.createResolver({ identityRegistry, knowledgePolicies });
+      const knowledgeCapabilities = options.targetRuntime.knowledgeCapabilities ?? disabledTargetKnowledgeCapabilities;
+      targetResolver = await options.targetRuntime.createResolver({ identityRegistry, knowledgePolicies,
+        knowledgePublications, knowledgeCapabilities });
       const hasOperationPolicy = options.targetRuntime.createOperationPolicy !== undefined;
       const hasRuntimeProvider = options.targetRuntime.createRuntimeProvider !== undefined;
       if (hasOperationPolicy !== hasRuntimeProvider) {
         throw new Error('Target execution requires both current-policy and runtime-provider factories.');
       }
       if (hasOperationPolicy && hasRuntimeProvider) {
-        const ports: TargetRecoveryFactoryPorts = { identityRegistry, knowledgePolicies, resolver: targetResolver,
-          durableState: runtime.durableState };
+        const ports: TargetRecoveryFactoryPorts = { identityRegistry, knowledgePolicies, knowledgePublications,
+          knowledgeCapabilities, resolver: targetResolver, durableState: runtime.durableState };
         targetRecoveryGate = new TargetRecoveryService({
           bindings: runtime.durableState.targetBindings,
           identityRegistry,

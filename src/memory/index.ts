@@ -12,3 +12,5 @@ export * from './capture-intent.js';
 export * from './hint-renderer.js';
 export * from './in-memory-knowledge-store.js';
 export * from './knowledge-audit-dispatcher.js';
+export * from './semantic-source-registry.js';
+export * from './semantic-knowledge-service.js';

@@ -130,7 +130,8 @@ describe('local Agent web runtime', () => {
       dataDirectory: root, workspaceRoots: [root], model: new ScriptedModel([]), port: 0,
       targetRuntime: {
         createResolver: ports => {
-          identityPortsSeen = ports.identityRegistry !== undefined && ports.knowledgePolicies !== undefined;
+          identityPortsSeen = ports.identityRegistry !== undefined && ports.knowledgePolicies !== undefined
+            && ports.knowledgePublications !== undefined && ports.knowledgeCapabilities !== undefined;
           return createStaticTargetResolver({
             ...ports,
             catalog: multiProjectTargetCatalog,

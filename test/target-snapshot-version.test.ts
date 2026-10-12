@@ -16,7 +16,7 @@ import { legacySnapshotUnsigned } from './helpers/legacy-target-snapshot.js';
 const capturedAt = '2026-10-11T10:00:00.000Z';
 
 describe('versioned Target snapshots', () => {
-  it('resolves new Target bindings to V2 with trusted implementation, source, and knowledge policy identity', async () => {
+  it('resolves new Target bindings to V2 and refuses catalog-only knowledge activation', async () => {
     const resolver = await createStaticTargetResolver({
       ...createTargetIdentityTestPorts(),
       catalog: multiProjectTargetCatalog,
@@ -42,21 +42,25 @@ describe('versioned Target snapshots', () => {
         sourceGeneration: 1,
         permissionScopeDigest: 'a'.repeat(64),
       }],
+      knowledgeRefs: [],
       knowledgePolicy: {
         defaultRequiredness: 'optional',
-        requirements: [{
-          id: 'settlement-runbook',
-          version: '1.0.0',
-          digest: 'a'.repeat(64),
-          requiredness: 'optional',
-        }],
+        requirements: [],
       },
+      publicationVersion: 0,
     });
 
     expect(snapshot.scenarioImplementationDigest).toMatch(/^sha256:v1:[a-f0-9]{64}$/u);
     expect(snapshot.digest).toMatch(/^sha256:v2:[a-f0-9]{64}$/u);
     expect(parseResolvedTargetSnapshotV2(snapshot)).toEqual(snapshot);
     expect(parseExecutableTargetSnapshot(snapshot)).toEqual(snapshot);
+
+    const { publicationVersion: _publicationVersion, digest: _digest, ...preT3Unsigned } = snapshot;
+    void _publicationVersion;
+    void _digest;
+    const preT3 = { ...preT3Unsigned,
+      digest: `sha256:v2:${checkpointChecksum({ algorithm: 'sha256', version: 2, target: preT3Unsigned })}` };
+    expect(parseResolvedTargetSnapshotV2(preT3)).toEqual(preT3);
   });
 
   it('keeps V1 snapshots readable with the old digest while refusing to execute them', async () => {

@@ -69,7 +69,8 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
     return Promise.resolve().then(() => this.database.raw.transaction(() => {
       const normalized = normalizeDraft(command);
       const digest = commandDigest('draft', normalized);
-      const receipt = this.findReceipt(normalized.requestId, 'draft', digest);
+      const receiptDigest = draftReceiptDigest(normalized);
+      const receipt = this.findReceipt(normalized.requestId, 'draft', receiptDigest);
       if (receipt) return this.readReceiptRevision(receipt);
       const revision = parseKnowledgeRecord(normalized.revision);
       if (revision.status !== 'draft' || revision.governanceVersion !== 1 || revision.review !== undefined) throw failure('KNOWLEDGE_RECORD_INVALID');
@@ -123,7 +124,7 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
         governanceVersion: 1, afterStatus: 'draft', occurredAt: this.clock.now().toISOString(),
       });
       appendSqliteKnowledgeAuditWithinTransaction(this.database, event);
-      this.insertReceipt(normalized.requestId, digest, 'draft', revision.id, revision.contentRevision, '{}', normalized.actorId, 1);
+      this.insertReceipt(normalized.requestId, receiptDigest, 'draft', revision.id, revision.contentRevision, '{}', normalized.actorId, 1);
       return this.loadRevision(revision.id, revision.contentRevision)!;
     }).immediate());
   }
@@ -353,7 +354,8 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
         this.readRevisionSourceDomain(input.id, input.contentRevision));
       return {
         knowledgeId: revision.id, kind: revision.kind, contentRevision: revision.contentRevision,
-        governanceVersion: revision.governanceVersion, status: revision.status, sourceEpoch: revision.sourceEpoch,
+        governanceVersion: revision.governanceVersion, contentDigest: revision.contentDigest,
+        status: revision.status, sourceEpoch: revision.sourceEpoch, currentSourceEpoch: source?.sourceEpoch ?? null,
         sourceValidity: source?.validity ?? 'missing', sourceDigestMatches: source?.sourceDigest === revision.provenance.sourceDigest,
         ...(revision.validUntil === undefined ? {} : { validUntil: revision.validUntil }),
         eligibleAt: input.now,
@@ -550,6 +552,7 @@ function assertCurrentSource(revision: KnowledgeRevision, source: KnowledgeSourc
 function normalizeDraft(command: KnowledgeDraftWriteCommand): KnowledgeDraftWriteCommand {
   if (!command.requestId.trim() || !command.actorId.trim() || !command.naturalKey.trim() || !command.sourceDomainId.trim()
     || ((command.expectedContentRevision === null) !== (command.expectedGovernanceVersion === null))) throw failure('KNOWLEDGE_RECORD_INVALID');
+  if (command.intentDigest !== undefined && !/^[a-f0-9]{64}$/u.test(command.intentDigest)) throw failure('KNOWLEDGE_RECORD_INVALID');
   return { ...structuredClone(command), revision: parseKnowledgeRecord(command.revision) };
 }
 
@@ -624,6 +627,17 @@ function governanceReceiptOperation(status: KnowledgeGovernanceTransitionCommand
 }
 
 function commandDigest(operation: string, command: unknown): string { return checkpointChecksum({ operation, command }); }
+function draftReceiptDigest(command: KnowledgeDraftWriteCommand): string {
+  return command.intentDigest === undefined ? commandDigest('draft', command)
+    : commandDigest('draft_intent', { ...command, revision: {
+      ...command.revision,
+      // Only the initial identity and authoring timestamps are generated on retries.
+      // Revision updates must retain their existing knowledge identity.
+      id: command.expectedContentRevision === null ? null : command.revision.id,
+      createdAt: null,
+      provenance: { ...command.revision.provenance, importedAt: null },
+    } });
+}
 function scopeDigest(scope: KnowledgeScope): string { return checkpointChecksum(scope); }
 function positive(value: number): boolean { return Number.isSafeInteger(value) && value > 0; }
 function validLimit(value: number, max: number): boolean { return Number.isSafeInteger(value) && value >= 1 && value <= max; }

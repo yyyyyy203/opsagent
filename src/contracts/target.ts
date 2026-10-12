@@ -21,6 +21,7 @@ export const TARGET_ERROR_CODES = [
   'TARGET_START_STATE_UNKNOWN',
   'TARGET_RUN_UNAVAILABLE',
   'TARGET_OPERATION_DENIED',
+  'KNOWLEDGE_REQUIRED_DISABLED',
 ] as const;
 
 export type TargetErrorCode = typeof TARGET_ERROR_CODES[number];
@@ -165,6 +166,8 @@ export interface ResolvedTargetSnapshotV2 {
   unavailableOptionalSourceIds: readonly string[];
   knowledgeRefs: readonly TargetKnowledgeReference[];
   knowledgePolicy: TargetKnowledgePolicy;
+  /** Host-published Target knowledge binding version; absent only in pre-T3 V2 snapshots. */
+  publicationVersion?: number;
   memoryScope: MemoryScope;
   capturedAt: string;
   digest: string;
@@ -259,6 +262,16 @@ export interface TargetIdentityRegistry {
 export interface TargetKnowledgePolicyStore {
   get(targetId: string): Promise<TargetKnowledgePolicy | null>;
   compareAndSet(input: TargetKnowledgePolicyWrite): Promise<TargetKnowledgePolicy>;
+}
+
+export interface TargetKnowledgeCapabilityState {
+  semanticEnabled: boolean;
+  proceduralEnabled: boolean;
+}
+
+/** Host-owned feature flags; callers and Run preferences cannot enable a disabled knowledge type. */
+export interface TargetKnowledgeCapabilityPort {
+  getForTarget(targetId: string): Promise<TargetKnowledgeCapabilityState>;
 }
 
 export interface TargetSelection {

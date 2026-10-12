@@ -1,4 +1,9 @@
 import { checkpointChecksum, type ProfileResolver, type ResolvedProfileSnapshot } from '../contracts/index.js';
+import { KnowledgeContractError, type KnowledgeScope, type TargetKnowledgePublication } from '../contracts/knowledge-memory.js';
+import { normalizeKnowledgePublication, validateKnowledgePublicationPolicy } from '../contracts/knowledge-storage-behavior.js';
+import { parseKnowledgeScope } from '../contracts/knowledge-memory-schema.js';
+import { parseResolvedTargetSnapshotV2 } from '../contracts/target-schema.js';
+import type { KnowledgePublicationInspectionPort } from '../contracts/knowledge-memory-storage.js';
 import {
   TargetConfigurationError,
   type TargetCatalogDefinition,
@@ -8,6 +13,7 @@ import {
   type TargetIdentityRegistry,
   type TargetKnowledgePolicy,
   type TargetKnowledgePolicyStore,
+  type TargetKnowledgeCapabilityPort,
   type TargetSourceIdentity,
   type TargetResolver,
   type TargetScenarioBinding,
@@ -59,11 +65,21 @@ export interface CreateStaticTargetResolverOptions {
   installedAdapters: readonly TargetSourceAdapter[];
   identityRegistry: TargetIdentityRegistry;
   knowledgePolicies: TargetKnowledgePolicyStore;
+  /** Missing means no explicit knowledge binding exists; catalog references are never activated by themselves. */
+  knowledgePublications?: KnowledgePublicationInspectionPort;
+  /** Host-only feature flags; defaults closed. */
+  knowledgeCapabilities?: TargetKnowledgeCapabilityPort;
   validationTime: string;
   maxRegisteredTargets?: number;
 }
 
 const DEFAULT_MAX_REGISTERED_TARGETS = 200;
+const noKnowledgePublications: KnowledgePublicationInspectionPort = {
+  inspectBinding: () => Promise.resolve({ publication: null, scopeKey: null }),
+};
+const disabledKnowledgeCapabilities: TargetKnowledgeCapabilityPort = {
+  getForTarget: () => Promise.resolve({ semanticEnabled: false, proceduralEnabled: false }),
+};
 
 /**
  * Loads a bounded Target catalog from host-owned data. Bad Target entries are
@@ -155,7 +171,9 @@ export async function createStaticTargetResolver(
   const acceptedCandidates = candidates.filter(definition => acceptedIds.has(definition.targetId));
 
   return new StaticTargetResolver(acceptedCandidates, profiles, unavailableOptionals, sourceIdentities, rejected,
-    options.profileResolver, scenarioRegistry, privateConnections, adapterRegistry, options.knowledgePolicies);
+    options.profileResolver, scenarioRegistry, privateConnections, adapterRegistry, options.knowledgePolicies,
+    options.knowledgePublications ?? noKnowledgePublications,
+    options.knowledgeCapabilities ?? disabledKnowledgeCapabilities);
 }
 
 export class StaticTargetResolver implements TargetResolver {
@@ -174,6 +192,8 @@ export class StaticTargetResolver implements TargetResolver {
     private readonly connections: ReadonlyMap<string, PrivateConnectionDefinition>,
     private readonly adapters: ReadonlyMap<string, TargetSourceKind>,
     private readonly knowledgePolicies: TargetKnowledgePolicyStore,
+    private readonly knowledgePublications: KnowledgePublicationInspectionPort,
+    private readonly knowledgeCapabilities: TargetKnowledgeCapabilityPort,
   ) {
     for (const definition of definitions) {
       const profile = profiles.get(definition.targetId);
@@ -241,11 +261,19 @@ export class StaticTargetResolver implements TargetResolver {
         throw new TargetConfigurationError('TARGET_BINDING_INVALID');
       }
       const memoryScope = deriveMemoryScope(entry.definition);
+      const hostPolicy = await this.knowledgePolicies.get(entry.definition.targetId);
+      validateHostKnowledgePolicy(hostPolicy, entry.definition.targetId);
+      const capabilities = await this.knowledgeCapabilities.getForTarget(entry.definition.targetId);
+      if (hostPolicy !== null) assertRequiredKnowledgeEnabled(hostPolicy, capabilities);
+      const binding = await this.knowledgePublications.inspectBinding(entry.definition.targetId);
+      const knowledgeBinding = resolvePublishedKnowledgeBinding(entry.definition, binding);
       const knowledgePolicy = resolveKnowledgePolicy(
-        await this.knowledgePolicies.get(entry.definition.targetId),
+        hostPolicy,
+        knowledgeBinding.publication?.policy ?? null,
         entry.definition.targetId,
-        entry.definition.knowledgeRefs,
+        knowledgeBinding.references,
       );
+      assertRequiredKnowledgeEnabled(knowledgePolicy, capabilities);
       const unsigned = {
         schemaVersion: 2 as const,
         targetId: entry.definition.targetId,
@@ -262,13 +290,15 @@ export class StaticTargetResolver implements TargetResolver {
         sourceBindings: entry.definition.sourceBindings.map(cloneSourceBinding),
         sourceIdentities: entry.sourceIdentities.map(cloneSourceIdentity),
         unavailableOptionalSourceIds: [...entry.unavailableOptionalSourceIds],
-        knowledgeRefs: entry.definition.knowledgeRefs.map(reference => ({ ...reference })),
+        knowledgeRefs: knowledgeBinding.references.map(reference => ({ id: reference.id, version: reference.version,
+          digest: reference.digest, approval: reference.approval })),
         knowledgePolicy,
+        publicationVersion: knowledgeBinding.publication?.publicationVersion ?? 0,
         memoryScope,
         capturedAt: input.capturedAt,
       };
       const digest = `sha256:v2:${checkpointChecksum({ algorithm: 'sha256', version: 2, target: unsigned })}`;
-      return deepFreeze({ ...unsigned, digest });
+      return parseResolvedTargetSnapshotV2({ ...unsigned, digest });
     });
   }
 }
@@ -476,15 +506,45 @@ function cloneSourceIdentity(identity: TargetSourceIdentity): TargetSourceIdenti
 }
 
 function resolveKnowledgePolicy(
+  hostPolicy: TargetKnowledgePolicy | null,
+  publishedPolicy: TargetKnowledgePolicy | null,
+  targetId: string,
+  references: TargetCatalogDefinition['knowledgeRefs'],
+): TargetKnowledgePolicy {
+  const host = resolveSingleKnowledgePolicy(hostPolicy, targetId, references);
+  const published = resolveSingleKnowledgePolicy(publishedPolicy, targetId, references);
+  const hostConfigured = hostPolicy !== null && hostPolicy.requirements.length > 0;
+  const requirements = references.map(reference => {
+    const key = `${reference.id}\u0000${reference.version}\u0000${reference.digest}`;
+    const hostRequirement = host.requirements.find(item => `${item.id}\u0000${item.version}\u0000${item.digest}` === key);
+    const publishedRequirement = published.requirements.find(item => `${item.id}\u0000${item.version}\u0000${item.digest}` === key);
+    const hostClass = hostRequirement?.knowledgeClass;
+    const publishedClass = publishedRequirement?.knowledgeClass;
+    if (hostClass !== undefined && publishedClass !== undefined && hostClass !== publishedClass) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    const requiredness = hostRequirement?.requiredness === 'required' || publishedRequirement?.requiredness === 'required'
+      ? 'required' as const : 'optional' as const;
+    const knowledgeClass = hostClass ?? publishedClass;
+    return { id: reference.id, version: reference.version, digest: reference.digest, requiredness,
+      ...(knowledgeClass === undefined ? {} : { knowledgeClass }) };
+  });
+  return {
+    schemaVersion: 1,
+    targetId,
+    policyVersion: hostConfigured ? host.policyVersion : publishedPolicy?.policyVersion ?? host.policyVersion,
+    policyEpoch: hostConfigured ? host.policyEpoch : publishedPolicy?.policyEpoch ?? host.policyEpoch,
+    defaultRequiredness: 'optional',
+    requirements,
+  };
+}
+
+function resolveSingleKnowledgePolicy(
   policy: TargetKnowledgePolicy | null,
   targetId: string,
   references: TargetCatalogDefinition['knowledgeRefs'],
 ): TargetKnowledgePolicy {
-  if (policy !== null && (policy.targetId !== targetId || policy.schemaVersion !== 1
-    || !Number.isSafeInteger(policy.policyEpoch) || policy.policyEpoch < 0
-    || !isRevision(policy.policyVersion) || policy.defaultRequiredness !== 'optional')) {
-    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
-  }
+  validateHostKnowledgePolicy(policy, targetId);
   const configured = new Map((policy?.requirements ?? []).map(requirement => [
     `${requirement.id}\u0000${requirement.version}\u0000${requirement.digest}`, requirement,
   ]));
@@ -497,22 +557,102 @@ function resolveKnowledgePolicy(
     reference.id === requirement.id && reference.version === requirement.version && reference.digest === requirement.digest))) {
     throw new TargetConfigurationError('TARGET_BINDING_INVALID');
   }
-  return {
-    schemaVersion: 1,
-    targetId,
-    policyVersion: policy?.policyVersion ?? 'default/v1',
-    policyEpoch: policy?.policyEpoch ?? 0,
-    defaultRequiredness: 'optional',
-    requirements,
+  return { schemaVersion: 1, targetId, policyVersion: policy?.policyVersion ?? 'default/v1',
+    policyEpoch: policy?.policyEpoch ?? 0, defaultRequiredness: 'optional', requirements };
+}
+
+function validateHostKnowledgePolicy(policy: TargetKnowledgePolicy | null, targetId: string): void {
+  if (policy !== null && (policy.targetId !== targetId || policy.schemaVersion !== 1
+    || !Number.isSafeInteger(policy.policyEpoch) || policy.policyEpoch < 0
+    || !isRevision(policy.policyVersion) || policy.defaultRequiredness !== 'optional')) {
+    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  }
+  try {
+    if (policy !== null) validateKnowledgePublicationPolicy(policy);
+  } catch {
+    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  }
+}
+
+function resolvePublishedKnowledgeBinding(
+  definition: TargetCatalogDefinition,
+  binding: Awaited<ReturnType<KnowledgePublicationInspectionPort['inspectBinding']>>,
+): { publication: TargetKnowledgePublication | null; references: TargetCatalogDefinition['knowledgeRefs'] } {
+  if (binding.publication === null) {
+    if (binding.scopeKey !== null) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    return { publication: null, references: [] };
+  }
+  if (binding.publication.targetId !== definition.targetId
+    || binding.scopeKey === null || !Number.isSafeInteger(binding.publication.publicationVersion)
+    || binding.publication.publicationVersion < 1) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  const scope = deriveKnowledgeScope(definition);
+  if (binding.scopeKey !== checkpointChecksum(scope)) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  try {
+    const normalized = normalizeKnowledgePublication({
+      requestId: 'target-binding-inspection', targetId: definition.targetId, scope,
+      references: parsePublishedKnowledgeReferences(binding.publication.references), policy: binding.publication.policy,
+      expectedPublicationVersion: binding.publication.publicationVersion - 1,
+      publishedAt: binding.publication.publishedAt,
+    });
+    return {
+      publication: {
+        targetId: normalized.targetId, publicationVersion: binding.publication.publicationVersion,
+        references: normalized.references, policy: normalized.policy, publishedAt: normalized.publishedAt,
+      },
+      references: normalized.references,
+    };
+  } catch (error) {
+    if (error instanceof KnowledgeContractError) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  }
+}
+
+function deriveKnowledgeScope(definition: TargetCatalogDefinition): KnowledgeScope {
+  const base = {
+    targetId: definition.targetId, projectId: definition.projectId, deploymentId: definition.deploymentId,
+    deploymentGeneration: definition.deploymentGeneration, targetFingerprint: definition.targetFingerprint,
+    profileId: definition.profileId, profileRevision: definition.profileRevision,
+    scenarioId: definition.scenario.id, scenarioVersion: definition.scenario.version,
+    serviceIds: [definition.scenario.serviceId], faultTypes: [definition.scenario.id],
   };
+  const scope: KnowledgeScope = definition.dataClass === 'simulated'
+    ? { ...base, environment: definition.environment, dataClass: 'simulated', datasetId: definition.datasetId }
+    : { ...base, environment: definition.environment, dataClass: 'live' };
+  try {
+    return parseKnowledgeScope(scope);
+  } catch {
+    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  }
+}
+
+function assertRequiredKnowledgeEnabled(
+  policy: TargetKnowledgePolicy,
+  capabilities: { semanticEnabled: boolean; proceduralEnabled: boolean },
+): void {
+  if (typeof capabilities.semanticEnabled !== 'boolean' || typeof capabilities.proceduralEnabled !== 'boolean') {
+    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  }
+  for (const requirement of policy.requirements) {
+    if (requirement.requiredness !== 'required') continue;
+    if (requirement.knowledgeClass === undefined) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    const enabled = requirement.knowledgeClass === 'semantic'
+      ? capabilities.semanticEnabled : capabilities.proceduralEnabled;
+    if (!enabled) throw new TargetConfigurationError('KNOWLEDGE_REQUIRED_DISABLED');
+  }
 }
 
 function isSnapshotDigestV1(value: unknown): value is string {
   return typeof value === 'string' && /^sha256:v1:[a-f0-9]{64}$/u.test(value);
 }
 
-function deepFreeze<T>(value: T): T {
-  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
-  for (const child of Object.values(value)) deepFreeze(child);
-  return Object.freeze(value);
+function parsePublishedKnowledgeReferences(value: unknown): TargetCatalogDefinition['knowledgeRefs'] {
+  if (!Array.isArray(value) || value.length > 20) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  return (value as unknown[]).map(reference => {
+    if (!isRecord(reference) || Object.keys(reference).some(key => !['id', 'version', 'digest', 'approval'].includes(key))
+      || !isIdentifier(reference.id) || typeof reference.version !== 'string' || reference.version.length > 128
+      || typeof reference.digest !== 'string' || reference.approval !== 'approved') {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    return { id: reference.id, version: reference.version, digest: reference.digest, approval: 'approved' as const };
+  });
 }

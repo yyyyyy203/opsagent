@@ -67,7 +67,7 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 
 **验收**：fail-closed 指拒绝使用无效知识，不一律禁止 Target 启动。覆盖开关 × optional/required × 缺失/撤回/到期/digest 失配/冲突/超时；required 类型关闭为新 Run 配置错误，optional 关闭不查询，required 运行时缺失产生 missingKnowledge/limitations 而非伪证据。Metric 定义不覆盖确定性规则；跨 Target 导入新 draft。批准 r2 不自动撤销仍有效的 r1；内容相同而治理/sourceEpoch 已变时迟到批准失败。
 
-- [ ] T3 验收：可注入时钟模拟到期和 sourceEpoch 变更；无后台清理也不召回失效记录，无网络/LLM 自动批准。
+- [x] T3 验收：可注入时钟模拟到期和 sourceEpoch 变更；无后台清理也不召回失效记录，无网络/LLM 自动批准。独立评审通过（5 项修复均关闭，0 个阻断）；Node 24 全仓 lint/typecheck/test/build 复验通过；Minor catalog readiness 项转 T6 复核。
 
 ## T4 — Procedural 模板及确定性适用性（RED → GREEN）
 
