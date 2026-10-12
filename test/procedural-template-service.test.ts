@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { KnowledgeGovernanceAuditV1 } from '../src/contracts/knowledge-governance-audit.js';
 import type { KnowledgeScope, ProceduralKnowledgeContent } from '../src/contracts/knowledge-memory.js';
-import type { KnowledgeCommandReplayIntent } from '../src/contracts/knowledge-memory-storage.js';
+import type { KnowledgeCommandReplayIntent, KnowledgeDraftStore } from '../src/contracts/knowledge-memory-storage.js';
+import type { KnowledgeGovernanceReviewPort } from '../src/contracts/knowledge-memory.js';
 import { checkpointChecksum } from '../src/contracts/stable-json.js';
 import { InMemoryGovernedKnowledgeStore } from '../src/memory/in-memory-knowledge-store.js';
 import { ProceduralTemplateService, type ProceduralTemplateServiceOptions } from '../src/memory/procedural-template-service.js';
@@ -75,6 +76,7 @@ function setup(backend: 'memory' | 'sqlite' = 'memory') {
     queries: store,
     reviews: store,
     transitions: store,
+    replay: store,
     reviewAttestations: { resolveForReview: async () => {
       if (!attestationsAvailable) throw new Error('Attestation resolver unavailable');
       return { sourceVerified: attestationsVerified, scopeVerified: attestationsVerified, contentReviewed: attestationsVerified };
@@ -83,8 +85,23 @@ function setup(backend: 'memory' | 'sqlite' = 'memory') {
     ids: { next: prefix => `${prefix}-${++nextId}` },
   } satisfies ProceduralTemplateServiceOptions;
   const service = new ProceduralTemplateService(serviceOptions);
+  const makeLegacyService = () => {
+    const legacyDrafts: KnowledgeDraftStore = {
+      registerSource: input => store.registerSource(input),
+      saveDraft: command => store.saveDraft(command),
+      submitForReview: command => store.submitForReview(command),
+    };
+    const legacyReviews: KnowledgeGovernanceReviewPort = {
+      review: command => store.review(command),
+    };
+    const legacyOptions: ProceduralTemplateServiceOptions = {
+      ...serviceOptions, drafts: legacyDrafts, reviews: legacyReviews, replay: undefined,
+    };
+    return new ProceduralTemplateService(legacyOptions);
+  };
   return {
     store, service,
+    makeLegacyService,
     setNow(value: string) { now = new Date(value); },
     disableAttestations() { attestationsAvailable = false; },
     changeAttestations() { attestationsVerified = false; },
@@ -143,6 +160,51 @@ describe.each(['memory', 'sqlite'] as const)('%s ProceduralTemplateService', bac
       fixture.changeActor();
       await expect(restarted.createDraft(create)).rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
       await expect(restarted.review(command)).rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('keeps old host adapters assignable and falls back to the original T2 receipt path', async () => {
+    const fixture = setup(backend);
+    try {
+      const service = fixture.makeLegacyService();
+      const create = { requestId: 'legacy-adapter-draft', targetId: scope.targetId, source, content: templateContent() };
+      const draft = await service.createDraft(create);
+      await expect(service.createDraft(create)).resolves.toEqual(draft);
+      await service.submitForReview({ requestId: 'legacy-adapter-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      const command = { requestId: 'legacy-adapter-review', targetId: scope.targetId, knowledgeId: draft.id,
+        contentRevision: 1, governanceVersion: 2, decision: 'reject' as const };
+      const rejected = await service.review(command);
+      const audits = await fixture.store.listPending(20);
+      await expect(service.review(command)).resolves.toEqual(rejected);
+      fixture.changeAttestations();
+      await expect(service.review(command)).rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+      fixture.disableAttestations();
+      await expect(service.review(command)).rejects.toMatchObject({ code: 'KNOWLEDGE_STORAGE_UNAVAILABLE' });
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('fails closed on revoked source with legacy adapters and does not append duplicate audits', async () => {
+    const fixture = setup(backend);
+    try {
+      const service = fixture.makeLegacyService();
+      const create = { requestId: 'legacy-source-draft', targetId: scope.targetId, source, content: templateContent() };
+      const draft = await service.createDraft(create);
+      await service.submitForReview({ requestId: 'legacy-source-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      const approval = { requestId: 'legacy-source-review', targetId: scope.targetId, knowledgeId: draft.id,
+        contentRevision: 1, governanceVersion: 2, decision: 'approve' as const };
+      await service.review(approval);
+      await fixture.store.transitionSource({ requestId: 'legacy-source-revoke', actorId: 'operator-admin',
+        sourceId: source.sourceId, dataDomainId: 'settlement-domain', expectedSourceEpoch: 0,
+        transition: 'revoked', sourceDigest: digest, occurredAt: '2026-10-12T00:00:01.000Z' });
+      const audits = await fixture.store.listPending(20);
+      await expect(service.createDraft(create)).rejects.toMatchObject({ code: 'KNOWLEDGE_SOURCE_REVOKED' });
+      await expect(service.review(approval)).rejects.toMatchObject({ code: 'KNOWLEDGE_SOURCE_REVOKED' });
+      expect(await fixture.store.getExact({ id: draft.id, contentRevision: 1, scope })).toBeNull();
       expect(await fixture.store.listPending(20)).toEqual(audits);
     } finally { fixture.close(); }
   });

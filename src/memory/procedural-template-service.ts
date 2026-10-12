@@ -1,6 +1,7 @@
 import { randomIdGenerator, systemClock, type Clock, type IdGenerator } from '../contracts/common.js';
 import {
   KnowledgeContractError,
+  type KnowledgeGovernanceReviewPort,
   type KnowledgeQueryPort,
   type KnowledgeReviewCommand,
   type KnowledgeRevision,
@@ -16,8 +17,7 @@ import { checkpointChecksum } from '../contracts/stable-json.js';
 import type {
   KnowledgeDraftStore,
   KnowledgeCommandReplayIntent,
-  KnowledgeCommandReplayPort,
-  KnowledgeIntentReviewPort,
+  KnowledgeProceduralReplayCapability,
   KnowledgeGovernanceTransitionStore,
   KnowledgeRevisionStateQueryPort,
   KnowledgeSourceGovernanceStore,
@@ -73,10 +73,12 @@ export interface ProceduralTemplateServiceOptions {
   readonly sourceRegistry: ProceduralSourceRegistryPort;
   readonly capabilityRegistry: ProceduralReadonlyCapabilityRegistryPort;
   readonly targets: ProceduralTargetContextPort;
-  readonly drafts: KnowledgeDraftStore & KnowledgeCommandReplayPort;
+  readonly drafts: KnowledgeDraftStore;
   readonly sources: KnowledgeSourceGovernanceStore & Pick<KnowledgeDraftStore, 'registerSource'>;
   readonly queries: KnowledgeQueryPort & KnowledgeRevisionStateQueryPort;
-  readonly reviews: KnowledgeIntentReviewPort & KnowledgeCommandReplayPort;
+  readonly reviews: KnowledgeGovernanceReviewPort;
+  /** Opt in to durable receipt-first replay; older hosts continue through the original T2 ports. */
+  readonly replay?: KnowledgeProceduralReplayCapability | undefined;
   readonly transitions: KnowledgeGovernanceTransitionStore;
   readonly reviewAttestations: ProceduralReviewAttestationPort;
   readonly clock?: Clock;
@@ -144,7 +146,7 @@ export class ProceduralTemplateService {
         expectedContentRevision: null, expectedGovernanceVersion: null,
         source: request.source, content: request.content, contentDigest: checkpointChecksum(request.content),
         validUntil: request.validUntil ?? null }) };
-    const replay = await this.options.drafts.replayCommand(replayIntent);
+    const replay = await this.options.replay?.replayCommand(replayIntent);
     if (replay) return assertProcedural(replay);
     const source = await this.resolveCurrentSource(request.targetId, request.source);
     this.validateContentSources(request.targetId, request.source, request.content);
@@ -152,12 +154,14 @@ export class ProceduralTemplateService {
     const now = this.clock.now().toISOString();
     const revision = buildDraft({ id: this.ids.next('knowledge'), contentRevision: 1,
       scope: target.scope, source, createdAt: now, validUntil: request.validUntil, content: request.content });
-    const saved = await this.options.drafts.saveDraft({ requestId: request.requestId,
+    const command = { requestId: request.requestId,
       intentDigest: draftIntentDigest({ operation: 'create', requestId: request.requestId,
         actorId: target.actorId, targetId: request.targetId, scope: target.scope, source,
         content: request.content, validUntil: request.validUntil }),
       actorId: target.actorId, naturalKey: naturalKey(request.content), sourceDomainId: source.manifest.dataDomainId,
-      expectedContentRevision: null, expectedGovernanceVersion: null, revision }, replayIntent);
+      expectedContentRevision: null, expectedGovernanceVersion: null, revision };
+    const saved = this.options.replay === undefined ? await this.options.drafts.saveDraft(command)
+      : await this.options.replay.saveDraftWithReplayIntent(command, replayIntent);
     return assertProcedural(saved);
   }
 
@@ -175,7 +179,7 @@ export class ProceduralTemplateService {
         expectedContentRevision: input.expectedContentRevision, expectedGovernanceVersion: input.expectedGovernanceVersion,
         source: request.source, content: request.content, contentDigest: checkpointChecksum(request.content),
         validUntil: request.validUntil ?? null }) };
-    const replay = await this.options.drafts.replayCommand(replayIntent);
+    const replay = await this.options.replay?.replayCommand(replayIntent);
     if (replay) return assertProcedural(replay);
     const current = await this.inspectRevision(input.knowledgeId, input.expectedContentRevision, target.scope);
     if (current.kind !== 'procedural') throw new KnowledgeContractError('KNOWLEDGE_NOT_FOUND');
@@ -192,7 +196,7 @@ export class ProceduralTemplateService {
     const now = this.clock.now().toISOString();
     const revision = buildDraft({ id: input.knowledgeId, contentRevision: current.contentRevision + 1,
       scope: target.scope, source, createdAt: now, validUntil: request.validUntil, content: request.content });
-    const saved = await this.options.drafts.saveDraft({ requestId: request.requestId,
+    const command = { requestId: request.requestId,
       intentDigest: draftIntentDigest({ operation: 'revise', requestId: request.requestId,
         actorId: target.actorId, targetId: request.targetId, scope: target.scope, source,
         content: request.content, validUntil: request.validUntil, knowledgeId: input.knowledgeId,
@@ -200,7 +204,9 @@ export class ProceduralTemplateService {
         expectedGovernanceVersion: input.expectedGovernanceVersion }),
       actorId: target.actorId, naturalKey: naturalKey(request.content), sourceDomainId: source.manifest.dataDomainId,
       expectedContentRevision: input.expectedContentRevision,
-      expectedGovernanceVersion: input.expectedGovernanceVersion, revision }, replayIntent);
+      expectedGovernanceVersion: input.expectedGovernanceVersion, revision };
+    const saved = this.options.replay === undefined ? await this.options.drafts.saveDraft(command)
+      : await this.options.replay.saveDraftWithReplayIntent(command, replayIntent);
     return assertProcedural(saved);
   }
 
@@ -236,16 +242,24 @@ export class ProceduralTemplateService {
         scope: target.scope, knowledgeId: input.knowledgeId, kind: 'procedural',
         expectedContentRevision: input.contentRevision, expectedGovernanceVersion: input.governanceVersion,
         contentDigest: current?.contentDigest ?? null, decision: input.decision, reasonCode: input.reasonCode ?? null }) };
-    const replay = await this.options.reviews.replayCommand(replayIntent);
+    const replay = await this.options.replay?.replayCommand(replayIntent);
     if (replay) return assertProcedural(replay);
     if (!current || current.kind !== 'procedural') throw new KnowledgeContractError('KNOWLEDGE_NOT_FOUND');
-    const checks = await this.options.reviewAttestations.resolveForReview({ requestId: input.requestId,
-      targetId: input.targetId, knowledgeId: input.knowledgeId, decision: input.decision });
+    let checks: KnowledgeReviewCommand['checks'];
+    try {
+      checks = await this.options.reviewAttestations.resolveForReview({ requestId: input.requestId,
+        targetId: input.targetId, knowledgeId: input.knowledgeId, decision: input.decision });
+    } catch (cause) {
+      if (cause instanceof KnowledgeContractError) throw cause;
+      throw new KnowledgeContractError('KNOWLEDGE_STORAGE_UNAVAILABLE');
+    }
     const command = parseKnowledgeReviewCommand({ schemaVersion: 1, requestId: input.requestId,
       knowledgeId: input.knowledgeId, kind: 'procedural', expectedContentRevision: input.contentRevision,
       expectedGovernanceVersion: input.governanceVersion, contentDigest: current.contentDigest,
       decision: input.decision, checks, ...(input.reasonCode === undefined ? {} : { reasonCode: input.reasonCode }) });
-    return assertProcedural(await this.options.reviews.review(command, replayIntent));
+    const reviewed = this.options.replay === undefined ? await this.options.reviews.review(command)
+      : await this.options.replay.reviewWithReplayIntent(command, replayIntent);
+    return assertProcedural(reviewed);
   }
 
   /** Revocation changes only the exact revision; T2 owns CAS, replay, and audit atomically. */

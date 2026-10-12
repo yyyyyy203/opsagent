@@ -91,9 +91,12 @@ export interface KnowledgeCommandReplayPort {
   replayCommand(intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision | null>;
 }
 
-/** Additive extension; the original review command and its audit digest are unchanged. */
-export interface KnowledgeIntentReviewPort extends KnowledgeGovernanceReviewPort {
-  review(command: KnowledgeReviewCommand, replayIntent?: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision>;
+/** Opt-in adapter capability. Existing command ports remain source-compatible. */
+export interface KnowledgeProceduralReplayCapability extends KnowledgeCommandReplayPort {
+  saveDraftWithReplayIntent(command: KnowledgeDraftWriteCommand,
+    intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision>;
+  reviewWithReplayIntent(command: KnowledgeReviewCommand,
+    intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision>;
 }
 
 export interface KnowledgeGovernanceTransitionStore {

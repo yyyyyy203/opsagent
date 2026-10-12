@@ -7,7 +7,7 @@ import { parseKnowledgeGovernanceAuditV1, type KnowledgeGovernanceAuditOutboxPor
 import { contentRevisionFromTargetReference, parseKnowledgeRecord, parseKnowledgeReviewCommand,
   parseKnowledgeScope } from '../../contracts/knowledge-memory-schema.js';
 import { canonicalJson, checkpointChecksum } from '../../contracts/stable-json.js';
-import type { KnowledgeCommandReplayIntent, KnowledgeCommandReplayPort, KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgeGovernanceAuditAttemptPort,
+import type { KnowledgeCommandReplayIntent, KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgeGovernanceAuditAttemptPort,
   KnowledgeGovernanceTransitionCommand, KnowledgeGovernanceTransitionStore, KnowledgeRevisionStateQueryPort,
   KnowledgeRevisionStateSnapshot, KnowledgeScopedSearchRequest, KnowledgeScopedSearchStore,
   KnowledgeSourceGovernanceStore, KnowledgeSourceRegistration, KnowledgeSourceState,
@@ -36,7 +36,7 @@ export interface SqliteGovernedKnowledgeStoreOptions {
 }
 
 /** SQLite implementation for governed Semantic/Procedural revisions and their independent audit outbox. */
-export class SqliteGovernedKnowledgeStore implements KnowledgeCommandReplayPort, KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
+export class SqliteGovernedKnowledgeStore implements KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
   KnowledgeScopedSearchStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort, KnowledgeGovernanceTransitionStore,
   KnowledgeGovernanceAuditOutboxPort, KnowledgeGovernanceAuditQueryPort,
   KnowledgeRevisionStateQueryPort, KnowledgeGovernanceAuditAttemptPort {
@@ -70,6 +70,16 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeCommandReplayPort,
 
   public replayCommand(intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision | null> {
     return Promise.resolve().then(() => this.database.raw.transaction(() => this.replayHostIntent(intent))());
+  }
+
+  public saveDraftWithReplayIntent(command: KnowledgeDraftWriteCommand,
+    intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision> {
+    return this.saveDraft(command, intent);
+  }
+
+  public reviewWithReplayIntent(command: KnowledgeReviewCommand,
+    intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision> {
+    return this.review(command, intent);
   }
 
   private replayHostIntent(intent: KnowledgeCommandReplayIntent): KnowledgeRevision | null {
