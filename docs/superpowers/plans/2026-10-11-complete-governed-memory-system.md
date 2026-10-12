@@ -79,7 +79,7 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 
 **验收**：不适用模板不返回；相似度不能越过前置筛选；模板只返回固定结构建议，不能实例化 ToolCall、触发写动作、减少必需取证或绕过 HITL/Guard。
 
-- [ ] T4 验收：复用 Semantic 的双版本 CAS/审计，不建立另一套放宽的审批；新 draft 不自动停用旧模板，已撤权/不兼容则立即停止使用。
+- [x] T4 验收：复用 Semantic 的双版本 CAS/审计，不建立另一套放宽的审批；新 draft 不自动停用旧模板，已撤权/不兼容则立即停止使用。T4 实现与回执优先重放通过独立复审；定向 167 项测试、lint、typecheck、build 通过。1 项 lexical guard 误报/漏报边界作为 Minor 留待最终整分支复核。
 
 ## T4b — 审批到 Target 启用的发布闭环（依赖 T2–T4）
 
@@ -118,6 +118,8 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 - 更新 `src/bootstrap/agent-web-runtime.ts` 与 `src/bootstrap/diagnostic-memory.ts`：构造器注入 Knowledge ports、host-owned actor/scope resolver；服务关闭时不影响旧路径。
 - 更新 `apps/agent-web/src/api/client.ts`、`apps/agent-web/src/components/MemoryPanel.tsx`、`apps/agent-web/src/App.tsx` 与必要 styles：增加“系统知识/调查模板”查询、草稿、审核、撤销和独立“启用到此 Target”操作；显示内容/治理/发布版本、未启用与旧 Run 限制。只消费安全 Target Catalog 选择知识范围，不宣称交付完整 M4 Run/UI。
 - 新增 `test/knowledge-memory-api.test.ts`、更新 `test/memory-web-view.test.ts` 和 `test/e2e/memory-web.spec.ts`。
+
+- Target host bootstrap 必须向 `ProceduralTemplateService` 注入 `KnowledgeProceduralReplayCapability`。为兼容既有宿主而保留的旧 T2 适配器路径不得用于本项目正式组装；T6 回归需验证正式组装走回执优先重放，并覆盖 source/attestation 易变后的相同命令重试。
 
 **验收**：body 不接受 scope/actor/状态/批准者/绝对路径/任意 URL；不存在和越界统一 404；审核 CAS/重放行为稳定；UI 标注来源、适用条件和 revision；模板没有执行按钮；无认证的本地操作员模式不得监听公网。
 
@@ -162,4 +164,5 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 - [x] 用户已审核并明确批准按本 Spec 与计划执行（2026-10-12）。
 - [x] R0.1–R0.4 运行时补强及验收完成；依据多项目计划 R0.4 的实现/独立审查记录，并在 2026-10-12 重新通过 Node 24 全仓 lint、typecheck、test、build。
 - [x] T1、T2 已完成并通过独立复核。
-- [ ] T3、T4、T4b、T5、T6、T7 尚未开始；按依赖顺序执行，文档修订不算实现完成。
+- [x] T1–T4 已完成并通过对应任务复核；T3 与 T4 的 Minor 均须在 T6/最终复核中回看。
+- [ ] T4b、T5、T6、T7 尚未完成；按依赖顺序继续执行，文档修订不算实现完成。
