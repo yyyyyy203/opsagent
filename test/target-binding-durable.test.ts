@@ -7,7 +7,7 @@ import { checkpointChecksum } from '../src/contracts/stable-json.js';
 import { createInitialRunGovernanceState } from '../src/contracts/governance.js';
 import type { ResolvedTargetSnapshot, ResolvedTargetSnapshotV2, TargetRunBindingRecord,
   TargetStartClaim, TargetStartStore, VersionedResolvedTargetSnapshot } from '../src/contracts/target.js';
-import { parseResolvedTargetSnapshot } from '../src/contracts/target-schema.js';
+import { parseResolvedTargetSnapshot, parseResolvedTargetSnapshotV2 } from '../src/contracts/target-schema.js';
 import { InMemoryDurableState } from '../src/storage/in-memory-durable-state.js';
 import { createSqlitePersistence } from '../src/infrastructure/sqlite/index.js';
 import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
@@ -116,6 +116,29 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', (k
     const bundle = createSqlitePersistence({ path: join(root, 'target.sqlite'), clock });
     return { state: bundle, close: () => { bundle.close(); return Promise.resolve(); } };
   }
+
+  it('rejects a new root snapshot with a stale publicationVersion before committing any Run state', async () => {
+    const store = await openStore();
+    const captured = await targetSnapshot();
+    const target: Record<string, unknown> = { ...captured, publicationVersion: 1 };
+    delete target.digest;
+    const snapshot = parseResolvedTargetSnapshotV2({ ...target,
+      digest: `sha256:v2:${checkpointChecksum({ algorithm: 'sha256', version: 2, target })}` });
+    const rootBinding = binding({ bindingId: 'stale-publication-binding', targetId: snapshot.targetId,
+      runId: 'stale-publication-run', rootRunId: 'stale-publication-run', snapshotDigest: snapshot.digest,
+      requestId: 'stale-publication-request', requestDigest: `sha256:v1:${'1'.repeat(64)}` });
+    try {
+      await store.state.targetBindings.reserveRequest({ requestId: rootBinding.requestId!, targetId: snapshot.targetId,
+        requestDigest: rootBinding.requestDigest!, runId: rootBinding.runId, createdAt: now });
+      await expect(store.state.transitions.commit({ expectedRevision: null,
+        context: context(rootBinding.runId, rootBinding.bindingId, snapshot), outboxEvents: [runStarted(rootBinding.runId)],
+        targetBinding: { binding: rootBinding, snapshot, startClaim: await acquireStartClaim(store.state.targetStarts, rootBinding) },
+      })).rejects.toMatchObject({ code: 'TARGET_BINDING_INVALID' });
+      expect(await store.state.targetBindings.getBinding(rootBinding.runId)).toBeNull();
+      expect(await store.state.checkpoints.load(rootBinding.runId)).toBeNull();
+      expect(await store.state.outbox.listPending({ runId: rootBinding.runId, limit: 10 })).toEqual([]);
+    } finally { await store.close(); }
+  });
 
   it('commits root snapshot, binding, initial checkpoint and RUN_STARTED outbox event together', async () => {
     const store = await openStore();

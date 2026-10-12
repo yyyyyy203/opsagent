@@ -5,7 +5,7 @@ import type {
   TargetKnowledgeBindingPublisher, TargetKnowledgePublication, TargetKnowledgePublishCommand,
 } from './knowledge-memory.js';
 import type { KnowledgeScope } from './knowledge-memory.js';
-import type { TargetKnowledgeReference } from './target.js';
+import type { TargetKnowledgeReference, TargetKnowledgePolicy } from './target.js';
 
 export type KnowledgeSourceValidity = 'active' | 'revoked' | 'digest_mismatch' | 'permission_revoked';
 export type KnowledgeSourceTransition = 'revoked' | 'digest_mismatch' | 'permission_revoked' | 'revalidated';
@@ -128,6 +128,41 @@ export interface KnowledgePublicationActorPort {
   resolveForTarget(input: { targetId: string; requestId: string }): Promise<{ actorId: string }>;
 }
 
+/** Ephemeral host context. Never accepted from a publication request or persisted in a Run. */
+export interface TargetKnowledgePublicationContext {
+  readonly registryVersion: number;
+  readonly scope: KnowledgeScope;
+  readonly hostPolicy: TargetKnowledgePolicy | null;
+}
+
+export interface TargetKnowledgePublicationContextPort {
+  resolvePublicationContext(input: { targetId: string; capturedAt: string; signal: AbortSignal }): Promise<TargetKnowledgePublicationContext>;
+}
+
+/** Synchronous authoritative fence reader for transaction-scoped test adapters. */
+export interface KnowledgePublicationFencePort {
+  inspectPublicationFence(targetId: string): { registryVersion: number; policy: TargetKnowledgePolicy | null };
+}
+
+export interface GovernedKnowledgePublicationCommand {
+  readonly command: TargetKnowledgePublishCommand;
+  readonly context: TargetKnowledgePublicationContext;
+  readonly expectedRevisions: readonly {
+    readonly reference: TargetKnowledgeReference;
+    readonly governanceVersion: number;
+    readonly sourceEpoch: number;
+  }[];
+}
+
+/** Narrow composite operation: validate, publish, supersede, index, audit and outbox atomically. */
+export interface GovernedKnowledgePublicationPort {
+  publishGoverned(input: GovernedKnowledgePublicationCommand): Promise<TargetKnowledgePublication>;
+}
+
+export interface KnowledgePublicationVersionPort {
+  getPublicationVersion(targetId: string): number;
+}
+
 /** Minimal public aggregate; implementations may expose each port independently. */
 export interface GovernedKnowledgeStorage extends KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
   KnowledgeScopedSearchStore, KnowledgeGovernanceTransitionStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort,
@@ -162,6 +197,11 @@ export interface KnowledgePublicationSnapshot {
 
 export interface KnowledgePublicationInspectionPort {
   inspectBinding(targetId: string): Promise<KnowledgePublicationSnapshot>;
+  /** Formal adapters read the policy and overlay from one authoritative snapshot. */
+  inspectPublishedSelection?(targetId: string): Promise<{
+    binding: KnowledgePublicationSnapshot;
+    hostPolicy: TargetKnowledgePolicy | null;
+  }>;
 }
 
 export interface KnowledgeGovernanceAuditAttemptPort {

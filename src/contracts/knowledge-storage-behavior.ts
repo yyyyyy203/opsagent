@@ -1,7 +1,7 @@
 import { KnowledgeContractError, type KnowledgeRevision, type TargetKnowledgePublishCommand } from './knowledge-memory.js';
 import { parseKnowledgeScope } from './knowledge-memory-schema.js';
 import type { TargetKnowledgePolicy, TargetKnowledgeReference } from './target.js';
-import type { KnowledgeCommandReplayIntent } from './knowledge-memory-storage.js';
+import type { KnowledgeCommandReplayIntent, GovernedKnowledgePublicationCommand, KnowledgePublicationFencePort } from './knowledge-memory-storage.js';
 import { canonicalJson } from './stable-json.js';
 
 /** Stored in the existing receipt result_json, independently of the full audit digest. */
@@ -46,6 +46,39 @@ export function normalizeKnowledgePublication(command: TargetKnowledgePublishCom
     throw new KnowledgeContractError('KNOWLEDGE_PUBLICATION_CONFLICT');
   }
   return { ...structuredClone(command), scope, references };
+}
+
+export function assertGovernedPublicationFence(input: GovernedKnowledgePublicationCommand,
+  current: ReturnType<KnowledgePublicationFencePort['inspectPublicationFence']>): void {
+  const { command, context } = input;
+  if (!Number.isSafeInteger(context.registryVersion) || context.registryVersion < 1
+    || context.registryVersion !== current.registryVersion
+    || canonicalJson(parseKnowledgeScope(context.scope)) !== canonicalJson(command.scope)) {
+    throw new KnowledgeContractError('KNOWLEDGE_SCOPE_INVALID');
+  }
+  if (canonicalJson(context.hostPolicy) !== canonicalJson(current.policy)
+    || command.policy.policyEpoch !== (current.policy?.policyEpoch ?? 0)
+    || command.policy.policyVersion !== (current.policy?.policyVersion ?? 'default/v1')) {
+    throw new KnowledgeContractError('KNOWLEDGE_PUBLICATION_CONFLICT');
+  }
+  // Publishing references cannot lower or replace a host requirement.
+  for (const requirement of current.policy?.requirements ?? []) {
+    if (!command.references.some(ref => ref.id === requirement.id && ref.version === requirement.version && ref.digest === requirement.digest)
+      || !command.policy.requirements.some(item => canonicalJson(item) === canonicalJson(requirement))) {
+      throw new KnowledgeContractError('KNOWLEDGE_PUBLICATION_CONFLICT');
+    }
+  }
+  if (command.references.length > 20 || input.expectedRevisions.length !== command.references.length
+    || new Set(command.references.map(ref => ref.id)).size !== command.references.length) {
+    throw new KnowledgeContractError('KNOWLEDGE_RECORD_INVALID');
+  }
+  for (const ref of command.references) {
+    const pins = input.expectedRevisions.filter(pin => canonicalJson(pin.reference) === canonicalJson(ref));
+    if (pins.length !== 1 || !Number.isSafeInteger(pins[0]!.governanceVersion) || pins[0]!.governanceVersion < 1
+      || !Number.isSafeInteger(pins[0]!.sourceEpoch) || pins[0]!.sourceEpoch < 0) {
+      throw new KnowledgeContractError('KNOWLEDGE_GOVERNANCE_CONFLICT');
+    }
+  }
 }
 
 export function validateKnowledgeReference(reference: TargetKnowledgeReference): TargetKnowledgeReference {

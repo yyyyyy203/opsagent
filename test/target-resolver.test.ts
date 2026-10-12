@@ -32,6 +32,52 @@ async function publishedReferenceResolver(references: TargetKnowledgePublication
 }
 
 describe('StaticTargetResolver', () => {
+  it('rejects a mutable Profile port that changes rules without republishing its resolver', async () => {
+    const ports = createTargetIdentityTestPorts();
+    const profiles = new StaticProfileResolver(multiProjectProfiles);
+    let changed = false;
+    const resolver = await createStaticTargetResolver({ ...ports, catalog: multiProjectTargetCatalog,
+      connections: multiProjectConnectionRegistry, installedScenarios, installedAdapters, validationTime: capturedAt,
+      profileResolver: { resolve: async input => {
+        const profile = await profiles.resolve(input);
+        return changed ? { ...profile, policyVersion: 'risk/v2' } : profile;
+      } } });
+    changed = true;
+    await expect(resolver.resolvePublicationContext({ targetId: 'market-a-sim', capturedAt,
+      signal: new AbortController().signal })).rejects.toMatchObject({ code: 'TARGET_BINDING_INVALID' });
+    await expect(resolver.resolve({ targetId: 'market-a-sim', capturedAt,
+      signal: new AbortController().signal })).rejects.toMatchObject({ code: 'TARGET_BINDING_INVALID' });
+  });
+  it('fences a slow stale builder before asynchronous Profile preparation', async () => {
+    const ports = createTargetIdentityTestPorts();
+    const profiles = new StaticProfileResolver(multiProjectProfiles);
+    let entered!: () => void;
+    let release!: () => void;
+    const preparing = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const options = { ...ports, catalog: multiProjectTargetCatalog, connections: multiProjectConnectionRegistry,
+      profileResolver: profiles, installedScenarios, installedAdapters, validationTime: capturedAt };
+    const stale = createStaticTargetResolver({ ...options, profileResolver: { resolve: async input => {
+      entered();
+      await blocked;
+      return profiles.resolve(input);
+    } } });
+    await preparing;
+    const newerProfiles = multiProjectProfiles.map(profile => ({ ...profile, revision: 'profile/v2' }));
+    const newerCatalog = { ...multiProjectTargetCatalog,
+      targets: multiProjectTargetCatalog.targets.map(target => ({ ...target, profileRevision: 'profile/v2',
+        scenario: { ...target.scenario, version: '1.0.1' } })) };
+    const newer = await createStaticTargetResolver({ ...options, catalog: newerCatalog,
+      installedScenarios: [...installedScenarios, { ...WINDOW_FAILURE_RATE_INSTALLATION, version: '1.0.1' }],
+      profileResolver: new StaticProfileResolver(newerProfiles) });
+    expect(await newer.resolve({ targetId: 'market-a-sim', capturedAt, signal: new AbortController().signal }))
+      .toMatchObject({ profile: { revision: 'profile/v2' }, scenario: { version: '1.0.1' } });
+    const afterNew = await ports.identityRegistry.readSnapshot();
+    release();
+    await expect(stale).rejects.toMatchObject({ code: 'TARGET_IDENTITY_CONFLICT' });
+    expect(await ports.identityRegistry.readSnapshot()).toEqual(afterNew);
+  });
+
   it.each([
     { path: 'C:/private/runbook.md' },
     { url: 'https://private.invalid/source' },

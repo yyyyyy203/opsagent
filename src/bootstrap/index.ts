@@ -16,3 +16,4 @@ export * from './shared-source-child.js';
 export * from './metrics-web-source.js';
 export * from './logs-web-source.js';
 export * from './model-identity.js';
+export { createTargetKnowledgePublicationService } from './diagnostic-memory.js';

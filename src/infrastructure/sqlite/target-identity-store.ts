@@ -54,6 +54,11 @@ export class SqliteTargetIdentityStore implements TargetIdentityRegistry, Target
     });
   }
 
+  /** Reads both authoritative rows synchronously on the caller's same-database transaction. */
+  public inspectPublicationFence(targetId: string) {
+    return inspectSqlitePublicationFence(this.database, targetId);
+  }
+
   public publishCatalog(input: TargetIdentityCatalogInput): Promise<TargetIdentityCatalogPublication> {
     return Promise.resolve().then(() => this.database.raw.transaction(() => {
       const row = this.database.raw.prepare(`
@@ -146,6 +151,15 @@ export class SqliteTargetIdentityStore implements TargetIdentityRegistry, Target
       return structuredClone(next);
     }).immediate());
   }
+}
+
+export function inspectSqlitePublicationFence(database: SqliteDatabase, targetId: string) {
+  const registry = database.raw.prepare(`SELECT registry_version, snapshot_json, snapshot_checksum
+    FROM target_identity_registry_state WHERE singleton_id = 1`).get() as RegistryStateRow | undefined;
+  const policy = database.raw.prepare(`SELECT target_id, policy_epoch, policy_version, policy_json, policy_checksum, updated_at
+    FROM target_knowledge_policies WHERE target_id = ?`).get(targetId) as KnowledgePolicyRow | undefined;
+  return { registryVersion: registry === undefined ? 0 : parseRegistryState(registry).version,
+    policy: policy === undefined ? null : parseKnowledgePolicyRow(policy) };
 }
 
 function sanitizeCatalogInput(input: TargetIdentityCatalogInput): TargetIdentityCatalogInput {

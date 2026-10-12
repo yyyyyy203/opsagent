@@ -8,6 +8,7 @@ export interface TargetBindingStateReader {
   bindingByRunId(runId: string): TargetRunBindingRecord | null;
   snapshotByBindingId(bindingId: string): VersionedResolvedTargetSnapshot | null;
   requestById(requestId: string): TargetRunRequestRecord | null;
+  publicationVersionByTarget?(targetId: string): number;
 }
 
 export interface ValidatedTargetBindingTransition {
@@ -65,6 +66,10 @@ export function validateTargetBindingState(
   assertSnapshotMatches(context, binding, snapshot);
 
   if (binding.runId === binding.rootRunId) {
+    if (existing === null && snapshot.schemaVersion === 2 && snapshot.publicationVersion !== undefined
+      && snapshot.publicationVersion !== (reader.publicationVersionByTarget?.(snapshot.targetId) ?? 0)) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
     if (suppliedSnapshot === null || binding.requestId === undefined || binding.requestDigest === undefined) {
       throw new TargetConfigurationError('TARGET_BINDING_INVALID');
     }

@@ -13,6 +13,8 @@ import { StaticProfileResolver } from '../src/profiles/profile-resolver.js';
 import type { ResolvedTargetSnapshotV2, TargetRecoveryGate, TargetRunBindingRecord,
   TargetRunRuntimeLease } from '../src/contracts/target.js';
 import { TargetConfigurationError } from '../src/contracts/target.js';
+import { fixture as publicationFixture } from './helpers/target-publication-fixture.js';
+import { InMemoryDurableState } from '../src/storage/in-memory-durable-state.js';
 
 const now = '2026-10-11T10:00:00.000Z';
 const clock: Clock = { now: () => new Date(now) };
@@ -80,6 +82,34 @@ function configureTestTargetGate(
 }
 
 describe('TargetRunService', () => {
+  it('starts new Runs on the published overlay and never upgrades an already persisted Run snapshot', async () => {
+    const f = await publicationFixture('memory');
+    const state = new InMemoryDurableState(clock, f.memory);
+    const model = new ScriptedModel([{ text: 'ok', toolCalls: [] }, { text: 'ok', toolCalls: [] }, { text: 'ok', toolCalls: [] }]);
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock, durableState: state });
+    runtimes.push(runtime);
+    configureTestTargetGate(runtime, model);
+    if (runtime.queries === undefined) throw new Error('Query ports unavailable');
+    const execution = new RunExecutionCoordinator(runtime.agent, runtime.checkpoints, { targetStarts: state, clock });
+    try {
+      const r1 = await f.approved(1);
+      await f.publisher.publishGoverned(await f.command([r1]));
+      const service = new TargetRunService({ resolver: f.resolver, bindings: state, queries: runtime.queries, clock,
+        start: { startAccepted: options => execution.startAccepted(options) } });
+      const first = await service.start({ targetId: 'market-a-sim', requestId: 'published-run-one', message: 'inspect' });
+      const binding = (await state.getBinding(first.runId))!;
+      const old = (await state.getSnapshot(binding.bindingId))!;
+      const r2 = await f.approved(2);
+      const beforePublication = await service.start({ targetId: 'market-a-sim', requestId: 'published-run-two', message: 'inspect' });
+      expect((await state.getSnapshot((await state.getBinding(beforePublication.runId))!.bindingId))!.knowledgeRefs[0]?.version).toBe('1');
+      await f.publisher.publishGoverned(await f.command([r2], 1, 'publish-r2'));
+      const second = await service.start({ targetId: 'market-a-sim', requestId: 'published-run-three', message: 'inspect' });
+      expect(await state.getSnapshot((await state.getBinding(second.runId))!.bindingId)).toMatchObject({ publicationVersion: 2,
+        knowledgeRefs: [{ id: r2.id, version: '2' }] });
+      expect(await state.getSnapshot(binding.bindingId)).toEqual(old);
+      expect(old).toMatchObject({ publicationVersion: 1, knowledgeRefs: [{ version: '1' }] });
+    } finally { await execution.close(); f.database.close(); }
+  });
   it('binds a new Run before any model request and scopes reads to the selected Target', async () => {
     const runtimeRef: { current?: Awaited<ReturnType<typeof createAgentRuntime>> } = {};
     const model: ChatModel = {

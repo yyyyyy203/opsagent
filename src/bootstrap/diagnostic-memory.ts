@@ -11,6 +11,12 @@ import { MemoryError } from '../memory/memory-error.js';
 import { sameMemoryScope } from '../memory/memory-scope.js';
 import { HostMemoryPolicy, parseDiagnosticMemoryConfig } from './memory-policy.js';
 import { MemoryQueryService } from '../application/memory-query-service.js';
+import { TargetKnowledgePublicationService, type TargetKnowledgePublicationServiceOptions } from '../application/target-knowledge-publication-service.js';
+
+/** Host assembly seam. Formal API/replay runtime wiring remains a T6 task. */
+export function createTargetKnowledgePublicationService(options: TargetKnowledgePublicationServiceOptions) {
+  return new TargetKnowledgePublicationService(options);
+}
 
 /** One-time deployment opt-in. File size and trust shape are checked before assembly. */
 export async function readDiagnosticMemoryConfig(env: Readonly<Record<string, string | undefined>>): Promise<DiagnosticMemoryConfig> {

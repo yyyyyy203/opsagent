@@ -3,11 +3,12 @@ import { systemClock, randomIdGenerator } from '../../contracts/common.js';
 import { KnowledgeContractError, type TargetKnowledgeBindingPublisher, type TargetKnowledgePublication,
   type TargetKnowledgePublishCommand } from '../../contracts/knowledge-memory.js';
 import { parseKnowledgeGovernanceAuditV1 } from '../../contracts/knowledge-governance-audit.js';
-import { normalizeKnowledgePublication, validateKnowledgePublicationPolicy, validateKnowledgeReference } from '../../contracts/knowledge-storage-behavior.js';
+import { assertGovernedPublicationFence, normalizeKnowledgePublication, validateKnowledgePublicationPolicy, validateKnowledgeReference } from '../../contracts/knowledge-storage-behavior.js';
 import { checkpointChecksum, canonicalJson } from '../../contracts/stable-json.js';
-import type { KnowledgePublicationActorPort, KnowledgePublicationInspectionPort, KnowledgePublicationSnapshot } from '../../contracts/knowledge-memory-storage.js';
+import type { GovernedKnowledgePublicationPort, GovernedKnowledgePublicationCommand, KnowledgePublicationActorPort, KnowledgePublicationInspectionPort, KnowledgePublicationSnapshot } from '../../contracts/knowledge-memory-storage.js';
 import type { SqliteDatabase } from './database.js';
-import { appendSqliteKnowledgeAuditWithinTransaction, assertSqliteKnowledgeReferenceEligible } from './knowledge-memory-store.js';
+import { appendSqliteKnowledgeAuditWithinTransaction, assertSqliteKnowledgeReferenceEligible, supersedeSqliteKnowledgeWithinPublication } from './knowledge-memory-store.js';
+import { inspectSqlitePublicationFence } from './target-identity-store.js';
 
 interface PublicationRow {
   request_id: string;
@@ -26,7 +27,7 @@ export interface SqliteTargetKnowledgeBindingStoreOptions {
 }
 
 /** Same-database Target knowledge publication pointer and append-only history. */
-export class SqliteTargetKnowledgeBindingStore implements TargetKnowledgeBindingPublisher, KnowledgePublicationInspectionPort {
+export class SqliteTargetKnowledgeBindingStore implements TargetKnowledgeBindingPublisher, KnowledgePublicationInspectionPort, GovernedKnowledgePublicationPort {
   private readonly clock: Clock;
   private readonly ids: IdGenerator;
 
@@ -41,24 +42,47 @@ export class SqliteTargetKnowledgeBindingStore implements TargetKnowledgeBinding
   }
 
   public inspectBinding(targetId: string): Promise<KnowledgePublicationSnapshot> {
+    return Promise.resolve(this.inspectBindingSync(targetId));
+  }
+
+  private inspectBindingSync(targetId: string): KnowledgePublicationSnapshot {
     const row = this.database.raw.prepare(`SELECT scope_key, binding_json FROM target_knowledge_bindings WHERE target_id = ?`).get(targetId) as
       { scope_key: string; binding_json: string } | undefined;
-    return Promise.resolve(row === undefined
+    return row === undefined
       ? { publication: null, scopeKey: null }
-      : { publication: parsePublication(JSON.parse(row.binding_json) as unknown), scopeKey: row.scope_key });
+      : { publication: parsePublication(JSON.parse(row.binding_json) as unknown), scopeKey: row.scope_key };
+  }
+
+  public inspectPublishedSelection(targetId: string) {
+    return Promise.resolve().then(() => this.database.raw.transaction(() => ({
+      binding: this.inspectBindingSync(targetId), hostPolicy: inspectSqlitePublicationFence(this.database, targetId).policy,
+    }))());
   }
 
   public publish(input: TargetKnowledgePublishCommand): Promise<TargetKnowledgePublication> {
+    return this.publishAtomic(input);
+  }
+
+  public publishGoverned(input: GovernedKnowledgePublicationCommand): Promise<TargetKnowledgePublication> {
+    const captured = structuredClone(input);
+    return this.publishAtomic(captured.command, captured);
+  }
+
+  private publishAtomic(input: TargetKnowledgePublishCommand, governed?: GovernedKnowledgePublicationCommand): Promise<TargetKnowledgePublication> {
     return Promise.resolve().then(async () => {
       const command = normalizeKnowledgePublication(input);
-      const digest = checkpointChecksum({ operation: 'publication', command });
+      let digest = checkpointChecksum({ operation: 'publication', command });
       const prior = this.findPublication(command.requestId);
-      if (prior) return replayPublication(prior, digest);
+      if (prior && governed === undefined) return replayPublication(prior, digest);
       const authority = await this.options.actors.resolveForTarget({ targetId: command.targetId, requestId: command.requestId });
       if (!authority.actorId.trim()) throw failure('KNOWLEDGE_AUDIT_INVALID');
+      if (governed !== undefined) digest = checkpointChecksum({ operation: 'governed_publication', actorId: authority.actorId,
+        command: { ...command, publishedAt: null } });
       return this.database.raw.transaction(() => {
         const repeated = this.findPublication(command.requestId);
         if (repeated) return replayPublication(repeated, digest);
+        if (governed !== undefined) assertGovernedPublicationFence({ ...governed, command },
+          inspectSqlitePublicationFence(this.database, command.targetId));
         if (command.scope.targetId !== command.targetId || command.policy.targetId !== command.targetId) throw failure('KNOWLEDGE_SCOPE_INVALID');
         const current = this.database.raw.prepare(`SELECT publication_version FROM target_knowledge_bindings WHERE target_id = ?`)
           .get(command.targetId) as { publication_version: number } | undefined;
@@ -66,7 +90,22 @@ export class SqliteTargetKnowledgeBindingStore implements TargetKnowledgeBinding
         if (currentVersion !== command.expectedPublicationVersion) throw failure('KNOWLEDGE_PUBLICATION_CONFLICT');
         const now = this.clock.now().toISOString();
         for (const reference of command.references) {
-          assertSqliteKnowledgeReferenceEligible(this.database, reference, command.scope, now);
+          const revision = assertSqliteKnowledgeReferenceEligible(this.database, reference, command.scope, now);
+          if (governed !== undefined) {
+            const pin = governed.expectedRevisions.find(pin => canonicalJson(pin.reference) === canonicalJson(reference))!;
+            if (revision.governanceVersion !== pin.governanceVersion) throw failure('KNOWLEDGE_GOVERNANCE_CONFLICT');
+            if (revision.sourceEpoch !== pin.sourceEpoch) throw failure('KNOWLEDGE_SOURCE_REVOKED');
+          }
+        }
+        if (governed !== undefined) {
+          const previous = this.database.raw.prepare('SELECT binding_json FROM target_knowledge_bindings WHERE target_id = ?')
+            .get(command.targetId) as { binding_json: string } | undefined;
+          for (const old of previous === undefined ? [] : parsePublication(JSON.parse(previous.binding_json) as unknown).references) {
+            if (command.references.some(ref => ref.id === old.id && Number(ref.version) > Number(old.version))) {
+              supersedeSqliteKnowledgeWithinPublication(this.database, old, command.scope, {
+                requestId: command.requestId, commandDigest: digest, actorId: authority.actorId, now, ids: this.ids });
+            }
+          }
         }
         const publication: TargetKnowledgePublication = {
           targetId: command.targetId, publicationVersion: currentVersion + 1,

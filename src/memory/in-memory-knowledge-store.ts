@@ -8,7 +8,7 @@ import { parseKnowledgeGovernanceAuditV1, type KnowledgeGovernanceAuditOutboxPor
 import { contentRevisionFromTargetReference, parseKnowledgeRecord, parseKnowledgeReviewCommand,
   parseKnowledgeScope } from '../contracts/knowledge-memory-schema.js';
 import { checkpointChecksum, canonicalJson } from '../contracts/stable-json.js';
-import type { KnowledgeCommandReplayIntent, KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgePublicationActorPort,
+import type { GovernedKnowledgePublicationPort, GovernedKnowledgePublicationCommand, KnowledgePublicationFencePort, KnowledgeCommandReplayIntent, KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgePublicationActorPort,
   KnowledgePublicationInspectionPort, KnowledgePublicationSnapshot, KnowledgeRevisionStateQueryPort,
   KnowledgeRevisionStateSnapshot, KnowledgeScopedSearchRequest, KnowledgeScopedSearchStore,
   KnowledgeSourceGovernanceStore, KnowledgeSourceRegistration, KnowledgeSourceState, KnowledgeSourceTransition,
@@ -16,12 +16,13 @@ import type { KnowledgeCommandReplayIntent, KnowledgeProceduralReplayCapability,
   KnowledgeGovernanceTransitionCommand, KnowledgeGovernanceTransitionStore } from '../contracts/knowledge-memory-storage.js';
 import { isKnowledgeTransitionAllowed } from '../contracts/knowledge-memory.js';
 import type { TargetKnowledgeReference } from '../contracts/target.js';
-import { knowledgeReplayPayload, assertKnowledgeReplayPayload, normalizeKnowledgePublication, knowledgeContentText, knowledgeSearchTokens, knowledgeQueryTokens,
+import { assertGovernedPublicationFence, knowledgeReplayPayload, assertKnowledgeReplayPayload, normalizeKnowledgePublication, knowledgeContentText, knowledgeSearchTokens, knowledgeQueryTokens,
   rankKnowledgeSearch } from '../contracts/knowledge-storage-behavior.js';
 
 export interface InMemoryGovernedKnowledgeStoreOptions {
   authority: KnowledgeReviewAuthorityPort;
   publicationActors: KnowledgePublicationActorPort;
+  publicationFence?: KnowledgePublicationFencePort;
   clock?: Clock;
   ids?: IdGenerator;
 }
@@ -70,7 +71,7 @@ interface StoredPublication {
 }
 
 /** Test-only reference store. Production bootstraps must use the SQLite implementation. */
-export class InMemoryGovernedKnowledgeStore implements KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
+export class InMemoryGovernedKnowledgeStore implements GovernedKnowledgePublicationPort, KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
   KnowledgeScopedSearchStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort,
   KnowledgeGovernanceTransitionStore,
   TargetKnowledgeBindingPublisher, KnowledgeGovernanceAuditOutboxPort, KnowledgeGovernanceAuditQueryPort,
@@ -432,20 +433,48 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeProceduralReplay
   }
 
   public publish(command: TargetKnowledgePublishCommand): Promise<TargetKnowledgePublication> {
+    return this.publishAtomic(command);
+  }
+
+  public publishGoverned(input: GovernedKnowledgePublicationCommand): Promise<TargetKnowledgePublication> {
+    const captured = structuredClone(input);
+    return this.publishAtomic(captured.command, captured);
+  }
+
+  public getPublicationVersion(targetId: string): number {
+    return this.publications.get(targetId)?.publication.publicationVersion ?? 0;
+  }
+
+  public inspectPublishedSelection(targetId: string) {
+    return Promise.resolve().then(() => {
+      if (this.options.publicationFence === undefined) throw error('KNOWLEDGE_SCOPE_INVALID');
+      const current = this.publications.get(targetId);
+      return { binding: { publication: current === undefined ? null : structuredClone(current.publication),
+        scopeKey: current?.scopeKey ?? null }, hostPolicy: this.options.publicationFence.inspectPublicationFence(targetId).policy };
+    });
+  }
+
+  private publishAtomic(command: TargetKnowledgePublishCommand, governed?: GovernedKnowledgePublicationCommand): Promise<TargetKnowledgePublication> {
     return Promise.resolve().then(async () => {
       const normalized = normalizeKnowledgePublication(command);
-      const digest = commandDigest('publication', normalized);
+      let digest = commandDigest('publication', normalized);
       const replay = this.publicationsByRequest.get(normalized.requestId);
-      if (replay) {
+      if (replay && governed === undefined) {
         if (replay.digest !== digest) throw error('KNOWLEDGE_PUBLICATION_CONFLICT');
         return structuredClone(replay.publication);
       }
       const actor = await this.options.publicationActors.resolveForTarget({ targetId: normalized.targetId, requestId: normalized.requestId });
+      if (governed !== undefined) digest = checkpointChecksum({ operation: 'governed_publication', actorId: actor.actorId,
+        command: { ...normalized, publishedAt: null } });
       return this.inTransaction(() => {
         const repeated = this.publicationsByRequest.get(normalized.requestId);
         if (repeated) {
           if (repeated.digest !== digest) throw error('KNOWLEDGE_PUBLICATION_CONFLICT');
           return structuredClone(repeated.publication);
+        }
+        if (governed !== undefined) {
+          if (this.options.publicationFence === undefined) throw error('KNOWLEDGE_SCOPE_INVALID');
+          assertGovernedPublicationFence({ ...governed, command: normalized }, this.options.publicationFence.inspectPublicationFence(normalized.targetId));
         }
         if (normalized.scope.targetId !== normalized.targetId || normalized.policy.targetId !== normalized.targetId) {
           throw error('KNOWLEDGE_SCOPE_INVALID');
@@ -455,6 +484,28 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeProceduralReplay
         if (currentVersion !== normalized.expectedPublicationVersion) throw error('KNOWLEDGE_PUBLICATION_CONFLICT');
         const now = this.clock.now().toISOString();
         for (const reference of normalized.references) this.assertReferenceEligible(reference, normalized.scope, now);
+        if (governed !== undefined) {
+          for (const pin of governed.expectedRevisions) {
+            const stored = this.revisions.get(revisionKey(pin.reference.id, Number(pin.reference.version)))!;
+            if (stored.governanceVersion !== pin.governanceVersion) throw error('KNOWLEDGE_GOVERNANCE_CONFLICT');
+            if (stored.sourceEpoch !== pin.sourceEpoch) throw error('KNOWLEDGE_SOURCE_REVOKED');
+          }
+          for (const old of current?.publication.references ?? []) {
+            if (!normalized.references.some(ref => ref.id === old.id && Number(ref.version) > Number(old.version))) continue;
+            const stored = this.revisions.get(revisionKey(old.id, Number(old.version)));
+            if (stored === undefined || stored.status !== 'approved') continue;
+            if (scopeDigest(stored.immutable.scope) !== scopeDigest(normalized.scope) || stored.immutable.contentDigest !== old.digest) {
+              throw error('KNOWLEDGE_SCOPE_INVALID');
+            }
+            const audit = this.knowledgeAudit({ requestId: normalized.requestId, commandDigest: digest, actorId: actor.actorId,
+              revision: this.materialize(stored), governanceVersion: stored.governanceVersion + 1,
+              beforeStatus: 'approved', afterStatus: 'superseded' });
+            stored.status = 'superseded';
+            stored.governanceVersion += 1;
+            stored.review = undefined;
+            this.appendWithinTransaction(audit);
+          }
+        }
         const publication: TargetKnowledgePublication = {
           targetId: normalized.targetId, publicationVersion: currentVersion + 1,
           references: structuredClone(normalized.references), policy: structuredClone(normalized.policy),

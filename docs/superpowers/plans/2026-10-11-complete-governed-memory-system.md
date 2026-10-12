@@ -89,10 +89,10 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 - 更新 `src/profiles/target-resolver.ts`、`src/bootstrap/diagnostic-memory.ts` 与 Target bootstrap 注入：一致读取同库启用指针覆盖层；Catalog 的初始 knowledgeRefs 只能显式导入，不在重启时覆盖现有发布。
 - 新增 `test/target-knowledge-publication.test.ts`，扩展 `test/target-run-service.test.ts`、`test/knowledge-memory-sqlite.test.ts`。
 
-- [ ] RED：approve r2 后未发布，r1 保持可用且新 Run 不自动选 r2；显式启用成功后新 Run 固定 r2，旧 Run 不升级。
-- [ ] RED：发布与撤销/sourceEpoch/Target scope 更新并发、CAS 冲突、写 outbox 失败，均完整回滚；安全撤销不因没有替代版本而延期。
-- [ ] GREEN：同事务提交启用集合/publicationVersion、必要 supersede、索引资格和审计；不修改阈值/连接/工具权限。知识发布不自行递增 profileRevision；真正规则变化需新 scope 和审核。
-- [ ] 验收：旧 Run 的 r1 若被 supersede，按 optional/required 矩阵显示限制而非替换引用；重启不丢发布，首绑定事务保持原 publicationVersion。历史收据/旧修订不得用作撤销回滚授权。
+- [x] RED：approve r2 后未发布，r1 保持可用且新 Run 不自动选 r2；显式启用成功后新 Run 固定 r2，旧 Run 不升级。发布服务测试覆盖显式发布前后及 Run 快照固定。
+- [x] RED：发布与撤销/sourceEpoch/Target scope 更新并发、CAS 冲突、写 outbox 失败，均完整回滚；安全撤销不因没有替代版本而延期。定向测试覆盖 scope/policy/source/version fence、回滚、撤销后重放不复活。
+- [x] GREEN：同事务提交启用集合/publicationVersion、必要 supersede、索引资格和审计；不修改阈值/连接/工具权限。知识发布不自行递增 profileRevision；真正规则变化需新 scope 和审核。SQLite/InMemory 两种实现通过定向验证。
+- [x] 验收：旧 Run 的 r1 若被 supersede，按 optional/required 矩阵显示限制而非替换引用；重启不丢发布，首绑定事务保持原 publicationVersion。历史收据/旧修订不得用作撤销回滚授权。独立审查未发现 P0/P1；stale resolver 的新 Run registry-version fence 记录为后续 P2，不扩大 T4b 范围。
 
 ## T5 — 四类记忆协调器、预算与模型视图（RED → GREEN）
 

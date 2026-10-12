@@ -583,6 +583,29 @@ export function assertSqliteKnowledgeReferenceEligible(database: SqliteDatabase,
   return revision;
 }
 
+/** Only the composite publication transaction may call this synchronous operation. */
+export function supersedeSqliteKnowledgeWithinPublication(database: SqliteDatabase, reference: TargetKnowledgeReference,
+  scope: KnowledgeScope, input: { requestId: string; commandDigest: string; actorId: string; now: string; ids: IdGenerator }): void {
+  if (!database.raw.inTransaction) throw new Error('Publication supersede requires an active transaction');
+  const row = database.raw.prepare(`SELECT r.*, s.governance_version, s.status, s.source_epoch, s.review_json, s.updated_at
+    FROM diagnostic_knowledge_revisions r JOIN diagnostic_knowledge_revision_states s
+    ON s.knowledge_id = r.knowledge_id AND s.content_revision = r.content_revision
+    WHERE r.knowledge_id = ? AND r.content_revision = ?`).get(reference.id, Number(reference.version)) as RevisionRow | undefined;
+  if (row === undefined || row.status !== 'approved') return; // Never reactivate safety-revoked content.
+  const revision = materializeRevision(row);
+  if (row.scope_key !== scopeDigest(scope) || revision.contentDigest !== reference.digest) throw failure('KNOWLEDGE_SCOPE_INVALID');
+  const nextVersion = revision.governanceVersion + 1;
+  const updated = database.raw.prepare(`UPDATE diagnostic_knowledge_revision_states
+    SET governance_version = ?, status = 'superseded', review_json = NULL, updated_at = ?
+    WHERE knowledge_id = ? AND content_revision = ? AND governance_version = ? AND status = 'approved'`)
+    .run(nextVersion, input.now, revision.id, revision.contentRevision, revision.governanceVersion);
+  if (updated.changes !== 1) throw failure('KNOWLEDGE_GOVERNANCE_CONFLICT');
+  database.raw.prepare('DELETE FROM diagnostic_knowledge_fts WHERE knowledge_id = ? AND content_revision = ?')
+    .run(revision.id, revision.contentRevision);
+  appendSqliteKnowledgeAuditWithinTransaction(database, knowledgeAudit(input.ids, { ...input, revision,
+    governanceVersion: nextVersion, beforeStatus: 'approved', afterStatus: 'superseded', occurredAt: input.now }));
+}
+
 export function selectSqliteKnowledgeSource(database: SqliteDatabase, sourceId: string, dataDomainId: string): KnowledgeSourceState | null {
   return selectSource(database, sourceId, dataDomainId);
 }

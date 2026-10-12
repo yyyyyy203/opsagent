@@ -33,6 +33,7 @@ import { cloneInMemoryDiagnosticRecords, createInMemoryDiagnosticRecords, create
   stageAutomaticMemoryCapture, stageMemorySignals } from '../memory/diagnostic-memory-state.js';
 import { InMemoryDiagnosticMemoryStore } from '../memory/in-memory-diagnostic-memory.js';
 import { sameTargetRecord, validateTargetBindingState } from './target-binding-state.js';
+import type { KnowledgePublicationVersionPort } from '../contracts/knowledge-memory-storage.js';
 
 const DEFAULT_EVIDENCE_PAGE_SIZE = 50;
 const MAX_EVIDENCE_PAGE_SIZE = 100;
@@ -70,7 +71,8 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
   public readonly evidence = new InMemoryEvidenceRepository();
   public readonly memory: InMemoryDiagnosticMemoryStore;
 
-  public constructor(private readonly clock: Clock = systemClock) {
+  public constructor(private readonly clock: Clock = systemClock,
+    private readonly publicationVersions?: KnowledgePublicationVersionPort) {
     this.diagnosticState = { checkpointRecords: this.checkpointRecords, executionRecords: this.executionRecords,
       outboxRecords: this.outboxRecords, memory: createInMemoryDiagnosticRecords() };
     this.memory = new InMemoryDiagnosticMemoryStore({ clock, transaction: this.diagnosticState });
@@ -395,6 +397,7 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
       bindingByRunId: runId => bindings.get(runId) ?? null,
       snapshotByBindingId: bindingId => snapshots.get(bindingId) ?? null,
       requestById: requestId => this.targetRequestRecords.get(requestId) ?? null,
+      publicationVersionByTarget: targetId => this.publicationVersions?.getPublicationVersion(targetId) ?? 0,
     });
     if (transition === undefined || validated.binding === undefined) return;
     this.consumeStartClaim(context, transition, outboxEvents, startClaims);

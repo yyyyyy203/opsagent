@@ -24,6 +24,10 @@ export class InMemoryTargetIdentityStore implements TargetIdentityRegistry, Targ
     return Promise.resolve(structuredClone(this.snapshot));
   }
 
+  public inspectPublicationFence(targetId: string) {
+    return { registryVersion: this.snapshot.version, policy: structuredClone(this.policies.get(targetId) ?? null) };
+  }
+
   public publishCatalog(input: TargetIdentityCatalogInput): Promise<TargetIdentityCatalogPublication> {
     const result = applyTargetIdentityCatalog(this.snapshot, sanitizeCatalogInput(input));
     const recordedAt = result.audit.length === 0 ? undefined : timestamp(this.clock);

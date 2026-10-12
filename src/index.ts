@@ -9,6 +9,7 @@ export * from './application/run-execution-coordinator.js';
 export * from './application/web-confirmation-service.js';
 export * from './application/external-tool-result-service.js';
 export * from './application/create-runtime.js';
+export * from './application/target-knowledge-publication-service.js';
 export * from './application/streaming-evidence-recorder.js';
 export * from './application/message-cursor-codec.js';
 export * from './acceptance/index.js';

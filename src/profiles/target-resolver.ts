@@ -3,7 +3,7 @@ import { KnowledgeContractError, type KnowledgeScope, type TargetKnowledgePublic
 import { normalizeKnowledgePublication, validateKnowledgePublicationPolicy } from '../contracts/knowledge-storage-behavior.js';
 import { parseKnowledgeScope } from '../contracts/knowledge-memory-schema.js';
 import { parseResolvedTargetSnapshotV2 } from '../contracts/target-schema.js';
-import type { KnowledgePublicationInspectionPort } from '../contracts/knowledge-memory-storage.js';
+import type { KnowledgePublicationInspectionPort, TargetKnowledgePublicationContextPort } from '../contracts/knowledge-memory-storage.js';
 import {
   TargetConfigurationError,
   type TargetCatalogDefinition,
@@ -89,6 +89,9 @@ export async function createStaticTargetResolver(
   options: CreateStaticTargetResolverOptions,
 ): Promise<StaticTargetResolver> {
   if (!isTimestamp(options.validationTime)) throw new TargetConfigurationError('TARGET_CATALOG_INVALID');
+  // Fence the builder before any asynchronous Profile preparation. A stale
+  // builder must not acquire a newer version after its definitions were read.
+  const identitySnapshot = await options.identityRegistry.readSnapshot();
   const parsed = parseTargetCatalog(options.catalog, {
     maxRegisteredTargets: options.maxRegisteredTargets ?? DEFAULT_MAX_REGISTERED_TARGETS,
   });
@@ -153,7 +156,6 @@ export async function createStaticTargetResolver(
     }
   }
 
-  const identitySnapshot = await options.identityRegistry.readSnapshot();
   const publication = await options.identityRegistry.publishCatalog({
     expectedVersion: identitySnapshot.version,
     presentTargetIds: parsed.presentTargetIds,
@@ -173,10 +175,10 @@ export async function createStaticTargetResolver(
   return new StaticTargetResolver(acceptedCandidates, profiles, unavailableOptionals, sourceIdentities, rejected,
     options.profileResolver, scenarioRegistry, privateConnections, adapterRegistry, options.knowledgePolicies,
     options.knowledgePublications ?? noKnowledgePublications,
-    options.knowledgeCapabilities ?? disabledKnowledgeCapabilities);
+    options.knowledgeCapabilities ?? disabledKnowledgeCapabilities, publication.version);
 }
 
-export class StaticTargetResolver implements TargetResolver {
+export class StaticTargetResolver implements TargetResolver, TargetKnowledgePublicationContextPort {
   private readonly entries = new Map<string, TargetResolverEntry>();
   public readonly rejected: readonly TargetCatalogRejection[];
 
@@ -194,6 +196,7 @@ export class StaticTargetResolver implements TargetResolver {
     private readonly knowledgePolicies: TargetKnowledgePolicyStore,
     private readonly knowledgePublications: KnowledgePublicationInspectionPort,
     private readonly knowledgeCapabilities: TargetKnowledgeCapabilityPort,
+    private readonly registryVersion?: number,
   ) {
     for (const definition of definitions) {
       const profile = profiles.get(definition.targetId);
@@ -232,6 +235,25 @@ export class StaticTargetResolver implements TargetResolver {
     }));
   }
 
+  public async resolvePublicationContext(input: { targetId: string; capturedAt: string; signal: AbortSignal }) {
+    throwIfAborted(input.signal);
+    const entry = this.entries.get(input.targetId);
+    if (entry === undefined || !entry.definition.enabled || this.registryVersion === undefined) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    const profile = await this.profileResolver.resolve({ profileId: entry.definition.profileId,
+      capturedAt: input.capturedAt, signal: input.signal });
+    // Custom mutable Profile ports must replace/re-publish the resolver, even
+    // if they reuse the same revision or digest. Ignore only capture time.
+    if (checkpointChecksum({ ...profile, capturedAt: null }) !== checkpointChecksum({ ...entry.profile, capturedAt: null })) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    const hostPolicy = await this.knowledgePolicies.get(input.targetId);
+    validateHostKnowledgePolicy(hostPolicy, input.targetId);
+    throwIfAborted(input.signal);
+    return { registryVersion: this.registryVersion, scope: deriveKnowledgeScope(entry.definition), hostPolicy };
+  }
+
   public resolve(input: { targetId: string; capturedAt: string; signal: AbortSignal }): Promise<ResolvedTargetSnapshotV2> {
     return Promise.resolve().then(async () => {
       throwIfAborted(input.signal);
@@ -260,12 +282,22 @@ export class StaticTargetResolver implements TargetResolver {
       if (profile.profileId !== entry.definition.profileId || profile.revision !== entry.definition.profileRevision) {
         throw new TargetConfigurationError('TARGET_BINDING_INVALID');
       }
+      if (checkpointChecksum({ ...profile, capturedAt: null }) !== checkpointChecksum({ ...entry.profile, capturedAt: null })) {
+        throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+      }
       const memoryScope = deriveMemoryScope(entry.definition);
-      const hostPolicy = await this.knowledgePolicies.get(entry.definition.targetId);
+      let hostPolicy = await this.knowledgePolicies.get(entry.definition.targetId);
       validateHostKnowledgePolicy(hostPolicy, entry.definition.targetId);
       const capabilities = await this.knowledgeCapabilities.getForTarget(entry.definition.targetId);
       if (hostPolicy !== null) assertRequiredKnowledgeEnabled(hostPolicy, capabilities);
-      const binding = await this.knowledgePublications.inspectBinding(entry.definition.targetId);
+      const selection = this.knowledgePublications.inspectPublishedSelection === undefined ? undefined
+        : await this.knowledgePublications.inspectPublishedSelection(entry.definition.targetId);
+      const binding = selection?.binding ?? await this.knowledgePublications.inspectBinding(entry.definition.targetId);
+      if (selection !== undefined) {
+        hostPolicy = selection.hostPolicy;
+        validateHostKnowledgePolicy(hostPolicy, entry.definition.targetId);
+        if (hostPolicy !== null) assertRequiredKnowledgeEnabled(hostPolicy, capabilities);
+      }
       const knowledgeBinding = resolvePublishedKnowledgeBinding(entry.definition, binding);
       const knowledgePolicy = resolveKnowledgePolicy(
         hostPolicy,

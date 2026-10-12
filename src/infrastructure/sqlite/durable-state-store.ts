@@ -489,8 +489,14 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     bindingByRunId: (runId: string) => TargetRunBindingRecord | null;
     snapshotByBindingId: (bindingId: string) => VersionedResolvedTargetSnapshot | null;
     requestById: (requestId: string) => TargetRunRequestRecord | null;
+    publicationVersionByTarget: (targetId: string) => number;
   } {
     return {
+      publicationVersionByTarget: targetId => {
+        const row = this.database.raw.prepare('SELECT publication_version FROM target_knowledge_bindings WHERE target_id = ?')
+          .get(targetId) as { publication_version: number } | undefined;
+        return row?.publication_version ?? 0;
+      },
       bindingByRunId: runId => {
         const row = this.bindingRow(runId);
         return row === undefined ? null : this.parseBinding(row);
