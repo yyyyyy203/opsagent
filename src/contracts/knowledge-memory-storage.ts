@@ -73,8 +73,27 @@ export interface KnowledgeGovernanceTransitionCommand {
 
 export interface KnowledgeDraftStore {
   registerSource(input: KnowledgeSourceRegistration): Promise<KnowledgeSourceState>;
-  saveDraft(command: KnowledgeDraftWriteCommand): Promise<KnowledgeRevision>;
+  saveDraft(command: KnowledgeDraftWriteCommand, replayIntent?: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision>;
   submitForReview(command: KnowledgeSubmissionCommand): Promise<KnowledgeRevision>;
+}
+
+/** Host-computed stable command identity. Execution preconditions are not retry identity. */
+export interface KnowledgeCommandReplayIntent {
+  readonly schemaVersion: 1;
+  readonly requestId: string;
+  readonly operation: 'draft' | 'review';
+  readonly intentDigest: string;
+  readonly scope: KnowledgeScope;
+}
+
+export interface KnowledgeCommandReplayPort {
+  /** null means never applied; conflicting or unprovable legacy intent fails closed. */
+  replayCommand(intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision | null>;
+}
+
+/** Additive extension; the original review command and its audit digest are unchanged. */
+export interface KnowledgeIntentReviewPort extends KnowledgeGovernanceReviewPort {
+  review(command: KnowledgeReviewCommand, replayIntent?: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision>;
 }
 
 export interface KnowledgeGovernanceTransitionStore {

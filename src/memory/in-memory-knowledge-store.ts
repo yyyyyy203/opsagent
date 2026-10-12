@@ -8,7 +8,7 @@ import { parseKnowledgeGovernanceAuditV1, type KnowledgeGovernanceAuditOutboxPor
 import { contentRevisionFromTargetReference, parseKnowledgeRecord, parseKnowledgeReviewCommand,
   parseKnowledgeScope } from '../contracts/knowledge-memory-schema.js';
 import { checkpointChecksum, canonicalJson } from '../contracts/stable-json.js';
-import type { KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgePublicationActorPort,
+import type { KnowledgeCommandReplayIntent, KnowledgeCommandReplayPort, KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgePublicationActorPort,
   KnowledgePublicationInspectionPort, KnowledgePublicationSnapshot, KnowledgeRevisionStateQueryPort,
   KnowledgeRevisionStateSnapshot, KnowledgeScopedSearchRequest, KnowledgeScopedSearchStore,
   KnowledgeSourceGovernanceStore, KnowledgeSourceRegistration, KnowledgeSourceState, KnowledgeSourceTransition,
@@ -16,7 +16,7 @@ import type { KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgePublicat
   KnowledgeGovernanceTransitionCommand, KnowledgeGovernanceTransitionStore } from '../contracts/knowledge-memory-storage.js';
 import { isKnowledgeTransitionAllowed } from '../contracts/knowledge-memory.js';
 import type { TargetKnowledgeReference } from '../contracts/target.js';
-import { normalizeKnowledgePublication, knowledgeContentText, knowledgeSearchTokens, knowledgeQueryTokens,
+import { knowledgeReplayPayload, assertKnowledgeReplayPayload, normalizeKnowledgePublication, knowledgeContentText, knowledgeSearchTokens, knowledgeQueryTokens,
   rankKnowledgeSearch } from '../contracts/knowledge-storage-behavior.js';
 
 export interface InMemoryGovernedKnowledgeStoreOptions {
@@ -70,7 +70,7 @@ interface StoredPublication {
 }
 
 /** Test-only reference store. Production bootstraps must use the SQLite implementation. */
-export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
+export class InMemoryGovernedKnowledgeStore implements KnowledgeCommandReplayPort, KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
   KnowledgeScopedSearchStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort,
   KnowledgeGovernanceTransitionStore,
   TargetKnowledgeBindingPublisher, KnowledgeGovernanceAuditOutboxPort, KnowledgeGovernanceAuditQueryPort,
@@ -113,9 +113,30 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
     });
   }
 
-  public saveDraft(command: KnowledgeDraftWriteCommand): Promise<KnowledgeRevision> {
+  public replayCommand(intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision | null> {
+    return Promise.resolve().then(() => this.replayHostIntent(intent));
+  }
+
+  private replayHostIntent(intent: KnowledgeCommandReplayIntent): KnowledgeRevision | null {
+    knowledgeReplayPayload(intent);
+    const receipt = this.receipts.get(intent.requestId);
+    if (!receipt) return null;
+    if (receipt.operation !== intent.operation) throw error('KNOWLEDGE_GOVERNANCE_CONFLICT');
+    assertKnowledgeReplayPayload(receipt.resultJson, intent);
+    const revision = this.currentRevision(receipt.knowledgeId, receipt.contentRevision);
+    if (scopeDigest(revision.scope) !== scopeDigest(intent.scope)) throw error('KNOWLEDGE_GOVERNANCE_CONFLICT');
+    return this.currentRevision(receipt.knowledgeId, receipt.contentRevision, true);
+  }
+
+  public saveDraft(command: KnowledgeDraftWriteCommand, replayIntent?: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision> {
     return Promise.resolve().then(() => this.inTransaction(() => {
       const normalized = normalizeDraftCommand(command);
+      const resultJson = replayIntent === undefined ? '{}' : knowledgeReplayPayload(replayIntent,
+        'draft', normalized.requestId, normalized.revision.scope);
+      if (replayIntent !== undefined) {
+        const prior = this.replayHostIntent(replayIntent);
+        if (prior) return prior;
+      }
       const digest = commandDigest('draft', normalized);
       const receiptDigest = draftReceiptDigest(normalized);
       const replay = this.replayReceipt(normalized.requestId, 'draft', receiptDigest);
@@ -170,7 +191,7 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
       this.revisions.set(revisionKey(revision.id, revision.contentRevision), stored);
       this.appendWithinTransaction(audit);
       this.saveReceipt({ requestId: normalized.requestId, operation: 'draft', commandDigest: receiptDigest,
-        knowledgeId: revision.id, contentRevision: revision.contentRevision, resultJson: '{}' });
+        knowledgeId: revision.id, contentRevision: revision.contentRevision, resultJson });
       return this.materialize(stored);
     }));
   }
@@ -202,14 +223,25 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
     }));
   }
 
-  public review(input: KnowledgeReviewCommand): Promise<KnowledgeRevision> {
+  public review(input: KnowledgeReviewCommand, replayIntent?: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision> {
     return Promise.resolve().then(async () => {
       const command = parseKnowledgeReviewCommand(input);
       const digest = commandDigest('review', command);
+      if (replayIntent !== undefined) {
+        knowledgeReplayPayload(replayIntent, 'review', command.requestId);
+        const prior = this.replayHostIntent(replayIntent);
+        if (prior) return prior;
+      }
       const replay = this.replayReceipt(command.requestId, 'review', digest);
       if (replay) return this.currentRevision(replay.knowledgeId, replay.contentRevision, true);
       const authority = await this.options.authority.resolveFor({ knowledgeId: command.knowledgeId, kind: command.kind });
       return this.inTransaction(() => {
+        const resultJson = replayIntent === undefined ? '{}' : knowledgeReplayPayload(replayIntent,
+          'review', command.requestId, authority.scope);
+        if (replayIntent !== undefined) {
+          const prior = this.replayHostIntent(replayIntent);
+          if (prior) return prior;
+        }
         const repeated = this.replayReceipt(command.requestId, 'review', digest);
         if (repeated) return this.currentRevision(repeated.knowledgeId, repeated.contentRevision, true);
         const stored = this.revisions.get(revisionKey(command.knowledgeId, command.expectedContentRevision));
@@ -243,7 +275,7 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
         }
         this.appendWithinTransaction(audit);
         this.saveReceipt({ requestId: command.requestId, operation: 'review', commandDigest: digest,
-          knowledgeId: stored.immutable.id, contentRevision: stored.immutable.contentRevision, resultJson: '{}' });
+          knowledgeId: stored.immutable.id, contentRevision: stored.immutable.contentRevision, resultJson });
         return this.materialize(stored);
       });
     });

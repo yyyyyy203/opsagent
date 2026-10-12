@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { KnowledgeGovernanceAuditV1 } from '../src/contracts/knowledge-governance-audit.js';
 import type { KnowledgeScope, ProceduralKnowledgeContent } from '../src/contracts/knowledge-memory.js';
+import type { KnowledgeCommandReplayIntent } from '../src/contracts/knowledge-memory-storage.js';
+import { checkpointChecksum } from '../src/contracts/stable-json.js';
 import { InMemoryGovernedKnowledgeStore } from '../src/memory/in-memory-knowledge-store.js';
-import { ProceduralTemplateService } from '../src/memory/procedural-template-service.js';
+import { ProceduralTemplateService, type ProceduralTemplateServiceOptions } from '../src/memory/procedural-template-service.js';
 import { SemanticSourceRegistry } from '../src/memory/semantic-source-registry.js';
 import { SqliteDatabase } from '../src/infrastructure/sqlite/database.js';
 import { SqliteGovernedKnowledgeStore } from '../src/infrastructure/sqlite/knowledge-memory-store.js';
@@ -35,6 +37,10 @@ function templateContent(templateId = 'settlement-investigation'): ProceduralKno
 
 function setup(backend: 'memory' | 'sqlite' = 'memory') {
   let now = new Date('2026-10-12T00:00:00.000Z');
+  let attestationsAvailable = true;
+  let attestationsVerified = true;
+  let actorId = `operator-${scope.targetId}`;
+  let capabilitiesAvailable = true;
   let nextId = 0;
   const database = backend === 'sqlite' ? SqliteDatabase.open(':memory:') : undefined;
   const storeOptions = {
@@ -55,34 +61,283 @@ function setup(backend: 'memory' | 'sqlite' = 'memory') {
   }] });
   const capabilityRegistry = {
     resolveForTarget: ({ targetId, capabilityId }: { targetId: string; capabilityId: string }) => {
-      if (targetId !== scope.targetId || capabilityId !== 'metrics.query') return null;
+      if (!capabilitiesAvailable || targetId !== scope.targetId || capabilityId !== 'metrics.query') return null;
       return { capabilityId, access: 'read_only' as const, serviceIds: [...scope.serviceIds],
         faultTypes: [...scope.faultTypes], environments: ['simulation'] as const, dataClasses: ['simulated'] as const };
     },
   };
-  const service = new ProceduralTemplateService({
+  const serviceOptions = {
     sourceRegistry,
     capabilityRegistry,
-    targets: { resolveForTarget: async ({ targetId }) => ({ actorId: `operator-${targetId}`, scope }) },
+    targets: { resolveForTarget: async () => ({ actorId, scope }) },
     drafts: store,
     sources: store,
     queries: store,
     reviews: store,
     transitions: store,
-    reviewAttestations: { resolveForReview: async () => ({
-      sourceVerified: true, scopeVerified: true, contentReviewed: true,
-    }) },
+    reviewAttestations: { resolveForReview: async () => {
+      if (!attestationsAvailable) throw new Error('Attestation resolver unavailable');
+      return { sourceVerified: attestationsVerified, scopeVerified: attestationsVerified, contentReviewed: attestationsVerified };
+    } },
     clock: { now: () => new Date(now) },
     ids: { next: prefix => `${prefix}-${++nextId}` },
-  });
+  } satisfies ProceduralTemplateServiceOptions;
+  const service = new ProceduralTemplateService(serviceOptions);
   return {
     store, service,
     setNow(value: string) { now = new Date(value); },
+    disableAttestations() { attestationsAvailable = false; },
+    changeAttestations() { attestationsVerified = false; },
+    changeActor() { actorId = 'operator-other'; },
+    disableCapabilities() { capabilitiesAvailable = false; },
+    restartService() {
+      const restoredStore = database === undefined ? store : new SqliteGovernedKnowledgeStore(database, storeOptions);
+      return new ProceduralTemplateService({ ...serviceOptions, drafts: restoredStore, sources: restoredStore,
+        queries: restoredStore, reviews: restoredStore, transitions: restoredStore });
+    },
     close() { database?.close(); },
   };
 }
 
 describe.each(['memory', 'sqlite'] as const)('%s ProceduralTemplateService', backend => {
+  it.each([
+    { knowledgeId: 'unknown-knowledge' },
+    { contentRevision: 99 },
+    { governanceVersion: 99 },
+    { reasonCode: 'CHANGED_REASON' },
+    { requestId: 'intent-draft' },
+  ])('returns stable conflict for changed review intent %j before attestation checks', async change => {
+    const fixture = setup(backend);
+    try {
+      const draft = await fixture.service.createDraft({ requestId: 'intent-draft', targetId: scope.targetId,
+        source, content: templateContent() });
+      await fixture.service.submitForReview({ requestId: 'intent-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      const command = { requestId: 'intent-review', targetId: scope.targetId, knowledgeId: draft.id,
+        contentRevision: 1, governanceVersion: 2, decision: 'approve' as const };
+      await fixture.service.review(command);
+      const audits = await fixture.store.listPending(20);
+      fixture.disableAttestations();
+      await expect(fixture.service.review({ ...command, ...change }))
+        .rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('replays from durable receipts across service/store recreation, but conflicts for a different trusted actor', async () => {
+    const fixture = setup(backend);
+    try {
+      const create = { requestId: 'durable-draft', targetId: scope.targetId, source, content: templateContent() };
+      const draft = await fixture.service.createDraft(create);
+      await fixture.service.submitForReview({ requestId: 'durable-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      const command = { requestId: 'durable-review', targetId: scope.targetId, knowledgeId: draft.id,
+        contentRevision: 1, governanceVersion: 2, decision: 'approve' as const };
+      const approved = await fixture.service.review(command);
+      const audits = await fixture.store.listPending(20);
+      fixture.disableCapabilities();
+      fixture.changeAttestations();
+      const restarted = fixture.restartService();
+      await expect(restarted.createDraft(create)).resolves.toEqual(approved);
+      await expect(restarted.review(command)).resolves.toEqual(approved);
+      fixture.changeActor();
+      await expect(restarted.createDraft(create)).rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      await expect(restarted.review(command)).rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it.each(['approve', 'reject'] as const)('conflicts for unprovable legacy %s intent while preserving full-command replay', async decision => {
+    const fixture = setup(backend);
+    try {
+      const draft = await fixture.service.createDraft({ requestId: 'legacy-draft', targetId: scope.targetId,
+        source, content: templateContent() });
+      await fixture.service.submitForReview({ requestId: 'legacy-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      const command = { schemaVersion: 1 as const, requestId: 'legacy-review', knowledgeId: draft.id,
+        kind: 'procedural' as const, expectedContentRevision: 1, expectedGovernanceVersion: 2,
+        contentDigest: draft.contentDigest, decision,
+        checks: { sourceVerified: false, scopeVerified: true, contentReviewed: false } };
+      const fullCommand = decision === 'approve' ? { ...command,
+        checks: { sourceVerified: true, scopeVerified: true, contentReviewed: true } } : command;
+      const completed = await fixture.store.review(fullCommand);
+      const audits = await fixture.store.listPending(20);
+      expect(audits.find(item => item.requestId === command.requestId)?.commandDigest)
+        .toBe(checkpointChecksum({ operation: 'review', command: fullCommand }));
+      fixture.disableAttestations();
+      await expect(fixture.service.review({ requestId: command.requestId, targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 2, decision }))
+        .rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      await expect(fixture.store.review(fullCommand)).resolves.toEqual(completed);
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('conflicts for a legacy draft without host intent metadata while retaining exact T2 command replay', async () => {
+    const fixture = setup(backend);
+    try {
+      const seed = await fixture.service.createDraft({ requestId: 'legacy-seed', targetId: scope.targetId,
+        source, content: templateContent() });
+      const content = templateContent('legacy-template');
+      const command = { requestId: 'legacy-raw-draft', actorId: 'legacy-author',
+        naturalKey: 'procedural:legacy-template:settlement-failure:1.0.0', sourceDomainId: 'settlement-domain',
+        expectedContentRevision: null, expectedGovernanceVersion: null,
+        revision: { ...seed, id: 'legacy-knowledge', content, contentDigest: checkpointChecksum(content) } };
+      const draft = await fixture.store.saveDraft(command);
+      const audits = await fixture.store.listPending(20);
+      await expect(fixture.service.createDraft({ requestId: command.requestId, targetId: scope.targetId, source, content }))
+        .rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      await expect(fixture.store.saveDraft(command)).resolves.toEqual(draft);
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('preserves expiry on review and draft receipts even when attestations are unavailable', async () => {
+    const fixture = setup(backend);
+    try {
+      const create = { requestId: 'expiry-draft', targetId: scope.targetId, source, content: templateContent(),
+        validUntil: '2026-10-12T00:00:01.000Z' };
+      const draft = await fixture.service.createDraft(create);
+      await fixture.service.submitForReview({ requestId: 'expiry-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      const command = { requestId: 'expiry-review', targetId: scope.targetId, knowledgeId: draft.id,
+        contentRevision: 1, governanceVersion: 2, decision: 'approve' as const };
+      await fixture.service.review(command);
+      const audits = await fixture.store.listPending(20);
+      fixture.setNow('2026-10-12T00:00:01.000Z');
+      fixture.disableAttestations();
+      await expect(fixture.service.review(command)).rejects.toMatchObject({ code: 'KNOWLEDGE_EXPIRED' });
+      await expect(fixture.service.createDraft(create)).rejects.toMatchObject({ code: 'KNOWLEDGE_EXPIRED' });
+      expect(await fixture.store.getExact({ id: draft.id, contentRevision: 1, scope })).toBeNull();
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('replays a completed draft after source revocation without another audit or usable knowledge', async () => {
+    const fixture = setup(backend);
+    try {
+      const command = { requestId: 'replay-draft', targetId: scope.targetId, source, content: templateContent() };
+      const draft = await fixture.service.createDraft(command);
+      await fixture.store.transitionSource({ requestId: 'replay-draft-source-revoke', actorId: 'operator-admin',
+        sourceId: source.sourceId, dataDomainId: 'settlement-domain', expectedSourceEpoch: 0,
+        transition: 'revoked', sourceDigest: digest, occurredAt: '2026-10-12T00:00:01.000Z' });
+      const audits = await fixture.store.listPending(20);
+      await expect(fixture.service.createDraft(command)).resolves.toEqual(draft);
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+      expect(await fixture.store.getExact({ id: draft.id, contentRevision: 1, scope })).toBeNull();
+      expect(await fixture.store.inspectExact({ id: draft.id, contentRevision: 1, scope,
+        now: '2026-10-12T00:00:02.000Z' })).toMatchObject({ status: 'draft', sourceValidity: 'revoked',
+        sourceEpoch: 0, currentSourceEpoch: 1 });
+    } finally { fixture.close(); }
+  });
+
+  it('replays an immutable revision after source revoke and rejects changed revision intent before prechecks', async () => {
+    const fixture = setup(backend);
+    try {
+      const draft = await fixture.service.createDraft({ requestId: 'revise-first', targetId: scope.targetId,
+        source, content: templateContent() });
+      const command = { requestId: 'revise-replay', targetId: scope.targetId, source,
+        content: { ...templateContent(), limitations: ['A revised limitation.'] }, knowledgeId: draft.id,
+        expectedContentRevision: 1, expectedGovernanceVersion: 1 };
+      const revision = await fixture.service.reviseDraft(command);
+      await fixture.store.transitionSource({ requestId: 'revise-source-revoke', actorId: 'operator-admin',
+        sourceId: source.sourceId, dataDomainId: 'settlement-domain', expectedSourceEpoch: 0,
+        transition: 'revoked', sourceDigest: digest, occurredAt: '2026-10-12T00:00:01.000Z' });
+      const audits = await fixture.store.listPending(20);
+      await expect(fixture.restartService().reviseDraft(command)).resolves.toEqual(revision);
+      await expect(fixture.service.reviseDraft({ ...command, expectedGovernanceVersion: 99 }))
+        .rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      await expect(fixture.service.reviseDraft({ ...command, content: templateContent() }))
+        .rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      expect(await fixture.store.getExact({ id: revision.id, contentRevision: 2, scope })).toBeNull();
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('returns scope conflict before source invalidity for a cross-scope receipt request', async () => {
+    const fixture = setup(backend);
+    try {
+      const content = templateContent();
+      const draft = await fixture.service.createDraft({ requestId: 'scope-replay', targetId: scope.targetId, source, content });
+      await fixture.service.submitForReview({ requestId: 'scope-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      await fixture.service.review({ requestId: 'scope-approve', targetId: scope.targetId, knowledgeId: draft.id,
+        contentRevision: 1, governanceVersion: 2, decision: 'approve' });
+      await fixture.store.transitionSource({ requestId: 'scope-source-revoke', actorId: 'operator-admin',
+        sourceId: source.sourceId, dataDomainId: 'settlement-domain', expectedSourceEpoch: 0,
+        transition: 'revoked', sourceDigest: digest, occurredAt: '2026-10-12T00:00:01.000Z' });
+      const audits = await fixture.store.listPending(20);
+      const intent: KnowledgeCommandReplayIntent = { schemaVersion: 1, requestId: 'scope-replay', operation: 'draft',
+        scope: { ...scope, datasetId: 'other-dataset' }, intentDigest: checkpointChecksum({ schemaVersion: 1,
+          operation: 'create', requestId: 'scope-replay', actorId: `operator-${scope.targetId}`,
+          targetId: scope.targetId, scope, knowledgeId: null, expectedContentRevision: null,
+          expectedGovernanceVersion: null, source, content, contentDigest: draft.contentDigest, validUntil: null }) };
+      await expect(fixture.store.replayCommand(intent)).rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('returns the stable intent conflict before revoked-source prechecks on a reused draft request', async () => {
+    const fixture = setup(backend);
+    try {
+      const command = { requestId: 'replay-draft-conflict', targetId: scope.targetId, source, content: templateContent() };
+      await fixture.service.createDraft(command);
+      await fixture.store.transitionSource({ requestId: 'replay-conflict-source-revoke', actorId: 'operator-admin',
+        sourceId: source.sourceId, dataDomainId: 'settlement-domain', expectedSourceEpoch: 0,
+        transition: 'revoked', sourceDigest: digest, occurredAt: '2026-10-12T00:00:01.000Z' });
+      const audits = await fixture.store.listPending(20);
+      await expect(fixture.service.createDraft({ ...command,
+        content: { ...command.content, limitations: ['A different intent.'] } }))
+        .rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it.each(['approve', 'reject'] as const)('replays completed %s with unavailable attestations and rejects changed intent', async decision => {
+    const fixture = setup(backend);
+    try {
+      const draft = await fixture.service.createDraft({ requestId: 'replay-review-draft', targetId: scope.targetId,
+        source, content: templateContent() });
+      const pending = await fixture.service.submitForReview({ requestId: 'replay-review-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      const command = { requestId: 'replay-review', targetId: scope.targetId, knowledgeId: draft.id,
+        contentRevision: 1, governanceVersion: pending.governanceVersion, decision };
+      const completed = await fixture.service.review(command);
+      const audits = await fixture.store.listPending(20);
+      fixture.disableAttestations();
+      await expect(fixture.service.review(command)).resolves.toEqual(completed);
+      await expect(fixture.service.review({ ...command, decision: decision === 'approve' ? 'reject' : 'approve' }))
+        .rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
+  it('never returns effective approval or query eligibility from a receipt after source revocation', async () => {
+    const fixture = setup(backend);
+    try {
+      const create = { requestId: 'replay-effective-draft', targetId: scope.targetId, source, content: templateContent() };
+      const draft = await fixture.service.createDraft(create);
+      const pending = await fixture.service.submitForReview({ requestId: 'replay-effective-submit', targetId: scope.targetId,
+        knowledgeId: draft.id, contentRevision: 1, governanceVersion: 1 });
+      const command = { requestId: 'replay-effective-approve', targetId: scope.targetId, knowledgeId: draft.id,
+        contentRevision: 1, governanceVersion: pending.governanceVersion, decision: 'approve' as const };
+      const approved = await fixture.service.review(command);
+      await fixture.store.transitionSource({ requestId: 'replay-effective-source-revoke', actorId: 'operator-admin',
+        sourceId: source.sourceId, dataDomainId: 'settlement-domain', expectedSourceEpoch: 0,
+        transition: 'revoked', sourceDigest: digest, occurredAt: '2026-10-12T00:00:01.000Z' });
+      const audits = await fixture.store.listPending(20);
+      fixture.disableAttestations();
+      // Preserve T2's existing fail-closed replay semantics for invalid approval.
+      await expect(fixture.service.review(command)).rejects.toMatchObject({ code: 'KNOWLEDGE_SOURCE_REVOKED' });
+      await expect(fixture.service.createDraft(create)).rejects.toMatchObject({ code: 'KNOWLEDGE_SOURCE_REVOKED' });
+      expect(await fixture.store.getExact({ id: approved.id, contentRevision: 1, scope })).toBeNull();
+      expect(await fixture.store.search({ kind: 'procedural', scope, references: [{ id: approved.id,
+        version: '1', digest: approved.contentDigest, approval: 'approved' }], query: 'settlement', limit: 10,
+        now: '2026-10-12T00:00:02.000Z' })).toEqual([]);
+      expect(await fixture.store.listPending(20)).toEqual(audits);
+    } finally { fixture.close(); }
+  });
+
   it('creates an immutable host-scoped draft and rejects unknown or write-capable registry entries', async () => {
     const fixture = setup(backend);
     try {

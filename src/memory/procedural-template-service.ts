@@ -1,7 +1,6 @@
 import { randomIdGenerator, systemClock, type Clock, type IdGenerator } from '../contracts/common.js';
 import {
   KnowledgeContractError,
-  type KnowledgeGovernanceReviewPort,
   type KnowledgeQueryPort,
   type KnowledgeReviewCommand,
   type KnowledgeRevision,
@@ -16,6 +15,9 @@ import { parseKnowledgeRecord, parseKnowledgeReviewCommand, parseKnowledgeScope,
 import { checkpointChecksum } from '../contracts/stable-json.js';
 import type {
   KnowledgeDraftStore,
+  KnowledgeCommandReplayIntent,
+  KnowledgeCommandReplayPort,
+  KnowledgeIntentReviewPort,
   KnowledgeGovernanceTransitionStore,
   KnowledgeRevisionStateQueryPort,
   KnowledgeSourceGovernanceStore,
@@ -71,10 +73,10 @@ export interface ProceduralTemplateServiceOptions {
   readonly sourceRegistry: ProceduralSourceRegistryPort;
   readonly capabilityRegistry: ProceduralReadonlyCapabilityRegistryPort;
   readonly targets: ProceduralTargetContextPort;
-  readonly drafts: KnowledgeDraftStore;
+  readonly drafts: KnowledgeDraftStore & KnowledgeCommandReplayPort;
   readonly sources: KnowledgeSourceGovernanceStore & Pick<KnowledgeDraftStore, 'registerSource'>;
   readonly queries: KnowledgeQueryPort & KnowledgeRevisionStateQueryPort;
-  readonly reviews: KnowledgeGovernanceReviewPort;
+  readonly reviews: KnowledgeIntentReviewPort & KnowledgeCommandReplayPort;
   readonly transitions: KnowledgeGovernanceTransitionStore;
   readonly reviewAttestations: ProceduralReviewAttestationPort;
   readonly clock?: Clock;
@@ -135,6 +137,15 @@ export class ProceduralTemplateService {
     assertExactKeys(input, ['requestId', 'targetId', 'source', 'content', 'validUntil']);
     const request = validateDraftRequest(input);
     const target = await this.resolveTarget(request.targetId, request.requestId);
+    const replayIntent: KnowledgeCommandReplayIntent = { schemaVersion: 1, requestId: request.requestId,
+      operation: 'draft', scope: target.scope, intentDigest: checkpointChecksum({ schemaVersion: 1,
+        operation: 'create', requestId: request.requestId, actorId: target.actorId,
+        targetId: request.targetId, scope: target.scope, knowledgeId: null,
+        expectedContentRevision: null, expectedGovernanceVersion: null,
+        source: request.source, content: request.content, contentDigest: checkpointChecksum(request.content),
+        validUntil: request.validUntil ?? null }) };
+    const replay = await this.options.drafts.replayCommand(replayIntent);
+    if (replay) return assertProcedural(replay);
     const source = await this.resolveCurrentSource(request.targetId, request.source);
     this.validateContentSources(request.targetId, request.source, request.content);
     this.validateCapabilities(request.targetId, target.scope, request.content);
@@ -146,7 +157,7 @@ export class ProceduralTemplateService {
         actorId: target.actorId, targetId: request.targetId, scope: target.scope, source,
         content: request.content, validUntil: request.validUntil }),
       actorId: target.actorId, naturalKey: naturalKey(request.content), sourceDomainId: source.manifest.dataDomainId,
-      expectedContentRevision: null, expectedGovernanceVersion: null, revision });
+      expectedContentRevision: null, expectedGovernanceVersion: null, revision }, replayIntent);
     return assertProcedural(saved);
   }
 
@@ -157,6 +168,15 @@ export class ProceduralTemplateService {
     if (!isIdentifier(input.knowledgeId) || !isPositiveVersion(input.expectedContentRevision)
       || !isPositiveVersion(input.expectedGovernanceVersion)) throw invalidRecord();
     const target = await this.resolveTarget(request.targetId, request.requestId);
+    const replayIntent: KnowledgeCommandReplayIntent = { schemaVersion: 1, requestId: request.requestId,
+      operation: 'draft', scope: target.scope, intentDigest: checkpointChecksum({ schemaVersion: 1,
+        operation: 'revise', requestId: request.requestId, actorId: target.actorId,
+        targetId: request.targetId, scope: target.scope, knowledgeId: input.knowledgeId,
+        expectedContentRevision: input.expectedContentRevision, expectedGovernanceVersion: input.expectedGovernanceVersion,
+        source: request.source, content: request.content, contentDigest: checkpointChecksum(request.content),
+        validUntil: request.validUntil ?? null }) };
+    const replay = await this.options.drafts.replayCommand(replayIntent);
+    if (replay) return assertProcedural(replay);
     const current = await this.inspectRevision(input.knowledgeId, input.expectedContentRevision, target.scope);
     if (current.kind !== 'procedural') throw new KnowledgeContractError('KNOWLEDGE_NOT_FOUND');
     if (current.governanceVersion !== input.expectedGovernanceVersion) {
@@ -180,7 +200,7 @@ export class ProceduralTemplateService {
         expectedGovernanceVersion: input.expectedGovernanceVersion }),
       actorId: target.actorId, naturalKey: naturalKey(request.content), sourceDomainId: source.manifest.dataDomainId,
       expectedContentRevision: input.expectedContentRevision,
-      expectedGovernanceVersion: input.expectedGovernanceVersion, revision });
+      expectedGovernanceVersion: input.expectedGovernanceVersion, revision }, replayIntent);
     return assertProcedural(saved);
   }
 
@@ -203,18 +223,29 @@ export class ProceduralTemplateService {
     if ((input.decision !== 'approve' && input.decision !== 'reject')
       || (input.reasonCode !== undefined && !isIdentifier(input.reasonCode))) throw invalidRecord();
     const target = await this.resolveTarget(input.targetId, input.requestId);
-    const current = await this.inspectRevision(input.knowledgeId, input.contentRevision, target.scope);
-    if (current.kind !== 'procedural') throw new KnowledgeContractError('KNOWLEDGE_NOT_FOUND');
+    // Inspection exposes only immutable digest/state and does not enforce volatile source
+    // eligibility. Defer not-found until receipt lookup so changed identity is a conflict.
+    const current = await this.options.queries.inspectExact({ id: input.knowledgeId,
+      contentRevision: input.contentRevision, scope: target.scope, now: this.clock.now().toISOString() });
     // Capability eligibility is checked when immutable content is authored and again at
     // applicability time. The governance query intentionally exposes only safe state for
     // pending drafts; the existing T2 review authority revalidates source epoch/digest.
+    const replayIntent: KnowledgeCommandReplayIntent = { schemaVersion: 1, requestId: input.requestId,
+      operation: 'review', scope: target.scope, intentDigest: checkpointChecksum({ schemaVersion: 1,
+        operation: 'review', requestId: input.requestId, actorId: target.actorId, targetId: input.targetId,
+        scope: target.scope, knowledgeId: input.knowledgeId, kind: 'procedural',
+        expectedContentRevision: input.contentRevision, expectedGovernanceVersion: input.governanceVersion,
+        contentDigest: current?.contentDigest ?? null, decision: input.decision, reasonCode: input.reasonCode ?? null }) };
+    const replay = await this.options.reviews.replayCommand(replayIntent);
+    if (replay) return assertProcedural(replay);
+    if (!current || current.kind !== 'procedural') throw new KnowledgeContractError('KNOWLEDGE_NOT_FOUND');
     const checks = await this.options.reviewAttestations.resolveForReview({ requestId: input.requestId,
       targetId: input.targetId, knowledgeId: input.knowledgeId, decision: input.decision });
     const command = parseKnowledgeReviewCommand({ schemaVersion: 1, requestId: input.requestId,
       knowledgeId: input.knowledgeId, kind: 'procedural', expectedContentRevision: input.contentRevision,
       expectedGovernanceVersion: input.governanceVersion, contentDigest: current.contentDigest,
       decision: input.decision, checks, ...(input.reasonCode === undefined ? {} : { reasonCode: input.reasonCode }) });
-    return assertProcedural(await this.options.reviews.review(command));
+    return assertProcedural(await this.options.reviews.review(command, replayIntent));
   }
 
   /** Revocation changes only the exact revision; T2 owns CAS, replay, and audit atomically. */

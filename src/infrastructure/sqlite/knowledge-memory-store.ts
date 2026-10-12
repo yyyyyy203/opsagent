@@ -7,14 +7,14 @@ import { parseKnowledgeGovernanceAuditV1, type KnowledgeGovernanceAuditOutboxPor
 import { contentRevisionFromTargetReference, parseKnowledgeRecord, parseKnowledgeReviewCommand,
   parseKnowledgeScope } from '../../contracts/knowledge-memory-schema.js';
 import { canonicalJson, checkpointChecksum } from '../../contracts/stable-json.js';
-import type { KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgeGovernanceAuditAttemptPort,
+import type { KnowledgeCommandReplayIntent, KnowledgeCommandReplayPort, KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgeGovernanceAuditAttemptPort,
   KnowledgeGovernanceTransitionCommand, KnowledgeGovernanceTransitionStore, KnowledgeRevisionStateQueryPort,
   KnowledgeRevisionStateSnapshot, KnowledgeScopedSearchRequest, KnowledgeScopedSearchStore,
   KnowledgeSourceGovernanceStore, KnowledgeSourceRegistration, KnowledgeSourceState,
   KnowledgeSourceTransition, KnowledgeSourceTransitionCommand, KnowledgeSubmissionCommand } from '../../contracts/knowledge-memory-storage.js';
 import type { TargetKnowledgeReference } from '../../contracts/target.js';
 import type { SqliteDatabase } from './database.js';
-import { knowledgeContentText, knowledgeQueryTokens, rankKnowledgeSearch } from '../../contracts/knowledge-storage-behavior.js';
+import { knowledgeReplayPayload, assertKnowledgeReplayPayload, knowledgeContentText, knowledgeQueryTokens, rankKnowledgeSearch } from '../../contracts/knowledge-storage-behavior.js';
 
 interface SourceRow { source_id: string; data_domain_id: string; source_epoch: number; source_digest: string; validity: KnowledgeSourceState['validity']; updated_at: string }
 interface RevisionRow {
@@ -36,7 +36,7 @@ export interface SqliteGovernedKnowledgeStoreOptions {
 }
 
 /** SQLite implementation for governed Semantic/Procedural revisions and their independent audit outbox. */
-export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
+export class SqliteGovernedKnowledgeStore implements KnowledgeCommandReplayPort, KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
   KnowledgeScopedSearchStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort, KnowledgeGovernanceTransitionStore,
   KnowledgeGovernanceAuditOutboxPort, KnowledgeGovernanceAuditQueryPort,
   KnowledgeRevisionStateQueryPort, KnowledgeGovernanceAuditAttemptPort {
@@ -68,9 +68,34 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
     }).immediate());
   }
 
-  public saveDraft(command: KnowledgeDraftWriteCommand): Promise<KnowledgeRevision> {
+  public replayCommand(intent: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision | null> {
+    return Promise.resolve().then(() => this.database.raw.transaction(() => this.replayHostIntent(intent))());
+  }
+
+  private replayHostIntent(intent: KnowledgeCommandReplayIntent): KnowledgeRevision | null {
+    knowledgeReplayPayload(intent);
+    const receipt = this.database.raw.prepare(`
+      SELECT request_id, command_digest, operation, knowledge_id, content_revision, result_json, actor_id, governance_version
+      FROM diagnostic_knowledge_reviews WHERE request_id = ?
+    `).get(intent.requestId) as ReceiptRow | undefined;
+    if (!receipt) return null;
+    if (receipt.operation !== intent.operation) throw failure('KNOWLEDGE_GOVERNANCE_CONFLICT');
+    assertKnowledgeReplayPayload(receipt.result_json, intent);
+    const revision = this.readReceiptRevision(receipt);
+    if (scopeDigest(revision.scope) !== scopeDigest(intent.scope)) throw failure('KNOWLEDGE_GOVERNANCE_CONFLICT');
+    if (revision.status === 'approved') this.assertSourceCurrent(revision);
+    return revision;
+  }
+
+  public saveDraft(command: KnowledgeDraftWriteCommand, replayIntent?: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision> {
     return Promise.resolve().then(() => this.database.raw.transaction(() => {
       const normalized = normalizeDraft(command);
+      const resultJson = replayIntent === undefined ? '{}' : knowledgeReplayPayload(replayIntent,
+        'draft', normalized.requestId, normalized.revision.scope);
+      if (replayIntent !== undefined) {
+        const prior = this.replayHostIntent(replayIntent);
+        if (prior) return prior;
+      }
       const digest = commandDigest('draft', normalized);
       const receiptDigest = draftReceiptDigest(normalized);
       const receipt = this.findReceipt(normalized.requestId, 'draft', receiptDigest);
@@ -127,7 +152,7 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
         governanceVersion: 1, afterStatus: 'draft', occurredAt: this.clock.now().toISOString(),
       });
       appendSqliteKnowledgeAuditWithinTransaction(this.database, event);
-      this.insertReceipt(normalized.requestId, receiptDigest, 'draft', revision.id, revision.contentRevision, '{}', normalized.actorId, 1);
+      this.insertReceipt(normalized.requestId, receiptDigest, 'draft', revision.id, revision.contentRevision, resultJson, normalized.actorId, 1);
       return this.loadRevision(revision.id, revision.contentRevision)!;
     }).immediate());
   }
@@ -163,14 +188,25 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
     }).immediate());
   }
 
-  public review(input: KnowledgeReviewCommand): Promise<KnowledgeRevision> {
+  public review(input: KnowledgeReviewCommand, replayIntent?: KnowledgeCommandReplayIntent): Promise<KnowledgeRevision> {
     return Promise.resolve().then(async () => {
       const command = parseKnowledgeReviewCommand(input);
       const digest = commandDigest('review', command);
+      if (replayIntent !== undefined) {
+        knowledgeReplayPayload(replayIntent, 'review', command.requestId);
+        const replay = await this.replayCommand(replayIntent);
+        if (replay) return replay;
+      }
       const prior = this.peekReceipt(command.requestId, 'review', digest);
       if (prior) return this.readReceiptRevision(prior, true);
       const authority = await this.options.authority.resolveFor({ knowledgeId: command.knowledgeId, kind: command.kind });
       return this.database.raw.transaction(() => {
+        const resultJson = replayIntent === undefined ? '{}' : knowledgeReplayPayload(replayIntent,
+          'review', command.requestId, authority.scope);
+        if (replayIntent !== undefined) {
+          const replay = this.replayHostIntent(replayIntent);
+          if (replay) return replay;
+        }
         const receipt = this.findReceipt(command.requestId, 'review', digest);
         if (receipt) return this.readReceiptRevision(receipt, true);
         const stored = this.loadRevision(command.knowledgeId, command.expectedContentRevision);
@@ -204,7 +240,7 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
         });
         appendSqliteKnowledgeAuditWithinTransaction(this.database, event);
         if (nextStatus === 'approved') this.insertSearchRow(stored);
-        this.insertReceipt(command.requestId, digest, 'review', stored.id, stored.contentRevision, '{}', authority.actorId, nextVersion);
+        this.insertReceipt(command.requestId, digest, 'review', stored.id, stored.contentRevision, resultJson, authority.actorId, nextVersion);
         return this.loadRevision(stored.id, stored.contentRevision)!;
       }).immediate();
     });
