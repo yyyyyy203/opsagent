@@ -37,7 +37,7 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 
 **先写测试**：拒绝未知字段、过长内容、重复步骤/引用、无来源、伪造批准者、非法转换、scope 不完整、错误 digest、live/simulation 混淆；Target reference.version 无损关联 contentRevision 而不是治理版本。审批同时需 contentRevision/governanceVersion；发布需 expectedPublicationVersion；无 Run 的审计正常，revoked/superseded/published 不压成 rejected。新增 `test/knowledge-governance-audit-contract.test.ts` 并验证旧 V2 fixtures 不变，然后实现 parser。
 
-- [ ] T1 验收：状态转换表与错误码覆盖 Spec §5/§7；审计契约已冻结，才允许 T2 建表/写 outbox。
+- [x] T1 验收：状态转换表与错误码覆盖 Spec §5/§7；审计契约已冻结，才允许 T2 建表/写 outbox。
 
 ## T2 — 持久化、版本和事务（RED → GREEN）
 
