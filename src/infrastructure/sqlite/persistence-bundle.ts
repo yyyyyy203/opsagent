@@ -14,6 +14,8 @@ import type {
 } from '../../contracts/storage.js';
 import type { ProjectionCheckpointStoreV2 } from '../../event/v2/projection-runner.js';
 import type { ProjectionFailureSinkV2 } from '../../event/v2/event-publisher.js';
+import type { KnowledgeReviewAuthorityPort } from '../../contracts/knowledge-memory.js';
+import type { KnowledgePublicationActorPort } from '../../contracts/knowledge-memory-storage.js';
 import type { InspectionQueryService } from '../../contracts/read-model.js';
 import type { MessageCursorCodec, WebMessageQueries } from '../../contracts/web-read-model.js';
 import type { TargetBindingStore, TargetIdentityRegistry, TargetKnowledgePolicyStore, TargetStartStore } from '../../contracts/target.js';
@@ -30,6 +32,10 @@ import { SqliteWebMessageQuery } from './web-message-query.js';
 import { SqliteDiagnosticMemoryStore } from './diagnostic-memory-store.js';
 import { SqliteMemoryCaptureSource } from './memory-capture-source.js';
 import { SqliteTargetIdentityStore } from './target-identity-store.js';
+import { SqliteGovernedKnowledgeStore } from './knowledge-memory-store.js';
+import { SqliteTargetKnowledgeBindingStore } from './target-knowledge-binding-store.js';
+import { KnowledgeAuditDispatcher, type KnowledgeAuditSink } from '../../memory/knowledge-audit-dispatcher.js';
+import { KnowledgeContractError } from '../../contracts/knowledge-memory.js';
 
 export interface SqlitePersistenceLimits {
   maxEvidenceRawBytes?: number;
@@ -41,6 +47,9 @@ export interface CreateSqlitePersistenceOptions {
   limits?: SqlitePersistenceLimits;
   evidenceBlobRootPath?: string;
   ids?: IdGenerator;
+  knowledgeReviewAuthority?: KnowledgeReviewAuthorityPort;
+  knowledgePublicationActors?: KnowledgePublicationActorPort;
+  knowledgeAuditSink?: KnowledgeAuditSink;
 }
 
 /** Single ownership boundary for all SQLite-backed Agent state. */
@@ -56,6 +65,9 @@ export interface SqlitePersistenceBundle {
   targetStarts: TargetStartStore;
   targetIdentityRegistry: TargetIdentityRegistry;
   targetKnowledgePolicies: TargetKnowledgePolicyStore;
+  knowledge: SqliteGovernedKnowledgeStore;
+  targetKnowledgeBindings: SqliteTargetKnowledgeBindingStore;
+  knowledgeAuditDispatcher?: KnowledgeAuditDispatcher;
   evidence: EvidenceStore & EvidenceQueryStore;
   evidenceManifests: EvidenceManifestStore;
   evidenceBlobs?: EvidenceBlobStore;
@@ -73,6 +85,18 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
     const clock = options.clock ?? systemClock;
     const durable = new SqliteDurableStateStore(database, clock);
     const targetIdentityStore = new SqliteTargetIdentityStore(database, { clock });
+    const knowledge = new SqliteGovernedKnowledgeStore(database, {
+      authority: options.knowledgeReviewAuthority ?? unavailableReviewAuthority,
+      clock,
+      ...(options.ids === undefined ? {} : { ids: options.ids }),
+    });
+    const targetKnowledgeBindings = new SqliteTargetKnowledgeBindingStore(database, {
+      actors: options.knowledgePublicationActors ?? unavailablePublicationActors,
+      clock,
+      ...(options.ids === undefined ? {} : { ids: options.ids }),
+    });
+    const knowledgeAuditDispatcher = options.knowledgeAuditSink === undefined ? undefined
+      : new KnowledgeAuditDispatcher({ outbox: knowledge, sink: options.knowledgeAuditSink, clock });
     const outbox = new SqliteEventOutboxStore(database);
     const eventMessages = new SqliteEventMessageStore(database);
     const evidence = new SqliteEvidenceStore(database, {
@@ -105,6 +129,9 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       targetStarts: durable,
       targetIdentityRegistry: targetIdentityStore,
       targetKnowledgePolicies: targetIdentityStore,
+      knowledge,
+      targetKnowledgeBindings,
+      ...(knowledgeAuditDispatcher === undefined ? {} : { knowledgeAuditDispatcher }),
       evidence,
       evidenceManifests,
       ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),
@@ -125,3 +152,11 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
     throw error;
   }
 }
+
+const unavailableReviewAuthority: KnowledgeReviewAuthorityPort = {
+  resolveFor: () => Promise.reject(new KnowledgeContractError('KNOWLEDGE_APPROVAL_DENIED')),
+};
+
+const unavailablePublicationActors: KnowledgePublicationActorPort = {
+  resolveForTarget: () => Promise.reject(new KnowledgeContractError('KNOWLEDGE_APPROVAL_DENIED')),
+};

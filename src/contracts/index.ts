@@ -15,6 +15,7 @@ export * from './memory.js';
 export * from './knowledge-memory.js';
 export * from './knowledge-memory-schema.js';
 export * from './knowledge-governance-audit.js';
+export * from './knowledge-memory-storage.js';
 export * from './diagnostic-memory.js';
 export * from './diagnostic-memory-schema.js';
 export * from './message.js';

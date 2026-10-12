@@ -22,7 +22,7 @@ describe('Target start reconciliation schema', () => {
     const database = SqliteDatabase.open(join(root, 'start.sqlite'));
 
     try {
-      expect(database.raw.pragma('user_version', { simple: true })).toBe(7);
+      expect(database.raw.pragma('user_version', { simple: true })).toBe(8);
       const columns = database.raw.prepare('PRAGMA table_info(target_run_start_claims)').all() as Array<{ name: string }>;
       expect(columns.map(column => column.name)).toEqual([
         'request_id', 'run_id', 'target_id', 'request_digest', 'owner_id', 'claim_epoch', 'lease_until', 'state',

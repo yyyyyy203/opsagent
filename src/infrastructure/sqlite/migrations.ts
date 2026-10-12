@@ -306,18 +306,168 @@ const MIGRATIONS = [
       SELECT request_id, run_id, target_id, request_digest, NULL, 0, NULL, 'reserved'
       FROM target_run_requests;
   `,
+  `
+    CREATE TABLE diagnostic_knowledge_items (
+      knowledge_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('semantic', 'procedural')),
+      scope_key TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      natural_key TEXT NOT NULL,
+      latest_content_revision INTEGER NOT NULL CHECK (latest_content_revision > 0),
+      created_at TEXT NOT NULL,
+      UNIQUE (kind, scope_key, natural_key)
+    );
+    CREATE INDEX diagnostic_knowledge_items_target ON diagnostic_knowledge_items(target_id, kind, knowledge_id);
+
+    CREATE TABLE diagnostic_knowledge_revisions (
+      knowledge_id TEXT NOT NULL,
+      content_revision INTEGER NOT NULL CHECK (content_revision > 0),
+      kind TEXT NOT NULL CHECK (kind IN ('semantic', 'procedural')),
+      scope_key TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_domain_id TEXT NOT NULL,
+      source_digest TEXT NOT NULL CHECK (length(source_digest) = 64),
+      revision_json TEXT NOT NULL CHECK (length(CAST(revision_json AS BLOB)) <= 24576),
+      content_digest TEXT NOT NULL CHECK (length(content_digest) = 64),
+      created_at TEXT NOT NULL,
+      valid_until TEXT,
+      PRIMARY KEY (knowledge_id, content_revision),
+      FOREIGN KEY (knowledge_id) REFERENCES diagnostic_knowledge_items(knowledge_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX diagnostic_knowledge_revisions_scope ON diagnostic_knowledge_revisions(kind, scope_key, knowledge_id, content_revision);
+    CREATE INDEX diagnostic_knowledge_revisions_source ON diagnostic_knowledge_revisions(source_id, source_domain_id, knowledge_id, content_revision);
+    CREATE TRIGGER diagnostic_knowledge_revisions_no_update
+      BEFORE UPDATE ON diagnostic_knowledge_revisions
+      BEGIN SELECT RAISE(ABORT, 'knowledge revisions are immutable'); END;
+    CREATE TRIGGER diagnostic_knowledge_revisions_no_delete
+      BEFORE DELETE ON diagnostic_knowledge_revisions
+      BEGIN SELECT RAISE(ABORT, 'knowledge revisions are append-only'); END;
+
+    CREATE TABLE diagnostic_knowledge_revision_states (
+      knowledge_id TEXT NOT NULL,
+      content_revision INTEGER NOT NULL,
+      governance_version INTEGER NOT NULL CHECK (governance_version > 0),
+      status TEXT NOT NULL CHECK (status IN ('draft', 'review_pending', 'approved', 'rejected', 'revoked', 'expired', 'conflict', 'superseded')),
+      source_epoch INTEGER NOT NULL CHECK (source_epoch >= 0),
+      review_json TEXT CHECK (review_json IS NULL OR length(CAST(review_json AS BLOB)) <= 4096),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (knowledge_id, content_revision),
+      FOREIGN KEY (knowledge_id, content_revision)
+        REFERENCES diagnostic_knowledge_revisions(knowledge_id, content_revision) ON DELETE RESTRICT
+    );
+    CREATE INDEX diagnostic_knowledge_revision_states_status ON diagnostic_knowledge_revision_states(status, knowledge_id, content_revision);
+
+    CREATE TABLE diagnostic_knowledge_sources (
+      source_id TEXT NOT NULL,
+      data_domain_id TEXT NOT NULL,
+      source_epoch INTEGER NOT NULL CHECK (source_epoch >= 0),
+      source_digest TEXT NOT NULL CHECK (length(source_digest) = 64),
+      validity TEXT NOT NULL CHECK (validity IN ('active', 'revoked', 'digest_mismatch', 'permission_revoked')),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (source_id, data_domain_id)
+    );
+
+    CREATE TABLE diagnostic_knowledge_reviews (
+      request_id TEXT PRIMARY KEY,
+      command_digest TEXT NOT NULL CHECK (length(command_digest) = 64),
+      operation TEXT NOT NULL CHECK (operation IN ('draft', 'revise', 'submit', 'review', 'revoke', 'supersede', 'expire', 'conflict', 'source_transition')),
+      knowledge_id TEXT,
+      content_revision INTEGER,
+      governance_version INTEGER,
+      actor_id TEXT NOT NULL,
+      result_json TEXT NOT NULL CHECK (length(CAST(result_json AS BLOB)) <= 32768),
+      recorded_at TEXT NOT NULL
+    );
+    CREATE INDEX diagnostic_knowledge_reviews_knowledge ON diagnostic_knowledge_reviews(knowledge_id, recorded_at, request_id);
+
+    CREATE TABLE target_knowledge_bindings (
+      target_id TEXT PRIMARY KEY,
+      publication_version INTEGER NOT NULL CHECK (publication_version > 0),
+      scope_key TEXT NOT NULL,
+      policy_version TEXT NOT NULL,
+      binding_json TEXT NOT NULL CHECK (length(CAST(binding_json AS BLOB)) <= 32768),
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE diagnostic_knowledge_publications (
+      request_id TEXT PRIMARY KEY,
+      command_digest TEXT NOT NULL CHECK (length(command_digest) = 64),
+      target_id TEXT NOT NULL,
+      publication_version INTEGER NOT NULL CHECK (publication_version > 0),
+      scope_key TEXT NOT NULL,
+      policy_version TEXT NOT NULL,
+      publication_json TEXT NOT NULL CHECK (length(CAST(publication_json AS BLOB)) <= 32768),
+      published_at TEXT NOT NULL,
+      UNIQUE (target_id, publication_version)
+    );
+    CREATE INDEX diagnostic_knowledge_publications_target ON diagnostic_knowledge_publications(target_id, publication_version);
+    CREATE TRIGGER diagnostic_knowledge_publications_no_update
+      BEFORE UPDATE ON diagnostic_knowledge_publications
+      BEGIN SELECT RAISE(ABORT, 'knowledge publications are append-only'); END;
+    CREATE TRIGGER diagnostic_knowledge_publications_no_delete
+      BEFORE DELETE ON diagnostic_knowledge_publications
+      BEGIN SELECT RAISE(ABORT, 'knowledge publications are append-only'); END;
+
+    CREATE VIRTUAL TABLE diagnostic_knowledge_fts USING fts5(
+      knowledge_id UNINDEXED,
+      content_revision UNINDEXED,
+      kind UNINDEXED,
+      target_id UNINDEXED,
+      scope_key UNINDEXED,
+      source_id UNINDEXED,
+      source_domain_id UNINDEXED,
+      content,
+      tokenize = 'unicode61'
+    );
+
+    CREATE TABLE diagnostic_knowledge_audits (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      audit_id TEXT NOT NULL UNIQUE,
+      request_id TEXT NOT NULL,
+      command_digest TEXT NOT NULL CHECK (length(command_digest) = 64),
+      actor_id TEXT NOT NULL,
+      target_id TEXT,
+      occurred_at TEXT NOT NULL,
+      audit_json TEXT NOT NULL CHECK (length(CAST(audit_json AS BLOB)) <= 8192)
+    );
+    CREATE INDEX diagnostic_knowledge_audits_target_time ON diagnostic_knowledge_audits(target_id, occurred_at, audit_id);
+    CREATE TRIGGER diagnostic_knowledge_audits_no_update
+      BEFORE UPDATE ON diagnostic_knowledge_audits
+      BEGIN SELECT RAISE(ABORT, 'knowledge audits are append-only'); END;
+    CREATE TRIGGER diagnostic_knowledge_audits_no_delete
+      BEFORE DELETE ON diagnostic_knowledge_audits
+      BEGIN SELECT RAISE(ABORT, 'knowledge audits are append-only'); END;
+
+    CREATE TABLE diagnostic_knowledge_outbox (
+      audit_id TEXT PRIMARY KEY,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'delivered')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      created_at TEXT NOT NULL,
+      delivered_at TEXT,
+      FOREIGN KEY (audit_id) REFERENCES diagnostic_knowledge_audits(audit_id) ON DELETE RESTRICT,
+      CHECK ((state = 'pending' AND delivered_at IS NULL) OR (state = 'delivered' AND delivered_at IS NOT NULL))
+    );
+    CREATE INDEX diagnostic_knowledge_outbox_pending ON diagnostic_knowledge_outbox(state, created_at, audit_id);
+  `,
 ] as const;
 
-export function migrateSqlite(database: Database.Database): void {
+export function migrateSqlite(database: Database.Database, targetVersion: number = MIGRATIONS.length): void {
   const current = database.pragma('user_version', { simple: true }) as number;
   if (current > MIGRATIONS.length) throw new Error(`SQLite schema version ${current} is newer than supported ${MIGRATIONS.length}`);
+  if (!Number.isSafeInteger(targetVersion) || targetVersion < current || targetVersion > MIGRATIONS.length) {
+    throw new RangeError(`SQLite migration target ${targetVersion} is invalid`);
+  }
   // Preflight before *any* version upgrade. A failed capability check never
   // creates memory tables or advances the original database's user_version.
-  if (current < 5) {
+  if (current < 5 && targetVersion >= 5) {
     database.exec("CREATE VIRTUAL TABLE temp.diagnostic_memory_fts5_probe USING fts5(tokens, tokenize='unicode61')");
     database.exec('DROP TABLE temp.diagnostic_memory_fts5_probe');
   }
-  for (let version = current + 1; version <= MIGRATIONS.length; version += 1) {
+  if (current < 8 && targetVersion >= 8) {
+    database.exec("CREATE VIRTUAL TABLE temp.diagnostic_knowledge_fts5_probe USING fts5(tokens, tokenize='unicode61')");
+    database.exec('DROP TABLE temp.diagnostic_knowledge_fts5_probe');
+  }
+  for (let version = current + 1; version <= targetVersion; version += 1) {
     const sql = MIGRATIONS[version - 1];
     if (sql === undefined) throw new Error(`Missing SQLite migration ${version}`);
     database.transaction(() => {

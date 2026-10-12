@@ -6,11 +6,16 @@ export class SqliteDatabase {
 
   public static open(path: string): SqliteDatabase {
     const raw = new Database(path);
-    raw.pragma('journal_mode = WAL');
-    raw.pragma('foreign_keys = ON');
-    raw.pragma('busy_timeout = 5000');
-    migrateSqlite(raw);
-    return new SqliteDatabase(raw);
+    try {
+      raw.pragma('journal_mode = WAL');
+      raw.pragma('foreign_keys = ON');
+      raw.pragma('busy_timeout = 5000');
+      migrateSqlite(raw);
+      return new SqliteDatabase(raw);
+    } catch (error) {
+      if (raw.open) raw.close();
+      throw error;
+    }
   }
 
   /** Opens an existing database without migrations, pragmas, or any write capability. */

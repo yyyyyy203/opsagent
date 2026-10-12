@@ -113,11 +113,11 @@ it('migrates the governed memory tables with the main SQLite database', async ()
       'diagnostic_memory_cases', 'diagnostic_memory_case_fts', 'diagnostic_memory_reviews',
       'diagnostic_memory_capture_jobs', 'diagnostic_memory_capture_commands', 'diagnostic_memory_signals',
     ]));
-    expect(database.raw.pragma('user_version', { simple: true })).toBe(6);
+    expect(database.raw.pragma('user_version', { simple: true })).toBe(8);
   } finally {
     database.close();
     const reopened = SqliteDatabase.open(join(root, 'state.sqlite'));
-    expect(reopened.raw.pragma('user_version', { simple: true })).toBe(6);
+    expect(reopened.raw.pragma('user_version', { simple: true })).toBe(8);
     reopened.close();
     await rm(root, { recursive: true, force: true });
   }

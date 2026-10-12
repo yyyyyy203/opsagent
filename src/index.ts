@@ -55,6 +55,8 @@ export * from './hooks/policy-deny-hook.js';
 export * from './hooks/risk-action-hook.js';
 export * from './hooks/types.js';
 export * from './memory/in-memory-memory.js';
+export * from './memory/in-memory-knowledge-store.js';
+export * from './memory/knowledge-audit-dispatcher.js';
 export { buildMemoryCase } from './memory/case-builder.js';
 export { MemoryCaptureService } from './memory/capture-service.js';
 export { MemoryCaptureWorker } from './memory/capture-worker.js';

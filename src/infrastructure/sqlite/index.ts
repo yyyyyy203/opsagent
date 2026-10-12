@@ -14,3 +14,5 @@ export { SqliteDiagnosticMemoryStore } from './diagnostic-memory-store.js';
 export { SqliteMemoryCaptureSource } from './memory-capture-source.js';
 export { enqueueMemoryCapture, persistMemorySignals } from './memory-job-store.js';
 export * from './target-identity-store.js';
+export * from './knowledge-memory-store.js';
+export * from './target-knowledge-binding-store.js';

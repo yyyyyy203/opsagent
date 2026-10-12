@@ -44,6 +44,7 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 **文件**
 
 - 更新 `src/infrastructure/sqlite/migrations.ts`：R0 v7 之后只追加 v8，创建内容 revisions、逐修订治理状态、来源 epoch、审核幂等记录、Target 启用指针/发布历史、严格范围 FTS、治理审计及独立 outbox；不修改现有 Run V2 outbox 的 payload。
+- 新增 `src/contracts/knowledge-memory-storage.ts`：只添加 SQLite/InMemory 共用的稳定存储端口（草稿/修订、来源 epoch、受限 FTS 查询、事务边界）；保持 T1 已发布类型和行为不变，并从 `contracts/index.ts` 增量导出。
 - 新增 `src/infrastructure/sqlite/knowledge-memory-store.ts`：使用已注入的主 persistence bundle，不打开第二库；内容不可变，双版本 CAS、有效期/sourceEpoch 检查、治理状态/FTS/audit/outbox 同事务；支持读取旧修订当前状态。
 - 新增 `src/infrastructure/sqlite/target-knowledge-binding-store.ts`：启用指针与发布历史 CAS，和上述知识状态共享同库事务，不尝试与 JSON 文件做跨介质“原子提交”。
 - 新增 `src/memory/knowledge-audit-dispatcher.ts`：注入有界 outbox/sink，auditId 幂等投递、失败保留、重启回放；由唯一宿主初始化/关闭，不应用审核命令。
@@ -53,7 +54,7 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 
 **验收**：v6→v7→v8、v7→v8、旧迁移不变、失败回滚/重开；相同/冲突 requestId、双版本 CAS、来源撤回/审批竞态、旧修订治理查询；批准/撤销/发布与状态、FTS、审计/outbox 同事务。查询以 scope/kind/精确 refs 前置过滤，再 join 当前治理/来源/有效期；FTS 有旧条目也不得放行。补 `test/knowledge-audit-outbox.test.ts` 和 `test/target-knowledge-binding-store.test.ts`。
 
-- [ ] T2 验收：SQLite/InMemory 可观察语义一致；无 Run 的导入、重复投递和宕机回放均有审计，不修改旧 V2 contract。
+- [x] T2 验收：SQLite/InMemory 可观察语义一致；无 Run 的导入、重复投递和宕机回放均有审计，不修改旧 V2 contract。已通过定向测试、全仓质量门和独立任务复核。
 
 ## T3 — Semantic 来源与治理服务（RED → GREEN）
 
@@ -160,4 +161,5 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 
 - [x] 用户已审核并明确批准按本 Spec 与计划执行（2026-10-12）。
 - [x] R0.1–R0.4 运行时补强及验收完成；依据多项目计划 R0.4 的实现/独立审查记录，并在 2026-10-12 重新通过 Node 24 全仓 lint、typecheck、test、build。
-- [ ] T1、T2、T3、T4、T4b、T5、T6、T7 尚未开始；按依赖执行，文档修订不算实现完成。
+- [x] T1、T2 已完成并通过独立复核。
+- [ ] T3、T4、T4b、T5、T6、T7 尚未开始；按依赖顺序执行，文档修订不算实现完成。

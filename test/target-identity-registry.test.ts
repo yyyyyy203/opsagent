@@ -31,7 +31,7 @@ describe('Target identity persistence', () => {
     const database = SqliteDatabase.open(await databasePath());
 
     try {
-      expect(database.raw.pragma('user_version', { simple: true })).toBe(7);
+      expect(database.raw.pragma('user_version', { simple: true })).toBe(8);
       expect(database.raw.prepare(`
         SELECT name FROM sqlite_master
         WHERE type = 'table' AND name IN (
