@@ -148,4 +148,58 @@ describe('ToolExecutionPipeline streaming', () => {
     expect(outcome?.type).toBe('completed');
     expect(outcome?.result.status).toBe('success');
   });
+
+  it('turns source resilience tool chunks into typed V2 lifecycle events', async () => {
+    const clock: Clock = { now: () => new Date(timestamp) };
+    const published: AgentEventEnvelopeV2[] = [];
+    let sequence = 0;
+    let idSequence = 0;
+    const toolkit = new Toolkit();
+    const tool: Tool = {
+      name: 'source-fixture', description: 'source resilience events', kind: 'evidence', source: 'mcp',
+      inputSchema: z.object({}), isConcurrencySafe: () => true,
+      call: async function* () {
+        await Promise.resolve();
+        yield { type: 'event' as const, name: 'source_resilience', payload: {
+          kind: 'retry_scheduled', sourceId: 'prometheus', attempt: 2, reasonCode: 'MCP_TIMEOUT', delayMs: 400,
+        } };
+        yield { type: 'event' as const, name: 'source_resilience', payload: {
+          kind: 'circuit_opened', sourceId: 'prometheus', failureWindow: { failures: 3, windowMs: 120 }, openUntil: 1_791_360_030_000,
+        } };
+        return { blocks: [{ type: 'text' as const, text: 'source unavailable' }] };
+      },
+    };
+    toolkit.register(tool);
+    const pipeline = new ToolExecutionPipeline(
+      toolkit,
+      new GuardEngine([]),
+      new HookExecutor([]),
+      new DefaultToolRunner(),
+      new InMemoryCheckpointStore(),
+      new EventBus(),
+      new EventFactory(clock),
+      new NoopObservability(),
+      clock,
+      { actionMode: 'dry_run' },
+      {
+        factory: new EventFactoryV2(clock, { next: (prefix) => `${prefix}-${++idSequence}` }),
+        publisher: { publish: (pending) => {
+          const envelope = { ...pending, sequence: ++sequence } as AgentEventEnvelopeV2;
+          published.push(envelope);
+          return Promise.resolve(envelope);
+        } },
+        correlationId: (runId) => `correlation:${runId}`,
+      },
+    );
+
+    await pipeline.execute({ id: 'call-source', name: tool.name, input: {} }, context(), 'step-1', new AbortController().signal);
+
+    expect(published.map((item) => item.type)).toContain('DATASOURCE_RETRY_SCHEDULED');
+    expect(published.find((item) => item.type === 'DATASOURCE_RETRY_SCHEDULED')?.payload).toMatchObject({
+      sourceId: 'prometheus', attempt: 2, reasonCode: 'MCP_TIMEOUT', delayMs: 400,
+    });
+    expect(published.find((item) => item.type === 'DATASOURCE_CIRCUIT_OPENED')?.payload).toMatchObject({
+      sourceId: 'prometheus', failureWindow: { failures: 3, windowMs: 120 }, openUntil: new Date(1_791_360_030_000).toISOString(),
+    });
+  });
 });

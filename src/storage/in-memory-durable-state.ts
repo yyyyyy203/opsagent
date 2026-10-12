@@ -22,10 +22,11 @@ import {
   type VersionedCheckpointStore,
 } from '../contracts/storage.js';
 import type { ToolExecutionResult } from '../contracts/tool.js';
-import { TargetConfigurationError, type ResolvedTargetSnapshot, type TargetBindingStore,
+import { TargetConfigurationError, type VersionedResolvedTargetSnapshot, type TargetBindingStore,
   type TargetBindingTransition, type TargetRunBindingRecord, type TargetRunBindingPage,
-  type TargetRunRequestRecord } from '../contracts/target.js';
-import { parseResolvedTargetSnapshot, parseTargetRunRequestRecord } from '../contracts/target-schema.js';
+  type TargetRunRequestRecord, type TargetStartClaim, type TargetStartClaimResult,
+  type TargetStartRequestIdentity, type TargetStartReconciliation, type TargetStartStore } from '../contracts/target.js';
+import { parseVersionedResolvedTargetSnapshot, parseTargetRunRequestRecord } from '../contracts/target-schema.js';
 import { checkpointChecksum, parseAgentContext } from './durable-codec.js';
 import type { InMemoryDiagnosticTransaction } from '../memory/diagnostic-memory-state.js';
 import { cloneInMemoryDiagnosticRecords, createInMemoryDiagnosticRecords, createInMemoryDiagnosticRepository,
@@ -36,18 +37,26 @@ import { sameTargetRecord, validateTargetBindingState } from './target-binding-s
 const DEFAULT_EVIDENCE_PAGE_SIZE = 50;
 const MAX_EVIDENCE_PAGE_SIZE = 100;
 
+interface InMemoryStartClaim extends TargetStartRequestIdentity {
+  state: 'reserved' | 'claimed' | 'started';
+  ownerId?: string;
+  epoch: number;
+  leaseUntil?: string;
+}
+
 /**
  * Deterministic in-memory implementation of the durable Run state contracts.
  * It is intentionally a test/default-runtime implementation, not a persistence fallback.
  */
 export class InMemoryDurableState implements DurableRunState, VersionedCheckpointStore, ToolExecutionJournal,
-  AgentStateUnitOfWork, DurableTransitionUnitOfWork, DurableEventOutbox, TargetBindingStore {
+  AgentStateUnitOfWork, DurableTransitionUnitOfWork, DurableEventOutbox, TargetBindingStore, TargetStartStore {
   private readonly checkpointRecords = new Map<string, StoredRunCheckpoint>();
   private readonly executionRecords = new Map<string, ToolExecutionRecord>();
   private readonly outboxRecords = new Map<string, DurableOutboxRecord>();
-  private readonly targetSnapshots = new Map<string, ResolvedTargetSnapshot>();
+  private readonly targetSnapshots = new Map<string, VersionedResolvedTargetSnapshot>();
   private readonly targetBindingRecords = new Map<string, TargetRunBindingRecord>();
   private readonly targetRequestRecords = new Map<string, TargetRunRequestRecord>();
+  private readonly targetStartClaims = new Map<string, InMemoryStartClaim>();
   private readonly diagnosticState: InMemoryDiagnosticTransaction;
 
   public readonly checkpoints: VersionedCheckpointStore = this;
@@ -56,6 +65,7 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
   public readonly transitions: DurableTransitionUnitOfWork = this;
   public readonly outbox: DurableEventOutbox = this;
   public readonly targetBindings: TargetBindingStore = this;
+  public readonly targetStarts: TargetStartStore = this;
 
   public readonly evidence = new InMemoryEvidenceRepository();
   public readonly memory: InMemoryDiagnosticMemoryStore;
@@ -117,7 +127,76 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
         || this.targetBindingRecords.has(normalized.runId);
       if (runCollision) throw new TargetConfigurationError('TARGET_REQUEST_CONFLICT');
       this.targetRequestRecords.set(normalized.requestId, clone(normalized));
+      this.targetStartClaims.set(normalized.requestId, { requestId: normalized.requestId, runId: normalized.runId,
+        targetId: normalized.targetId, requestDigest: normalized.requestDigest, state: 'reserved', epoch: 0 });
       return { record: clone(normalized), created: true };
+    });
+  }
+
+  public claimStart(input: TargetStartRequestIdentity & { ownerId: string; now: string; leaseUntil: string }): Promise<TargetStartClaimResult> {
+    return Promise.resolve().then(() => {
+      validateStartClaimInput(input);
+      const request = this.targetRequestRecords.get(input.requestId);
+      const claim = this.targetStartClaims.get(input.requestId);
+      if (request === undefined || claim === undefined || !sameStartIdentity(request, input)
+        || !sameStartIdentity(claim, input)) return { status: 'unknown' } as const;
+      const reconciliation = this.reconcileStartSync(input, claim);
+      if (reconciliation === 'present') {
+        this.targetStartClaims.set(input.requestId, { ...startIdentity(claim), state: 'started', epoch: claim.epoch });
+        return { status: 'already_started' } as const;
+      }
+      if (reconciliation === 'unknown') return { status: 'unknown' } as const;
+      if (claim.state === 'started') return { status: 'unknown' } as const;
+      if (claim.state === 'claimed') {
+        const leaseTime = claim.leaseUntil === undefined ? Number.NaN : Date.parse(claim.leaseUntil);
+        if (!Number.isFinite(leaseTime) || claim.ownerId === undefined) return { status: 'unknown' } as const;
+        if (leaseTime > Date.parse(input.now) && claim.ownerId !== input.ownerId) return { status: 'busy' } as const;
+        if (leaseTime > Date.parse(input.now) && claim.ownerId === input.ownerId) {
+          return { status: 'claimed', claim: toStartClaim(claim) } as const;
+        }
+      }
+      const epoch = claim.epoch + 1;
+      if (!Number.isSafeInteger(epoch)) return { status: 'unknown' } as const;
+      const next: InMemoryStartClaim = { ...startIdentity(claim), state: 'claimed', ownerId: input.ownerId,
+        epoch, leaseUntil: input.leaseUntil };
+      this.targetStartClaims.set(input.requestId, next);
+      return { status: 'claimed', claim: toStartClaim(next) } as const;
+    });
+  }
+
+  public reconcileStart(input: TargetStartRequestIdentity): Promise<TargetStartReconciliation> {
+    return Promise.resolve().then(() => {
+      const request = this.targetRequestRecords.get(input.requestId);
+      const claim = this.targetStartClaims.get(input.requestId);
+      if (request === undefined || claim === undefined || !sameStartIdentity(request, input)
+        || !sameStartIdentity(claim, input)) return { status: 'unknown' } as const;
+      const result = this.reconcileStartSync(input, claim);
+      if (result === 'present') {
+        this.targetStartClaims.set(input.requestId, { ...startIdentity(claim), state: 'started', epoch: claim.epoch });
+        return { status: 'confirmed_present' } as const;
+      }
+      if (result !== 'absent' || claim.state !== 'reserved') return { status: 'unknown' } as const;
+      return { status: 'confirmed_absent' } as const;
+    });
+  }
+
+  public releaseStartClaim(input: { claim: TargetStartClaim; now: string }): Promise<boolean> {
+    return Promise.resolve().then(() => {
+      validateTimestamp(input.now);
+      const request = this.targetRequestRecords.get(input.claim.requestId);
+      const current = this.targetStartClaims.get(input.claim.requestId);
+      if (request === undefined || !sameStartIdentity(request, input.claim)
+        || current === undefined || !sameStartIdentity(current, input.claim) || current.state !== 'claimed'
+        || current.ownerId !== input.claim.ownerId || current.epoch !== input.claim.epoch
+        || current.leaseUntil !== input.claim.leaseUntil) return false;
+      const reconciliation = this.reconcileStartSync(input.claim, current);
+      if (reconciliation === 'present') {
+        this.targetStartClaims.set(input.claim.requestId, { ...startIdentity(current), state: 'started', epoch: current.epoch });
+        return false;
+      }
+      if (reconciliation !== 'absent') return false;
+      this.targetStartClaims.set(input.claim.requestId, { ...startIdentity(current), state: 'reserved', epoch: current.epoch });
+      return true;
     });
   }
 
@@ -131,9 +210,9 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
     return Promise.resolve(record === undefined ? null : clone(record));
   }
 
-  public getSnapshot(bindingId: string): Promise<ResolvedTargetSnapshot | null> {
+  public getSnapshot(bindingId: string): Promise<VersionedResolvedTargetSnapshot | null> {
     const snapshot = this.targetSnapshots.get(bindingId);
-    return Promise.resolve(snapshot === undefined ? null : parseResolvedTargetSnapshot(snapshot));
+    return Promise.resolve(snapshot === undefined ? null : parseVersionedResolvedTargetSnapshot(snapshot));
   }
 
   public listByTarget(input: { targetId: string; cursor?: string; limit: number }): Promise<TargetRunBindingPage> {
@@ -197,7 +276,9 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
         : clone(input.context);
       const stagedTargetSnapshots = cloneMap(this.targetSnapshots);
       const stagedTargetBindings = cloneMap(this.targetBindingRecords);
-      this.stageTargetBinding(nextContext, input.targetBinding, stagedTargetSnapshots, stagedTargetBindings);
+      const stagedTargetStartClaims = cloneMap(this.targetStartClaims);
+      this.stageTargetBinding(nextContext, input.targetBinding, input.outboxEvents,
+        stagedTargetSnapshots, stagedTargetBindings, stagedTargetStartClaims);
       let existing: ToolExecutionRecord | undefined;
       let nextExecution: ToolExecutionRecord | undefined;
       // Preserve the legacy CAS-first error contract for completed results:
@@ -237,6 +318,7 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
       replaceMemoryRecords(this.diagnosticState.memory, working.memory);
       replaceMap(this.targetSnapshots, stagedTargetSnapshots);
       replaceMap(this.targetBindingRecords, stagedTargetBindings);
+      replaceMap(this.targetStartClaims, stagedTargetStartClaims);
       return clone(checkpoint);
     });
   }
@@ -304,8 +386,10 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
   private stageTargetBinding(
     context: AgentContext,
     transition: TargetBindingTransition | undefined,
-    snapshots: Map<string, ResolvedTargetSnapshot>,
+    outboxEvents: readonly PendingAgentEventV2[],
+    snapshots: Map<string, VersionedResolvedTargetSnapshot>,
     bindings: Map<string, TargetRunBindingRecord>,
+    startClaims: Map<string, InMemoryStartClaim>,
   ): void {
     const validated = validateTargetBindingState(context, transition, {
       bindingByRunId: runId => bindings.get(runId) ?? null,
@@ -313,6 +397,7 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
       requestById: requestId => this.targetRequestRecords.get(requestId) ?? null,
     });
     if (transition === undefined || validated.binding === undefined) return;
+    this.consumeStartClaim(context, transition, outboxEvents, startClaims);
     const current = bindings.get(validated.binding.runId);
     if (current !== undefined && !sameTargetRecord(current, validated.binding)) {
       throw new TargetConfigurationError('TARGET_BINDING_INVALID');
@@ -321,9 +406,58 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
     bindings.set(validated.binding.runId, clone(validated.binding));
   }
 
+  private consumeStartClaim(
+    context: AgentContext,
+    transition: TargetBindingTransition,
+    outboxEvents: readonly PendingAgentEventV2[],
+    claims: Map<string, InMemoryStartClaim>,
+  ): void {
+    const binding = transition.binding;
+    if (binding.runId !== binding.rootRunId) {
+      if (transition.startClaim !== undefined) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+      return;
+    }
+    if (binding.requestId === undefined || binding.requestDigest === undefined) {
+      if (transition.startClaim !== undefined) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+      return;
+    }
+    const claim = transition.startClaim;
+    if (claim === undefined || !sameStartIdentity(claim, { requestId: binding.requestId, runId: binding.runId,
+      targetId: binding.targetId, requestDigest: binding.requestDigest })
+      || !outboxEvents.some(event => event.type === 'RUN_STARTED' && event.runId === context.runId)) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    const current = claims.get(claim.requestId);
+    if (current === undefined || !sameStartIdentity(current, claim) || current.state !== 'claimed'
+      || current.ownerId !== claim.ownerId || current.epoch !== claim.epoch || current.leaseUntil !== claim.leaseUntil
+      || Date.parse(claim.leaseUntil) <= this.clock.now().getTime()) {
+      throw new TargetConfigurationError('TARGET_START_STATE_UNKNOWN');
+    }
+    claims.set(claim.requestId, { ...startIdentity(current), state: 'started', epoch: current.epoch });
+  }
+
+  private reconcileStartSync(identity: TargetStartRequestIdentity, claim: InMemoryStartClaim): 'absent' | 'present' | 'unknown' {
+    if (!sameStartIdentity(startIdentity(claim), identity)) return 'unknown';
+    const binding = this.targetBindingRecords.get(identity.runId);
+    const checkpoint = this.checkpointRecords.get(identity.runId);
+    const outbox = [...this.outboxRecords.values()].filter(record => record.event.runId === identity.runId);
+    if (binding === undefined && checkpoint === undefined && outbox.length === 0) {
+      return claim.state === 'started' ? 'unknown' : 'absent';
+    }
+    if (binding === undefined || checkpoint === undefined || outbox.length === 0) return 'unknown';
+    const snapshot = this.targetSnapshots.get(binding.bindingId);
+    if (binding.runId !== identity.runId || binding.rootRunId !== identity.runId
+      || binding.targetId !== identity.targetId || binding.requestId !== identity.requestId
+      || binding.requestDigest !== identity.requestDigest || snapshot === undefined
+      || snapshot.targetId !== identity.targetId || snapshot.digest !== binding.snapshotDigest
+      || checkpoint.context.runId !== identity.runId || checkpoint.context.targetBindingId !== binding.bindingId) return 'unknown';
+    return outbox.some(record => record.event.type === 'RUN_STARTED' && record.event.runId === identity.runId)
+      ? 'present' : 'unknown';
+  }
+
   private targetBindingReader(): {
     bindingByRunId: (runId: string) => TargetRunBindingRecord | null;
-    snapshotByBindingId: (bindingId: string) => ResolvedTargetSnapshot | null;
+    snapshotByBindingId: (bindingId: string) => VersionedResolvedTargetSnapshot | null;
     requestById: (requestId: string) => TargetRunRequestRecord | null;
   } {
     return {
@@ -364,6 +498,39 @@ function sameRequestIdentity(
 ): boolean {
   return left.requestId === right.requestId && left.targetId === right.targetId
     && left.requestDigest === right.requestDigest;
+}
+
+function startIdentity(claim: InMemoryStartClaim): TargetStartRequestIdentity {
+  return { requestId: claim.requestId, runId: claim.runId, targetId: claim.targetId, requestDigest: claim.requestDigest };
+}
+
+function sameStartIdentity(left: TargetStartRequestIdentity, right: TargetStartRequestIdentity): boolean {
+  return left.requestId === right.requestId && left.runId === right.runId
+    && left.targetId === right.targetId && left.requestDigest === right.requestDigest;
+}
+
+function toStartClaim(claim: InMemoryStartClaim): TargetStartClaim {
+  if (claim.state !== 'claimed' || claim.ownerId === undefined || claim.leaseUntil === undefined || claim.epoch < 1) {
+    throw new TargetConfigurationError('TARGET_START_STATE_UNKNOWN');
+  }
+  return { ...startIdentity(claim), ownerId: claim.ownerId, epoch: claim.epoch, leaseUntil: claim.leaseUntil };
+}
+
+function validateStartClaimInput(input: TargetStartRequestIdentity & { ownerId: string; now: string; leaseUntil: string }): void {
+  parseTargetRunRequestRecord({ requestId: input.requestId, runId: input.runId, targetId: input.targetId,
+    requestDigest: input.requestDigest, createdAt: input.now });
+  validateTimestamp(input.now);
+  validateTimestamp(input.leaseUntil);
+  if (input.ownerId.trim().length === 0 || Date.parse(input.leaseUntil) <= Date.parse(input.now)) {
+    throw new RangeError('Target start claim owner and future lease are required.');
+  }
+}
+
+function validateTimestamp(value: string): void {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new RangeError('Target start timestamp must be a canonical ISO timestamp.');
+  }
 }
 
 function cloneMap<K, V>(source: Map<K, V>): Map<K, V> {

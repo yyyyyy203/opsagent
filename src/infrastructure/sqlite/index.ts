@@ -13,3 +13,4 @@ export { SqliteVectorIndex } from './memory-vector-index.js';
 export { SqliteDiagnosticMemoryStore } from './diagnostic-memory-store.js';
 export { SqliteMemoryCaptureSource } from './memory-capture-source.js';
 export { enqueueMemoryCapture, persistMemorySignals } from './memory-job-store.js';
+export * from './target-identity-store.js';

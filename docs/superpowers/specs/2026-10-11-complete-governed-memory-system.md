@@ -1,6 +1,6 @@
 # 完整受治理记忆系统设计 Spec
 
-日期：2026-10-11。状态：**待评审，未实施**。
+日期：2026-10-11。状态：**风险修订版，运行时代码未实施**。依赖多项目基础 R0 安全补强，不把已有 M1/M2a 持久化视为安全恢复已完成。
 
 ## 1. 目标与当前实现边界
 
@@ -17,6 +17,8 @@
 | Vector | 独立实验目前只处理 Episodic 影子索引 | 继续保持实验隔离；不升级为 Semantic/Procedural 默认依赖 |
 
 本文是 Episodic R2 的补充 Spec，重点补 Semantic 与 Procedural，不废止 Episodic R2 的详尽规则，也不修改向量实验 Spec。只有本文获用户评审通过后，才进入后续文件级实施计划；当前不得据此直接改代码。
+
+前置门为 [多项目实施计划](../plans/2026-10-11-multi-project-m1-m2a.md) R0.1–R0.4：历史 Target/来源身份一致性、原快照与当前策略恢复、unknown 首事务 reconciliation 均须通过，再执行本文的知识实现。R0 不要求先完成 M3 真实来源或 M4 完整 Target UI；记忆实现也不得替代这些后续验收。
 
 ## 2. 四类记忆的事实权威与依赖
 
@@ -47,7 +49,7 @@ SQLite / Profile catalog -> 实现 contracts 定义的存储和解析端口
 
 ## 3. 共同身份、范围和版本规则
 
-长期记录都包含受严格 Schema 校验的 `id`、`kind`、`scope`、单调递增 `revision`、`status`、`createdAt`、`validUntil`（可选）、`provenance`、`contentDigest` 和 `schemaVersion`。未经解析的 JSON 不进入核心或模型上下文。
+Semantic/Procedural 记录包含受严格 Schema 校验的 `id`、`kind`、`scope`、单调递增 `revision`（内容修订号，下称 contentRevision）、`governanceVersion`、`status`、`createdAt`、`validUntil`（可选）、`provenance`、`contentDigest` 和 `schemaVersion`。内容版本与治理状态版本分离；Episodic 保留其已有契约，不因本文强加新必填字段。未经解析的 JSON 不进入核心或模型上下文。
 
 - `Working` 的范围是 `runId`，由 Checkpoint 保存；不进入长期索引。
 - `Episodic` 使用现有完整 `MemoryScope`，包括 Profile/revision、服务、故障、Target fingerprint、环境、数据分类及模拟 dataset。
@@ -56,6 +58,10 @@ SQLite / Profile catalog -> 实现 contracts 定义的存储和解析端口
 - Target 快照保持历史可审计性；但审核撤销、过期、来源撤回或 scope 策略撤销要在每次查询和恢复时重新检查。已撤销知识立即停止注入，不因旧 Checkpoint 冻结而继续有效。
 - 模拟知识只能在相同模拟 dataset 中使用，永不晋级为 live；真实环境不能读取模拟记忆或知识。
 - 缺少可靠 Profile revision、Target fingerprint、来源摘要或时间有效性的知识不发布、不召回。不能从 `process.cwd()`、当前目录或用户问题推断路径/身份。
+
+`TargetKnowledgeReference.version` 始终对应 contentRevision，不对应 governanceVersion。Target 固定的是内容身份，不是永久有效的批准状态；每个修订（包括旧修订）都要有可查询的权威治理状态，不能只检查最新 head。来源另有宿主维护的 sourceEpoch；内容相同但来源撤回、批准撤销或冲突时也要递增治理版本/来源 epoch，使旧审批请求失效。
+
+requiredness 使用独立的宿主 `TargetKnowledgePolicy`，不修改既有 reference 形状或假定 Profile 已经有必需知识字段。该策略按精确 id/version 声明 kind 与 optional/required，并与引用及 publicationVersion 一起冻结到 Snapshot V2；遗漏的旧引用默认为 optional。策略不能由浏览器偏好或 LLM 提供，当前策略只能收紧原 Run 的使用条件，不能扩大旧引用白名单。行为以 §7.1 的开关/失败矩阵为准。
 
 无认证的本地操作员模式继续沿用既有部署边界；本 Spec 不宣称实现多用户 RBAC、租户隔离或公网安全。
 
@@ -90,17 +96,45 @@ Semantic 表示可追溯的“系统是什么/指标意味着什么”，首批�
 ### 5.2 生命周期
 
 ```text
-draft -> review_pending -> approved -> superseded
-                  |             |-> revoked
-                  |             |-> expired（时间/来源失效）
-                  -> rejected
+draft -> review_pending -> approved（仅审核通过，未必启用）
+            |                 |-> revoked / expired / conflict
+            |                 |-> superseded（显式替代发布）
+            -> rejected / conflict
+approved + 显式启用事务 -> Target active binding（仅供未来 Run）
 ```
 
 - 一旦建立，revision 的 payload、scope、来源和 digest 不可原地修改；修订生成新 revision。
-- `approved` 必须含审核者、审核时间、声明检查结果和当前来源验证结果；审批使用 `expectedRevision` CAS 与幂等 `requestId`。
-- 同一 scope/naturalKey 若出现互相矛盾且无法根据权威版本确定的记录，进入 `conflict` 隔离状态，不让模型自行选择；由操作员确认替代/废弃关系。
-- revoke/supersede/来源撤回与 FTS 索引更新及 audit outbox 必须一个持久化事务。撤销后立即不可检索；历史 revision 保留审计，不物理覆盖。
-- `validUntil` 到期只停止召回，不删除审计内容；source digest/上游版本变化时必须重新审核或重新确认。
+- `approved` 必须含审核者、审核时间、声明检查结果和当前来源验证结果；内容版本相同不表示审核仍有效。审批同时使用内容/治理版本 CAS、来源 epoch 和幂等 requestId，详见 §5.3。
+- 同一 scope/naturalKey 若出现互相矛盾且无法根据权威版本确定的记录，进入 `conflict` 隔离状态，不让模型自行选择；由操作员确认替代/废弃关系。有明确替代关系的新 draft 不因此自动使旧有效版本进入 conflict。
+- revoke/supersede/来源撤回与治理状态、FTS 资格失效及独立 knowledge audit outbox 必须一个持久化事务。撤销后立即不可检索；历史内容和状态转移保留审计，不物理覆盖。来源 epoch 可批量阻断相关修订，不依赖异步索引清理完成才停用。
+- `validUntil` 到期只停止召回，不删除审计内容；source digest/上游版本变化时停用旧资格，新建修订重新审核，不能原地复活已失效修订。
+
+### 5.3 内容版本、治理 CAS 与来源撤回
+
+| 对象 | 不变量 | 写入/读取规则 |
+|---|---|---|
+| contentRevision | payload、scope、provenance、digest 不可变 | 修改内容/来源只能建新 draft；Target reference.version 保持此含义 |
+| governanceVersion | 每个修订的治理状态单调变化 | review/approve/reject/revoke/conflict/supersede 均检查并递增；旧 revision 也有当前状态 |
+| sourceEpoch | 宿主已知的来源有效性版本 | 撤回、digest 失配、许可失效递增；旧 sourceEpoch 的审核或召回不能继续 |
+| publicationVersion | Target 启用引用集合版本 | 仅显式发布 CAS 更新；不是内容修订号，也不修改原 Run 的快照 |
+
+审核命令携带 requestId、expectedContentRevision、expectedGovernanceVersion 和待核验 contentDigest；actor/scope/sourceEpoch 从宿主可信端口取得。批准事务必须确认状态仍为 review_pending、内容/来源摘要一致、来源未撤回且未到期，CAS 同时更新治理版本、审核记录、索引资格与 audit outbox。事务外的预检查不够，来源验证结果的 epoch/digest 必须在提交时再比对。
+
+来源撤回与旧 worker 的批准并发时以事务线性化：先撤回则旧批准 CAS 失败；先批准则随后的撤回立即使该修订不可用。相同 requestId/命令摘要重放只返回原收据及当前有效状态，不重新应用转换；摘要不同返回固定冲突码，不能把过去 approved 的收据当成现在仍 approved 的证明。对 revoked/superseded/rejected/expired/conflict 不允许原地重新 approve；处理原因后建立新修订并重新审核。
+
+有效期按注入的时钟在查询、批准、发布和模型呈现前判断；不依赖后台清理及时运行。到期状态可惰性物化，但检查到期后不得继续使用。对来源撤回的“立即”指宿主已经获知并提交撤回的线性化点，不能宣称尚未接入的远端变化已实时检测。
+
+### 5.4 审批与 Target 启用发布是两件事
+
+审核 K/r2 不改变 Target 当前 K/r1 的引用或批准状态；r2 是已批准但尚未启用的修订。禁止“approve 自动 supersede r1”，否则会出现 r1 已失效、r2 又不在引用白名单中的真空。
+
+新增小接口 `TargetKnowledgeBindingPublisher.publish`，只发布知识引用/使用策略，不接收 endpoint、服务映射、阈值、工具白名单或任意 Catalog 配置。操作员显式选择 Target 和精确修订；宿主检查当前 Target/Profile scope、内容/治理版本、来源 epoch、有效期和 expectedPublicationVersion。成功事务原子写入新的启用引用集合、publicationVersion、必要的旧修订 superseded 状态、FTS 资格与治理审计；失败全部回滚，原可用绑定不变。
+
+为避免声称 JSON 文件与 SQLite 能跨介质原子提交，当前启用指针由同库 `target_knowledge_bindings` 及发布历史拥有，作为宿主 Catalog 的受控知识覆盖层。本地 Catalog 只提供初始候选，不能在重启时覆盖已发布指针；导入也走同一显式命令。Target Resolver 读取一个一致的已发布版本并冻结其引用/策略，不在首次绑定提交时切换到另一个 publicationVersion。与 Profile/scope 变化竞态时 CAS 失败并重新解析，不静默跨版本使用。
+
+启用新知识本身不改 profileRevision，除非诊断权威规则/兼容边界也变了；后者必须走独立 Target/规则发布，并在新 scope 下重新导入审核知识。发布只改变未来 Run 的引用；旧 Run 保留原引用，不自动升级。若发布明确替代并 supersede r1，旧 Run 的 r1 按 §7.1 不再注入并展示限制。安全撤销可随时独立执行，不能为了保持可用性继续使用已撤销内容。
+
+Semantic/Procedural 共用此流程。第一版不提供撤销回退为旧 revision 的“一键回滚”：要启用替代版本，仍须校验它当前有效，并执行新的发布 CAS/审计；历史快照可只读，但不能复活撤销状态。
 
 ## 6. Procedural：审核后的只读调查模板
 
@@ -110,7 +144,7 @@ Procedural 表示“如何调查”，不是事实库或自动化脚本。每个
 - 明确前置条件、所需证据类别与覆盖要求、按序编号的调查步骤、每步完成标准、停止条件、预期报告结构、已知限制与来源。
 - 步骤可以引用宿主登记的只读 capability ID（例如某类指标/日志查询），但不得包含 MCP URL、任意 Tool JSON、Shell/SQL/HTTP 语句、凭据或可执行代码。
 
-模板由版本化 Profile/Runbook 导入或人工撰写形成 draft；模型从历史成功案例提出的只能是 draft suggestion。由操作员检查来源、适用条件、漏项和风险后审核。内容修订、scope 变化、Scenario 不兼容或来源失效均撤销原批准并要求新 revision 审核。
+模板由版本化 Profile/Runbook 导入或人工撰写形成 draft；模型从历史成功案例提出的只能是 draft suggestion。由操作员检查来源、适用条件、漏项和风险后审核。单纯建立新 draft 不撤销仍有效的旧修订；已知内容不安全、scope/Scenario 不兼容或来源失效则立即停用原批准，新 revision 重新审核并显式发布。审批/发布沿用 §5.3–§5.4 的 CAS 和事务，不建立第二套较宽松流程。
 
 召回时先用确定性场景、Target、服务、故障和环境条件过滤；词法相似度只用于同一适用集合内排序。模板只提供调查建议：不得跳过 Profile 必需证据、数据源状态检查、四轮 Tool Admission、Loop Guard、人工确认或执行后验证；不得调用工具、改变风险等级、生成授权或降低证据门槛。最终工具仍由 Agent 正常生成并经过统一执行管线。
 
@@ -126,7 +160,26 @@ Procedural 表示“如何调查”，不是事实库或自动化脚本。每个
 
 注入模型视图时以显式区块标记类型和来源：Semantic 是“受控参考定义”，Procedural 是“建议调查清单”，Episodic 是“历史案例”；均不是当前 Run 证据。历史/知识引用不能加入本轮 `evidenceIds` 或生成 `EVIDENCE_COLLECTED`。对阈值/指标映射冲突优先采用绑定快照，并返回知识冲突状态而不是覆盖它。
 
-知识检索失败默认 `working_only` / omit-knownledge：记录安全的固定原因码，当前 Run 仍可使用自身证据继续；若 Profile 声明某知识为必需，则把缺失加入 `missingEvidence`/诊断限制，但不把“检索失败”包装成事实。Abort 传播；不会静默伪造空成功。全阶段保持既有 AsyncGenerator/V2 事件主契约。
+单个可选类型失败采用 omit-knowledge，保留 Working、合法 Episodic 和其他可用类型；全部长期读取失败才使用既有 `working_only` 事件语义。必需知识不足由确定性诊断资格门记录 `missingKnowledge`/limitations 并限制结论，不把知识 ID 塞进观测 evidenceIds、证据 coverage 或伪造 EVIDENCE_COLLECTED。Abort 传播；不会静默伪造空成功。全阶段保持既有 AsyncGenerator/V2 事件主契约。
+
+### 7.1 Feature flags、必需性与失败矩阵（R4）
+
+两类 feature flag 是宿主提供该能力的开关，不是逐 Run 授权开关；用户偏好只能拒绝可选召回，不能打开关闭的能力或取消必需项。TargetKnowledgePolicy 是 requiredness 的唯一来源。
+
+| 能力开关/引用状态 | optional | required |
+|---|---|---|
+| 该类型关闭 | 不查询、不注入；目录声明能力关闭，Target 仍可启动 | 新 Run 配置错误 `KNOWLEDGE_REQUIRED_DISABLED`，对应 Target 不可启动；不影响其他 Target |
+| 开启，精确版本/scope/digest/sourceEpoch 有效且 approved | 在预算内注入，记录安全引用 | 在预算内保留必需引用；仍不构成当前证据或授权 |
+| 开启，缺失/未批准/撤回/到期/superseded/conflict | 拒绝使用该知识，Target 可启动/继续；记录 unavailable 原因 | 可只读取证，但 diagnosisReady=false、显示 missingKnowledge；禁止健康/已验证根因等依赖该知识的完整结论 |
+| 开启，知识存储暂时失败/检索 deadline/预算不足 | omit 该类型，显式降级，不全库搜索或重跑付费模型 | 与必需知识缺失相同，不以空数组包装成功或隐藏限制 |
+| 知识记录 scope、内容 digest 或 provenance 来源身份校验失败 | 拒绝并隔离该引用、产生安全审计；其他合法知识/Target 不扩大权限 | 同样拒绝/隔离，并触发必需知识限制；不能拿其他 Target/最新修订替代 |
+| 上游 signal Abort | 立即传播，不继续召回或生成结论 | 同左 |
+
+运行中关闭必需类型/撤销知识不能靠重启恢复绕过：旧 Run 可保留历史/观测摘要，但降为上述 partial/limited 行为；不要把开关变更伪装成配置好的完整诊断。配置 envelope、重复冲突引用或策略版本无法解析仍属于 Target 配置错误，与“可选知识运行时不可用”不同。
+
+该降级矩阵只处理知识资格；Target Snapshot/Run 归属被篡改或执行来源身份越界仍由 R0 阻断整个执行，不能被 optional 知识规则放行。`KnowledgeDiagnosisQualificationV1` 独立表达 diagnosisReady、缺失的安全知识引用及固定限制原因；通过版本化/可选诊断读模型呈现，不改旧 ToolResponse 或 V2 必填字段。资格不足时由确定性报告门限制完整 verdict/根因声明，不能仅让模型自由文本自觉降置信度。
+
+必需性的满足与注入预算分开：预算不足以安全呈现必需知识时显式限制，不悄悄裁掉后继续宣称完整。知识视图每轮在 Pre-reasoning 重建，发起模型请求及提交最终诊断资格前复核治理版本/sourceEpoch；Checkpoint/L2 不永久保存知识全文或 approved 布尔值作为授权。撤销后的下一轮/恢复不得沿用缓存视图；请求已发送时不能收回模型已读内容，但未提交结论不得继续依赖失效必需知识。已经完成的历史诊断保留原审计，不倒改为当前证据。
 
 向量只允许继续作为受限、可丢弃的 shadow index。未经单独真实语料评估、资源验收和新设计决策，不得成为 Semantic/Procedural 生产检索的必需后端。
 
@@ -134,30 +187,42 @@ Procedural 表示“如何调查”，不是事实库或自动化脚本。每个
 
 ### 8.1 持久化
 
-在当前 SQLite schema v6 后追加迁移，不改写 v1-v6；迁移前保留备份和能力预检。建议同库建立：
+先完成 R0 的 v6→v7，再追加知识 v8，不改写 v1–v7；迁移前保留备份和能力预检。建议同库建立：
 
 | 表 | 职责 |
 |---|---|
-| `diagnostic_knowledge_items` | Semantic/Procedural 当前读模型，按 `(kind, scope_key, natural_key)` 做受控唯一性与状态约束 |
-| `diagnostic_knowledge_revisions` | append-only 的版本化记录 JSON、摘要/校验和、来源和状态快照 |
-| `diagnostic_knowledge_reviews` | requestId 幂等结果、CAS revision、操作者、审核声明和审核时间 |
-| `diagnostic_knowledge_fts` | 仅索引当前批准且未过期的有限文本，随审批/撤销事务更新 |
-| `diagnostic_knowledge_outbox` 或既有 V2 durable outbox | 在同一事务记录审核/更新通知，优先复用已有 outbox |
+| `diagnostic_knowledge_items` | 按 `(kind, scope_key, natural_key)` 做唯一性/冲突管理，不作为旧 revision 治理状态的替代 |
+| `diagnostic_knowledge_revisions` | append-only 内容、scope、来源和 digest；禁止审核时覆盖 JSON |
+| `diagnostic_knowledge_revision_states` / `diagnostic_knowledge_sources` | 每个修订的权威治理版本/状态、来源 epoch 和有效性；旧引用也查询这些表 |
+| `diagnostic_knowledge_reviews` | requestId + 命令摘要的幂等收据、双版本 CAS、宿主操作者和审核声明 |
+| `target_knowledge_bindings` / `diagnostic_knowledge_publications` | Target 当前启用指针与 append-only 发布历史；expectedPublicationVersion CAS |
+| `diagnostic_knowledge_fts` | 只索引有资格的有限文本；查询仍 join 当前状态、来源和有效期，过期索引不能放行 |
+| `diagnostic_knowledge_audits` / `diagnostic_knowledge_outbox` | append-only 治理审计和事务投递；采用独立版本契约，不冒充 Run V2 event |
 
 FTS 建索引和检索都要先约束 kind、scopeKey、Target 引用与状态；Schema/数据库能力不符合时迁移 fail-closed，旧版运行路径不得被部分迁移改变。
 
 ### 8.2 事件
 
-使用既有 `MEMORY_RETRIEVAL_STARTED/COMPLETED/FAILED`、`MEMORY_UPDATE_SCHEDULED/COMPLETED/FAILED`；更新候选的 `candidateType` 区分 `semantic` / `procedural`。禁止把知识全文、检索文本、端点、证据原文或未审核内容写入 public event、SSE、LangSmith。审核与撤销是显式 API 命令，不把 Event 当命令总线。不改变已发布事件 schema；如果确需更细事件，先独立 schema-version 决策。
+实际 Run 的检索可复用既有 `MEMORY_RETRIEVAL_STARTED/COMPLETED/FAILED`。既有 UPDATE_SCHEDULED 必须有真实 sourceRunId，UPDATE_COMPLETED 只能表达 observation/approved/rejected；没有 Run 的知识导入以及 revoked/superseded/published 不能伪造 Run ID、借用这些状态或静默丢弃审计。
+
+在 T1、任何 T2 持久化之前冻结独立 `KnowledgeGovernanceAuditV1` 契约和严格 parser。公共 envelope 为 schemaVersion、auditId、requestId/commandDigest、宿主 actorId 和注入时间；payload 是判别联合：
+
+- `knowledge_transition`：knowledgeId/kind/contentRevision、governanceVersion、before/afterStatus、targetId/scopeKey 和来源有效性版本。
+- `source_transition`：受控 sourceId/数据域身份、before/afterSourceEpoch、有效性及固定原因码；不伪造不存在的 knowledgeId。
+- `binding_publication`：targetId/scopeKey、before/afterPublicationVersion、Target policy 版本及有界安全引用摘要；不伪造内容状态转换。
+
+命令类型与关联版本按各分支严格校验，真实关联 Run ID 为可选且必须核实。只记录安全 ID、摘要与状态，不保存全文、提示词、检索词、地址、secretRef 或原始证据。源审计的 API 可见范围由宿主来源归属解析，不暴露另一 Target 的关联记录。
+
+治理命令、状态/索引/绑定变更与 audit/outbox 原子落库；一个宿主所有者运行有界 dispatcher，以 auditId 幂等投递，重启可回放，失败不丢记录也不重复应用命令。独立 outbox 不修改现有只接受 Run V2 事件的 durable_event_outbox；不把审核事件当命令总线。前端读取经 Target 范围过滤的安全审计 DTO；未经独立契约决策不将其广播成公共 Run SSE 或上报 LangSmith。
 
 ### 8.3 API 与页面
 
 沿用一个 Agent Web Memory 区域，按“案例 / 系统知识 / 调查模板”分区，不建新前端应用。新增受控查询和命令端点：
 
 - 查询能力和按当前 Target/类型分页列出 Semantic/Procedural，详情显示 revision、来源、适用范围、审核者、有效期、引用。
-- 本地操作员可提交新建/修订草稿、审核批准/拒绝、撤销/替代；请求只传内容和幂等/CAS 字段，scope、actorId、当前 Target binding 由服务端推导。
+- 本地操作员可提交新建/修订草稿、审核批准/拒绝、撤销，以及独立的“启用到此 Target”发布命令；请求只传允许内容、精确引用和幂等/CAS 字段，scope、actorId、当前 Target 身份由服务端推导。不得通过该端点改阈值、连接或工具权限。
 - 返回 DTO 不含源文件绝对路径、内网地址、密钥、原始数据、完整证据或未授权 scope。
-- 页面明确区分“事实定义”“历史案例”“建议流程”；Procedural 页面显示只读声明并不能执行模板。来源变更、冲突、到期、撤销和越界都可见且使用固定状态码。
+- 页面明确区分“事实定义”“历史案例”“建议流程”及“已审核/已启用”；显示内容修订、治理版本和发布版本。Procedural 页面不能执行模板；来源变更、冲突、到期、撤销和越界都可见且使用固定状态码。旧 Run 的失效引用显示限制，不替换成最新条目。
 
 本地单操作员 API 不能直接暴露公网；多人协作/生产权限管理需另外设计认证、RBAC、审计归属及 CSRF 防护。
 
@@ -166,7 +231,7 @@ FTS 建索引和检索都要先约束 kind、scopeKey、Target 引用与状态�
 - 已发布 `MemoryFacade`、Episodic `DiagnosticMemoryCase`、事件、消息块、ToolResponse 和旧 API 字段不删改、不重解释。
 - 新增可选能力字段/API 或独立新类型；不把 `MemoryCapabilities.kind: 'episodic'` 原地改为多值。若要统一能力发现，新增 `availableKinds` 可选字段或版本化 DTO。
 - `AgentContext` 已有字段保持原语义。新知识引用快照以可选、版本化结构添加；旧 Checkpoint 无新字段时仍按原路径读取，不推断 Target/Knowledge binding。
-- schema v7 只追加表/索引；不得重写用户已有 v5 Memory migration 或 v6 Target migration。之前数据库的 v6→v7 upgrade、失败回滚、重开、旧 checkpoint 读取均需测试。
+- R0 使用 schema v7；本计划 v8 只追加知识表/索引，不重写 v5 Memory、v6 Target 或 v7 R0 migration。测试 v6→v7→v8、v7→v8、失败回滚/重开和旧 Checkpoint 读取；不得跳过未完成 R0。若版本被其他工作占用，先同步两份计划，不就地覆盖。
 - Feature flags 按类型独立，Semantic/Procedural 缺省关闭；部署可以一次开启受控来源，但每次 Run 不要求开发人员手工改环境变量。权限与召回偏好分离：用户偏好不能授予管理员权限。
 
 ## 10. 验收门槛
@@ -180,6 +245,24 @@ FTS 建索引和检索都要先约束 kind、scopeKey、Target 引用与状态�
 7. 存储迁移、事务回滚、并发 CAS、重启、outbox、相同/冲突 requestId 全部有 SQLite 和 InMemory 契约测试。
 8. 前端创建草稿、审核、修订、撤销、冲突、过期和 Run 引用展示通过；服务关闭不影响旧巡检路径。
 9. 全仓 `lint`、`typecheck`、`test`、`build` 通过，或明确标出独立于本 Spec 的既存阻塞。
+10. 完整验证 §7.1 的类型开关 × optional/required × 有效/缺失/撤回/到期/篡改/超时/预算矩阵。关闭可选知识不阻断 Target；关闭必需能力不能接受新 Run；必需缺失不能输出完整健康/根因结论。
+11. approve r2 但未启用时 r1 仍可用；启用 CAS 成功后未来 Run 固定 r2，旧 Run 不升级。启用失败回滚、发布/撤销/Target 规则更新竞态、重启不会被 Catalog 初始值覆盖。
+12. 内容未变时撤销/来源撤回也递增治理版本/epoch；迟到批准、旧请求重放和旧 head 不得复活失效修订。注入时钟到期，无后台任务仍立即停止使用。
+13. 无 sourceRunId 的本地知识导入也有事务审计；revoked/superseded/published 保留真实状态。outbox 失败、重复投递、重启回放及旧 V2 fixtures 均验证，不伪造关联 Run 或重解释旧事件。
+
+## 11. 风险修订与计划对应
+
+| 风险 | 收口决策 | 实施归属 |
+|---|---|---|
+| R1 历史身份漂移 | 前置历史身份账本/来源身份/Snapshot V2 | 多项目 R0.1 |
+| R2 恢复未校验当前权限 | 前置 recovery/operation gate；知识每轮重建 | R0.3 + T5 |
+| R3 首提交 unknown 被当 absent | 前置三态 reconciliation/claim fencing | R0.2 |
+| R4 optional/required 与开关冲突 | §3 host-only policy + §7.1 完整矩阵 | T1、T3、T5、T7 |
+| R5 审批到引用启用没有闭环 | §5.4 独立发布及同库启用指针 | T2、T4b、T6、T7 |
+| R6 内容 revision 无法防治理竞态 | §5.3 双版本 CAS、sourceEpoch、逐修订状态 | T1–T4、T7 |
+| R7 先写存储后决定审计事件 | §8.2 T1 独立治理审计契约先冻结 | T1→T2、T7 |
+
+风险已在文档中指定处理方式；这不是运行时代码修复或测试通过记录。
 
 ### 明确不作为通过条件的声明
 

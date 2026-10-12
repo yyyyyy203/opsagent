@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseTargetCatalog } from '../src/profiles/target-catalog-schema.js';
+import { WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST } from '../src/profiles/scenarios/window-failure-rate-v1.js';
 
 function target(overrides: Record<string, unknown> = {}) {
   return {
@@ -20,6 +21,7 @@ function target(overrides: Record<string, unknown> = {}) {
     scenario: {
       id: 'window_failure_rate.v1',
       version: '1.0.0',
+      implementationDigest: WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST,
       serviceId: 'checkout',
       serviceName: 'Checkout',
       metricSemantics: 'integer_window_snapshot',
@@ -94,6 +96,7 @@ describe('parseTargetCatalog', () => {
     })]));
 
     expect(parsed.targets.map((item) => item.targetId)).toEqual(['market-b-sim']);
+    expect(parsed.targetIndices).toEqual([1]);
     expect(parsed.rejected).toEqual([{ index: 0, targetId: 'market-a-sim', reasonCode: 'TARGET_BINDING_INVALID' }]);
   });
 

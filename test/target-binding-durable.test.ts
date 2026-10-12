@@ -3,13 +3,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentContext, Clock, PendingAgentEventV2 } from '../src/contracts/index.js';
+import { checkpointChecksum } from '../src/contracts/stable-json.js';
 import { createInitialRunGovernanceState } from '../src/contracts/governance.js';
-import type { ResolvedTargetSnapshot } from '../src/contracts/target.js';
+import type { ResolvedTargetSnapshot, ResolvedTargetSnapshotV2, TargetRunBindingRecord,
+  TargetStartClaim, TargetStartStore, VersionedResolvedTargetSnapshot } from '../src/contracts/target.js';
+import { parseResolvedTargetSnapshot } from '../src/contracts/target-schema.js';
 import { InMemoryDurableState } from '../src/storage/in-memory-durable-state.js';
 import { createSqlitePersistence } from '../src/infrastructure/sqlite/index.js';
 import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
 import { multiProjectConnectionRegistry, multiProjectProfiles, multiProjectTargetCatalog } from '../src/profiles/target-samples.js';
 import { StaticProfileResolver } from '../src/profiles/profile-resolver.js';
+import { WINDOW_FAILURE_RATE_INSTALLATION } from '../src/profiles/scenarios/window-failure-rate-v1.js';
+import { createTargetIdentityTestPorts } from './helpers/target-identity-test-ports.js';
+import { legacySnapshotUnsigned } from './helpers/legacy-target-snapshot.js';
 
 const now = '2026-10-11T10:00:00.000Z';
 const clock: Clock = { now: () => new Date(now) };
@@ -19,19 +25,29 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-async function targetSnapshot(): Promise<ResolvedTargetSnapshot> {
+async function targetSnapshot(): Promise<ResolvedTargetSnapshotV2> {
   const resolver = await createStaticTargetResolver({
+    ...createTargetIdentityTestPorts(),
     catalog: multiProjectTargetCatalog,
     connections: multiProjectConnectionRegistry,
     profileResolver: new StaticProfileResolver(multiProjectProfiles),
-    installedScenarios: [{ id: 'window_failure_rate.v1', version: '1.0.0' }],
+    installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
     installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
     validationTime: now,
   });
   return resolver.resolve({ targetId: 'market-a-sim', capturedAt: now, signal: new AbortController().signal });
 }
 
-function context(runId: string, targetBindingId: string, snapshot: ResolvedTargetSnapshot): AgentContext {
+async function legacyTargetSnapshot(): Promise<ResolvedTargetSnapshot> {
+  const snapshot = await targetSnapshot();
+  const unsigned = legacySnapshotUnsigned(snapshot);
+  return parseResolvedTargetSnapshot({
+    ...unsigned,
+    digest: `sha256:v1:${checkpointChecksum({ algorithm: 'sha256', version: 1, target: unsigned })}`,
+  });
+}
+
+function context(runId: string, targetBindingId: string, snapshot: VersionedResolvedTargetSnapshot): AgentContext {
   const governance = createInitialRunGovernanceState({ profileId: snapshot.profile.profileId, capturedAt: now });
   return {
     runId,
@@ -81,7 +97,15 @@ function runStarted(runId: string): PendingAgentEventV2<'RUN_STARTED'> {
   };
 }
 
-describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', kind => {
+async function acquireStartClaim(starts: TargetStartStore, binding: TargetRunBindingRecord): Promise<TargetStartClaim> {
+  const result = await starts.claimStart({ requestId: binding.requestId!, runId: binding.runId,
+    targetId: binding.targetId, requestDigest: binding.requestDigest!, ownerId: `test-owner:${binding.runId}`,
+    now, leaseUntil: '2026-10-11T10:01:00.000Z' });
+  if (result.status !== 'claimed') throw new Error(`Could not claim Target start: ${result.status}`);
+  return result.claim;
+}
+
+describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', (kind: 'memory' | 'sqlite') => {
   async function openStore() {
     if (kind === 'memory') {
       const state = new InMemoryDurableState(clock);
@@ -112,7 +136,7 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', ki
         expectedRevision: null,
         context: context(rootBinding.runId, rootBinding.bindingId, snapshot),
         outboxEvents: [runStarted(rootBinding.runId)],
-        targetBinding: { binding: rootBinding, snapshot },
+        targetBinding: { binding: rootBinding, snapshot, startClaim: await acquireStartClaim(store.state.targetStarts, rootBinding) },
       });
 
       expect(await store.state.checkpoints.load(rootBinding.runId)).toMatchObject({ context: {
@@ -120,8 +144,14 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', ki
       } });
       expect(await store.state.targetBindings.getBinding(rootBinding.runId)).toEqual(rootBinding);
       expect(await store.state.targetBindings.getSnapshot(rootBinding.bindingId)).toEqual(snapshot);
+      expect((await store.state.targetBindings.getSnapshot(rootBinding.bindingId))?.schemaVersion).toBe(2);
       expect(await store.state.outbox.listPending({ runId: rootBinding.runId, limit: 10 }))
         .toMatchObject([{ event: { type: 'RUN_STARTED', runId: rootBinding.runId } }]);
+      const identity = { requestId: rootBinding.requestId!, runId: rootBinding.runId,
+        targetId: rootBinding.targetId, requestDigest: rootBinding.requestDigest! };
+      expect(await store.state.targetStarts.reconcileStart(identity)).toEqual({ status: 'confirmed_present' });
+      expect(await store.state.targetStarts.claimStart({ ...identity, ownerId: 'second-owner', now,
+        leaseUntil: '2026-10-11T10:01:00.000Z' })).toEqual({ status: 'already_started' });
     } finally {
       await store.close();
     }
@@ -146,13 +176,44 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', ki
         expectedRevision: null,
         context: context(rootBinding.runId, rootBinding.bindingId, snapshot),
         outboxEvents: [malformedEvent],
-        targetBinding: { binding: rootBinding, snapshot },
+        targetBinding: { binding: rootBinding, snapshot, startClaim: await acquireStartClaim(store.state.targetStarts, rootBinding) },
       })).rejects.toThrow();
 
       expect(await store.state.checkpoints.load(rootBinding.runId)).toBeNull();
       expect(await store.state.targetBindings.getBinding(rootBinding.runId)).toBeNull();
       expect(await store.state.targetBindings.getSnapshot(rootBinding.bindingId)).toBeNull();
       expect(await store.state.outbox.listPending({ runId: rootBinding.runId, limit: 10 })).toEqual([]);
+      const claim = await acquireStartClaim(store.state.targetStarts, rootBinding);
+      expect(await store.state.targetStarts.releaseStartClaim({ claim, now })).toBe(true);
+      expect(await store.state.targetStarts.reconcileStart({ requestId: claim.requestId, runId: claim.runId,
+        targetId: claim.targetId, requestDigest: claim.requestDigest })).toEqual({ status: 'confirmed_absent' });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('keeps V1 readable but cannot create an executable Target binding from it', async () => {
+    const store = await openStore();
+    const snapshot = await legacyTargetSnapshot();
+    const rootBinding = binding({
+      bindingId: 'binding-v1-unproven', targetId: snapshot.targetId, runId: 'target-run-v1-unproven',
+      rootRunId: 'target-run-v1-unproven', snapshotDigest: snapshot.digest,
+      requestId: 'request-v1-unproven', requestDigest: `sha256:v1:${'7'.repeat(64)}`,
+    });
+    try {
+      await store.state.targetBindings.reserveRequest({
+        requestId: 'request-v1-unproven', targetId: snapshot.targetId,
+        requestDigest: `sha256:v1:${'7'.repeat(64)}`, runId: rootBinding.runId, createdAt: now,
+      });
+      await expect(store.state.transitions.commit({
+        expectedRevision: null,
+        context: context(rootBinding.runId, rootBinding.bindingId, snapshot),
+        outboxEvents: [runStarted(rootBinding.runId)],
+        targetBinding: { binding: rootBinding, snapshot, startClaim: await acquireStartClaim(store.state.targetStarts, rootBinding) },
+      })).rejects.toMatchObject({ code: 'TARGET_IDENTITY_UNPROVEN' });
+      expect(await store.state.checkpoints.load(rootBinding.runId)).toBeNull();
+      expect(await store.state.targetBindings.getBinding(rootBinding.runId)).toBeNull();
+      expect(await store.state.targetBindings.getSnapshot(rootBinding.bindingId)).toBeNull();
     } finally {
       await store.close();
     }
@@ -179,6 +240,46 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', ki
     }
   });
 
+  it('fences an expired owner before allowing its delayed initial commit', async () => {
+    const store = await openStore();
+    const snapshot = await targetSnapshot();
+    const rootBinding = binding({ bindingId: 'binding-fenced', targetId: snapshot.targetId,
+      runId: 'target-run-fenced', rootRunId: 'target-run-fenced', snapshotDigest: snapshot.digest,
+      requestId: 'request-fenced', requestDigest: `sha256:v1:${'8'.repeat(64)}` });
+    const identity = { requestId: rootBinding.requestId!, runId: rootBinding.runId,
+      targetId: rootBinding.targetId, requestDigest: rootBinding.requestDigest! };
+    try {
+      await store.state.targetBindings.reserveRequest({ ...identity, createdAt: now });
+      const first = await store.state.targetStarts.claimStart({ ...identity, ownerId: 'owner-a', now,
+        leaseUntil: '2026-10-11T10:00:01.000Z' });
+      expect(first.status).toBe('claimed');
+      if (first.status !== 'claimed') throw new Error('expected first start claim');
+      expect(await store.state.targetStarts.claimStart({ ...identity, ownerId: 'owner-b', now,
+        leaseUntil: '2026-10-11T10:01:00.000Z' })).toEqual({ status: 'busy' });
+      expect(await store.state.targetStarts.reconcileStart(identity)).toEqual({ status: 'unknown' });
+
+      const takeover = await store.state.targetStarts.claimStart({ ...identity, ownerId: 'owner-b',
+        now: '2026-10-11T10:00:02.000Z', leaseUntil: '2026-10-11T10:01:00.000Z' });
+      expect(takeover.status).toBe('claimed');
+      if (takeover.status !== 'claimed') throw new Error('expected takeover claim');
+      expect(takeover.claim.epoch).toBe(first.claim.epoch + 1);
+
+      await expect(store.state.transitions.commit({ expectedRevision: null,
+        context: context(rootBinding.runId, rootBinding.bindingId, snapshot),
+        outboxEvents: [runStarted(rootBinding.runId)],
+        targetBinding: { binding: rootBinding, snapshot, startClaim: first.claim },
+      })).rejects.toMatchObject({ code: 'TARGET_START_STATE_UNKNOWN' });
+      expect(await store.state.checkpoints.load(rootBinding.runId)).toBeNull();
+      expect(await store.state.targetBindings.getBinding(rootBinding.runId)).toBeNull();
+
+      expect(await store.state.targetStarts.releaseStartClaim({ claim: first.claim, now })).toBe(false);
+      expect(await store.state.targetStarts.releaseStartClaim({ claim: takeover.claim, now })).toBe(true);
+      expect(await store.state.targetStarts.reconcileStart(identity)).toEqual({ status: 'confirmed_absent' });
+    } finally {
+      await store.close();
+    }
+  });
+
   it('binds a child to its root Run and the original shared snapshot', async () => {
     const store = await openStore();
     const snapshot = await targetSnapshot();
@@ -196,7 +297,8 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', ki
       await store.state.targetBindings.reserveRequest({ requestId: 'request-tree', targetId: snapshot.targetId,
         requestDigest: `sha256:v1:${'5'.repeat(64)}`, runId: 'root-run', createdAt: now });
       await store.state.transitions.commit({ expectedRevision: null, context: context('root-run', rootBinding.bindingId, snapshot),
-        outboxEvents: [runStarted('root-run')], targetBinding: { binding: rootBinding, snapshot } });
+        outboxEvents: [runStarted('root-run')], targetBinding: { binding: rootBinding, snapshot,
+          startClaim: await acquireStartClaim(store.state.targetStarts, rootBinding) } });
       await store.state.transitions.commit({ expectedRevision: null, context: context('child-run', childBinding.bindingId, snapshot),
         outboxEvents: [runStarted('child-run')], targetBinding: { binding: childBinding } });
 
@@ -235,7 +337,8 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', ki
       await store.state.targetBindings.reserveRequest({ requestId: 'request-no-strip', targetId: snapshot.targetId,
         requestDigest: `sha256:v1:${'6'.repeat(64)}`, runId: rootBinding.runId, createdAt: now });
       const initial = await store.state.transitions.commit({ expectedRevision: null, context: context(rootBinding.runId, rootBinding.bindingId, snapshot),
-        outboxEvents: [runStarted(rootBinding.runId)], targetBinding: { binding: rootBinding, snapshot } });
+        outboxEvents: [runStarted(rootBinding.runId)], targetBinding: { binding: rootBinding, snapshot,
+          startClaim: await acquireStartClaim(store.state.targetStarts, rootBinding) } });
 
       const strippedContext = context(rootBinding.runId, rootBinding.bindingId, snapshot);
       delete strippedContext.targetBindingId;
@@ -263,7 +366,8 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', ki
       await beforeRestart.targetBindings.reserveRequest(request);
       await beforeRestart.transitions.commit({ expectedRevision: null,
         context: context(rootBinding.runId, rootBinding.bindingId, snapshot),
-        outboxEvents: [runStarted(rootBinding.runId)], targetBinding: { binding: rootBinding, snapshot } });
+        outboxEvents: [runStarted(rootBinding.runId)], targetBinding: { binding: rootBinding, snapshot,
+          startClaim: await acquireStartClaim(beforeRestart.targetStarts, rootBinding) } });
     } finally {
       beforeRestart.close();
     }
@@ -274,6 +378,11 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', ki
       expect(await afterRestart.targetBindings.getBinding(rootBinding.runId)).toEqual(rootBinding);
       expect(await afterRestart.targetBindings.getSnapshot(rootBinding.bindingId)).toEqual(snapshot);
       expect((await afterRestart.checkpoints.load(rootBinding.runId))?.context.targetBindingId).toBe(rootBinding.bindingId);
+      const identity = { requestId: request.requestId, runId: request.runId, targetId: request.targetId,
+        requestDigest: request.requestDigest };
+      expect(await afterRestart.targetStarts.reconcileStart(identity)).toEqual({ status: 'confirmed_present' });
+      expect(await afterRestart.targetStarts.claimStart({ ...identity, ownerId: 'restarted-owner', now,
+        leaseUntil: '2026-10-11T10:01:00.000Z' })).toEqual({ status: 'already_started' });
     } finally {
       afterRestart.close();
     }

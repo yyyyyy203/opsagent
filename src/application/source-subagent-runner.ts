@@ -60,6 +60,7 @@ export interface SourceChildAgentFactory {
     profileId: string;
     profileRevision?: string;
     targetBindingId?: string;
+    targetSourceId?: string;
     toolCallBudget?: { remaining: number };
     networkAttemptBudget?: { remaining: number };
   }): SourceChildAgent;
@@ -153,7 +154,10 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
     if (existingCheckpoint?.status === 'completed') {
       return finalize();
     }
-    const childTools = this.options.childTools.create({ request, execution, collector });
+    const configuredChildTools = this.options.childTools.create({ request, execution, collector });
+    const childTools = execution.targetBindingId === undefined
+      ? configuredChildTools
+      : bindTargetSourceTools(configuredChildTools, execution.targetSourceId);
     assertChildTools(childTools, this.options.source);
     const child = this.options.childAgentFactory.create({
       childRunId: execution.childRunId,
@@ -164,6 +168,7 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
       profileId: execution.profileId,
       ...(execution.profileRevision === undefined ? {} : { profileRevision: execution.profileRevision }),
       ...(execution.targetBindingId === undefined ? {} : { targetBindingId: execution.targetBindingId }),
+      ...(execution.targetSourceId === undefined ? {} : { targetSourceId: execution.targetSourceId }),
       ...(execution.toolCallBudget === undefined ? {} : { toolCallBudget: execution.toolCallBudget }),
       ...(execution.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: execution.networkAttemptBudget }),
     });
@@ -274,6 +279,29 @@ async function resolveInheritedTargetBinding(
     createdAt,
   };
   return { binding, snapshot };
+}
+
+function bindTargetSourceTools(tools: readonly Tool[], sourceId: string | undefined): readonly Tool[] {
+  if (sourceId === undefined || !isValidSourceCapability(sourceId)) {
+    throw new SourceSubagentFailure('POLICY_DENIED', 'Target-bound child has no valid source capability.', false);
+  }
+  return Object.freeze(tools.map(tool => {
+    if (tool.name === 'source_report') {
+      if (tool.kind !== 'utility' || tool.source !== 'builtin' || tool.targetSourceId !== undefined) {
+        throw new SourceSubagentFailure('POLICY_DENIED', 'Target child report Tool is not a trusted local capability.', false);
+      }
+      return tool;
+    }
+    if (tool.kind !== 'evidence' || tool.source !== 'mcp'
+      || (tool.targetSourceId !== undefined && tool.targetSourceId !== sourceId)) {
+      throw new SourceSubagentFailure('POLICY_DENIED', 'Target child Tool is outside its source capability.', false);
+    }
+    return Object.freeze({ ...tool, targetSourceId: sourceId });
+  }));
+}
+
+function isValidSourceCapability(value: string): boolean {
+  return value.length > 0 && value.length <= 256 && /^[\p{L}\p{N}][\p{L}\p{N}._:/-]*$/u.test(value);
 }
 
 export class SourceSubagentFailure extends Error {

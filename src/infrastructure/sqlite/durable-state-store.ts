@@ -2,6 +2,7 @@ import type { Clock } from '../../contracts/common.js';
 import type { AgentContext } from '../../contracts/context.js';
 import type { MemoryCaptureIntent } from '../../contracts/diagnostic-memory.js';
 import { StoredDataCorruptionError, type PendingAgentEventV2 } from '../../contracts/event-store.js';
+import { parseAgentEventV2 } from '../../contracts/event-v2/schema.js';
 import type { GovernanceEffect } from '../../contracts/hooks.js';
 import {
   CheckpointConflictError,
@@ -14,10 +15,11 @@ import {
   type VersionedCheckpointStore,
 } from '../../contracts/storage.js';
 import type { ToolExecutionResult } from '../../contracts/tool.js';
-import { TargetConfigurationError, type ResolvedTargetSnapshot, type TargetBindingStore,
+import { TargetConfigurationError, type VersionedResolvedTargetSnapshot, type TargetBindingStore,
   type TargetBindingTransition, type TargetRunBindingRecord, type TargetRunBindingPage,
-  type TargetRunRequestRecord } from '../../contracts/target.js';
-import { parseResolvedTargetSnapshot, parseTargetRunBindingRecord, parseTargetRunRequestRecord } from '../../contracts/target-schema.js';
+  type TargetRunRequestRecord, type TargetStartClaim, type TargetStartClaimResult,
+  type TargetStartRequestIdentity, type TargetStartReconciliation, type TargetStartStore } from '../../contracts/target.js';
+import { parseVersionedResolvedTargetSnapshot, parseTargetRunBindingRecord, parseTargetRunRequestRecord } from '../../contracts/target-schema.js';
 import {
   checkpointChecksum,
   parseAgentContext,
@@ -84,9 +86,20 @@ interface SnapshotRow {
   snapshot_json: string;
 }
 
+interface StartClaimRow {
+  request_id: string;
+  run_id: string;
+  target_id: string;
+  request_digest: string;
+  owner_id: string | null;
+  claim_epoch: number;
+  lease_until: string | null;
+  state: 'reserved' | 'claimed' | 'started';
+}
+
 /** SQLite control-plane implementation for checkpoint CAS and execution journal transitions. */
 export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolExecutionJournal, AgentStateUnitOfWork,
-  DurableTransitionUnitOfWork, TargetBindingStore {
+  DurableTransitionUnitOfWork, TargetBindingStore, TargetStartStore {
   public constructor(
     private readonly database: SqliteDatabase,
     private readonly clock: Clock,
@@ -144,8 +157,97 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
       this.database.raw.prepare(`INSERT INTO target_run_requests(request_id, target_id, request_digest, run_id, created_at)
         VALUES (?, ?, ?, ?, ?)`).run(normalized.requestId, normalized.targetId, normalized.requestDigest,
         normalized.runId, normalized.createdAt);
+      this.database.raw.prepare(`INSERT INTO target_run_start_claims(
+        request_id, run_id, target_id, request_digest, owner_id, claim_epoch, lease_until, state
+      ) VALUES (?, ?, ?, ?, NULL, 0, NULL, 'reserved')`).run(
+        normalized.requestId, normalized.runId, normalized.targetId, normalized.requestDigest,
+      );
       return { record: structuredClone(normalized), created: true };
     }).immediate());
+  }
+
+  public claimStart(input: TargetStartRequestIdentity & { ownerId: string; now: string; leaseUntil: string }): Promise<TargetStartClaimResult> {
+    return Promise.resolve().then(() => this.database.raw.transaction(() => {
+      validateStartClaimInput(input);
+      const request = this.requestRow(input.requestId);
+      const row = this.startClaimRow(input.requestId);
+      if (request === undefined || row === undefined || !sameStartIdentity(this.parseRequest(request), input)
+        || !sameStartIdentity(startIdentity(row), input)) return { status: 'unknown' } as const;
+
+      const reconciliation = this.reconcileStartSync(input, row);
+      if (reconciliation === 'present') {
+        this.database.raw.prepare(`UPDATE target_run_start_claims SET owner_id = NULL, lease_until = NULL, state = 'started'
+          WHERE request_id = ?`).run(input.requestId);
+        return { status: 'already_started' } as const;
+      }
+      if (reconciliation === 'unknown') return { status: 'unknown' } as const;
+
+      if (row.state === 'started') return { status: 'unknown' } as const;
+      if (row.state === 'claimed') {
+        const leaseTime = row.lease_until === null ? Number.NaN : Date.parse(row.lease_until);
+        if (!Number.isFinite(leaseTime) || row.owner_id === null) return { status: 'unknown' } as const;
+        if (leaseTime > Date.parse(input.now) && row.owner_id !== input.ownerId) return { status: 'busy' } as const;
+        if (leaseTime > Date.parse(input.now) && row.owner_id === input.ownerId) {
+          return { status: 'claimed', claim: toStartClaim(row) } as const;
+        }
+      }
+
+      const epoch = row.claim_epoch + 1;
+      if (!Number.isSafeInteger(epoch)) return { status: 'unknown' } as const;
+      const update = this.database.raw.prepare(`UPDATE target_run_start_claims
+        SET owner_id = ?, claim_epoch = ?, lease_until = ?, state = 'claimed'
+        WHERE request_id = ? AND claim_epoch = ? AND state = ?`).run(
+        input.ownerId, epoch, input.leaseUntil, input.requestId, row.claim_epoch, row.state,
+      );
+      if (update.changes !== 1) return { status: 'unknown' } as const;
+      return { status: 'claimed', claim: { requestId: input.requestId, runId: input.runId,
+        targetId: input.targetId, requestDigest: input.requestDigest, ownerId: input.ownerId,
+        epoch, leaseUntil: input.leaseUntil } } as const;
+    }).immediate());
+  }
+
+  public reconcileStart(input: TargetStartRequestIdentity): Promise<TargetStartReconciliation> {
+    return Promise.resolve().then(() => this.database.raw.transaction(() => {
+      const request = this.requestRow(input.requestId);
+      const row = this.startClaimRow(input.requestId);
+      if (request === undefined || row === undefined || !sameStartIdentity(this.parseRequest(request), input)
+        || !sameStartIdentity(startIdentity(row), input)) return { status: 'unknown' } as const;
+      const result = this.reconcileStartSync(input, row);
+      if (result === 'present') {
+        this.database.raw.prepare(`UPDATE target_run_start_claims SET owner_id = NULL, lease_until = NULL, state = 'started'
+          WHERE request_id = ?`).run(input.requestId);
+        return { status: 'confirmed_present' } as const;
+      }
+      if (result !== 'absent' || row.state !== 'reserved') return { status: 'unknown' } as const;
+      return { status: 'confirmed_absent' } as const;
+    }).immediate()).catch(() => ({ status: 'unknown' } as const));
+  }
+
+  public releaseStartClaim(input: { claim: TargetStartClaim; now: string }): Promise<boolean> {
+    return Promise.resolve().then(() => this.database.raw.transaction(() => {
+      validateTimestamp(input.now);
+      const request = this.requestRow(input.claim.requestId);
+      const row = this.startClaimRow(input.claim.requestId);
+      if (request === undefined || !sameStartIdentity(this.parseRequest(request), input.claim)
+        || row === undefined || !sameStartIdentity(startIdentity(row), input.claim) || row.state !== 'claimed'
+        || row.owner_id !== input.claim.ownerId || row.claim_epoch !== input.claim.epoch
+        || row.lease_until !== input.claim.leaseUntil) return false;
+      const reconciliation = this.reconcileStartSync(input.claim, row);
+      if (reconciliation === 'present') {
+        this.database.raw.prepare(`UPDATE target_run_start_claims SET owner_id = NULL, lease_until = NULL, state = 'started'
+          WHERE request_id = ? AND state = 'claimed' AND owner_id = ? AND claim_epoch = ?`).run(
+          input.claim.requestId, input.claim.ownerId, input.claim.epoch,
+        );
+        return false;
+      }
+      if (reconciliation !== 'absent') return false;
+      const update = this.database.raw.prepare(`UPDATE target_run_start_claims
+        SET owner_id = NULL, lease_until = NULL, state = 'reserved'
+        WHERE request_id = ? AND state = 'claimed' AND owner_id = ? AND claim_epoch = ?`).run(
+        input.claim.requestId, input.claim.ownerId, input.claim.epoch,
+      );
+      return update.changes === 1;
+    }).immediate()).catch(() => false);
   }
 
   public getRequest(requestId: string): Promise<TargetRunRequestRecord | null> {
@@ -162,13 +264,13 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     });
   }
 
-  public getSnapshot(bindingId: string): Promise<ResolvedTargetSnapshot | null> {
+  public getSnapshot(bindingId: string): Promise<VersionedResolvedTargetSnapshot | null> {
     return Promise.resolve().then(() => {
       const row = this.database.raw.prepare(`SELECT binding_id, target_id, snapshot_digest, snapshot_json
         FROM target_snapshots WHERE binding_id = ?`).get(bindingId) as SnapshotRow | undefined;
       if (row === undefined) return null;
       try {
-        const parsed = parseResolvedTargetSnapshot(JSON.parse(row.snapshot_json) as unknown);
+        const parsed = parseVersionedResolvedTargetSnapshot(JSON.parse(row.snapshot_json) as unknown);
         if (parsed.targetId !== row.target_id || parsed.digest !== row.snapshot_digest) throw new Error('snapshot row mismatch');
         return parsed;
       } catch {
@@ -236,7 +338,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
       const context = transition?.kind === 'completed'
         ? appendCompletedResult(input.context, transition.result)
         : structuredClone(input.context);
-      this.persistTargetBinding(context, input.targetBinding);
+      this.persistTargetBinding(context, input.targetBinding, input.outboxEvents);
       let existing: ToolExecutionRecord | undefined;
       let execution: ToolExecutionRecord | undefined;
       // Keep the established CAS-first result contract.  The checkpoint write
@@ -357,6 +459,12 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
       request_id, request_digest FROM run_target_bindings WHERE run_id = ?`).get(runId) as BindingRow | undefined;
   }
 
+  private startClaimRow(requestId: string): StartClaimRow | undefined {
+    return this.database.raw.prepare(`SELECT request_id, run_id, target_id, request_digest,
+      owner_id, claim_epoch, lease_until, state FROM target_run_start_claims WHERE request_id = ?`)
+      .get(requestId) as StartClaimRow | undefined;
+  }
+
   private parseRequest(row: RequestRow): TargetRunRequestRecord {
     try {
       return parseTargetRunRequestRecord({ requestId: row.request_id, targetId: row.target_id,
@@ -379,7 +487,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
 
   private targetBindingReader(): {
     bindingByRunId: (runId: string) => TargetRunBindingRecord | null;
-    snapshotByBindingId: (bindingId: string) => ResolvedTargetSnapshot | null;
+    snapshotByBindingId: (bindingId: string) => VersionedResolvedTargetSnapshot | null;
     requestById: (requestId: string) => TargetRunRequestRecord | null;
   } {
     return {
@@ -395,12 +503,12 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     };
   }
 
-  private getSnapshotSync(bindingId: string): ResolvedTargetSnapshot | null {
+  private getSnapshotSync(bindingId: string): VersionedResolvedTargetSnapshot | null {
     const row = this.database.raw.prepare(`SELECT binding_id, target_id, snapshot_digest, snapshot_json
       FROM target_snapshots WHERE binding_id = ?`).get(bindingId) as SnapshotRow | undefined;
     if (row === undefined) return null;
     try {
-      const parsed = parseResolvedTargetSnapshot(JSON.parse(row.snapshot_json) as unknown);
+      const parsed = parseVersionedResolvedTargetSnapshot(JSON.parse(row.snapshot_json) as unknown);
       if (parsed.targetId !== row.target_id || parsed.digest !== row.snapshot_digest) throw new Error('snapshot row mismatch');
       return parsed;
     } catch {
@@ -408,9 +516,14 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     }
   }
 
-  private persistTargetBinding(context: AgentContext, transition: TargetBindingTransition | undefined): void {
+  private persistTargetBinding(
+    context: AgentContext,
+    transition: TargetBindingTransition | undefined,
+    outboxEvents: readonly PendingAgentEventV2[],
+  ): void {
     const validated = validateTargetBindingState(context, transition, this.targetBindingReader());
     if (validated.binding === undefined) return;
+    if (transition !== undefined) this.consumeStartClaim(context, transition, outboxEvents);
     if (validated.snapshot !== undefined) {
       this.database.raw.prepare(`INSERT OR IGNORE INTO target_snapshots(binding_id, target_id, snapshot_digest, snapshot_json, created_at)
         VALUES (?, ?, ?, ?, ?)`).run(validated.binding.bindingId, validated.snapshot.targetId,
@@ -422,6 +535,85 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     `).run(validated.binding.runId, validated.binding.bindingId, validated.binding.targetId,
       validated.binding.rootRunId, validated.binding.snapshotDigest, validated.binding.createdAt,
       validated.binding.requestId ?? null, validated.binding.requestDigest ?? null);
+  }
+
+  /** Reconcile only transactionally durable facts; an absent checkpoint read alone is never enough. */
+  private reconcileStartSync(
+    identity: TargetStartRequestIdentity,
+    claim: StartClaimRow,
+  ): 'absent' | 'present' | 'unknown' {
+    if (!sameStartIdentity(startIdentity(claim), identity)) return 'unknown';
+    try {
+      const bindingRow = this.bindingRow(identity.runId);
+      const checkpointRow = this.checkpointRow(identity.runId);
+      const outboxRows = this.database.raw.prepare(`SELECT event_json FROM durable_event_outbox WHERE run_id = ?`)
+        .all(identity.runId) as Array<{ event_json: string }>;
+      if (bindingRow === undefined && checkpointRow === undefined && outboxRows.length === 0) {
+        return claim.state === 'started' ? 'unknown' : 'absent';
+      }
+      if (bindingRow === undefined || checkpointRow === undefined || outboxRows.length === 0) return 'unknown';
+
+      const binding = this.parseBinding(bindingRow);
+      const checkpoint = this.parseCheckpoint(checkpointRow);
+      const snapshot = this.getSnapshotSync(binding.bindingId);
+      if (binding.runId !== identity.runId || binding.rootRunId !== identity.runId
+        || binding.targetId !== identity.targetId || binding.requestId !== identity.requestId
+        || binding.requestDigest !== identity.requestDigest || snapshot === null
+        || snapshot.targetId !== identity.targetId || snapshot.digest !== binding.snapshotDigest
+        || checkpoint.context.runId !== identity.runId
+        || checkpoint.context.targetBindingId !== binding.bindingId) return 'unknown';
+
+      const hasInitialEvent = outboxRows.some(({ event_json }) => {
+        try {
+          const raw: unknown = JSON.parse(event_json) as unknown;
+          const parsed = parseAgentEventV2(typeof raw === 'object' && raw !== null
+            ? { ...raw, sequence: 1 } : raw);
+          return parsed.type === 'RUN_STARTED' && parsed.runId === identity.runId;
+        } catch {
+          return false;
+        }
+      });
+      return hasInitialEvent ? 'present' : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  private consumeStartClaim(
+    context: AgentContext,
+    transition: TargetBindingTransition,
+    outboxEvents: readonly PendingAgentEventV2[],
+  ): void {
+    const binding = transition.binding;
+    if (binding.runId !== binding.rootRunId) {
+      if (transition.startClaim !== undefined) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+      return;
+    }
+    if (binding.requestId === undefined || binding.requestDigest === undefined) {
+      if (transition.startClaim !== undefined) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+      return;
+    }
+    const claim = transition.startClaim;
+    if (claim === undefined || !sameStartIdentity(claim, {
+      requestId: binding.requestId,
+      runId: binding.runId,
+      targetId: binding.targetId,
+      requestDigest: binding.requestDigest,
+    }) || !hasRunStartedEvent(outboxEvents, context.runId)) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    const row = this.startClaimRow(claim.requestId);
+    const now = this.clock.now().toISOString();
+    if (row === undefined || !sameStartIdentity(startIdentity(row), claim) || row.state !== 'claimed'
+      || row.owner_id !== claim.ownerId || row.claim_epoch !== claim.epoch || row.lease_until !== claim.leaseUntil
+      || Date.parse(claim.leaseUntil) <= Date.parse(now)) {
+      throw new TargetConfigurationError('TARGET_START_STATE_UNKNOWN');
+    }
+    const update = this.database.raw.prepare(`UPDATE target_run_start_claims
+      SET owner_id = NULL, lease_until = NULL, state = 'started'
+      WHERE request_id = ? AND state = 'claimed' AND owner_id = ? AND claim_epoch = ? AND lease_until = ?`)
+      .run(claim.requestId, claim.ownerId, claim.epoch, claim.leaseUntil);
+    if (update.changes !== 1) throw new TargetConfigurationError('TARGET_START_STATE_UNKNOWN');
   }
 
   private insertExecution(record: ToolExecutionRecord): void {
@@ -566,6 +758,50 @@ function sameExecutionIdentity(left: ToolExecutionRecord, right: ToolExecutionRe
 function sameRequestIdentity(left: TargetRunRequestRecord, right: TargetRunRequestRecord): boolean {
   return left.requestId === right.requestId && left.targetId === right.targetId
     && left.requestDigest === right.requestDigest;
+}
+
+function startIdentity(row: StartClaimRow): TargetStartRequestIdentity {
+  return { requestId: row.request_id, runId: row.run_id, targetId: row.target_id, requestDigest: row.request_digest };
+}
+
+function sameStartIdentity(left: TargetStartRequestIdentity, right: TargetStartRequestIdentity): boolean {
+  return left.requestId === right.requestId && left.runId === right.runId
+    && left.targetId === right.targetId && left.requestDigest === right.requestDigest;
+}
+
+function toStartClaim(row: StartClaimRow): TargetStartClaim {
+  if (row.state !== 'claimed' || row.owner_id === null || row.lease_until === null || row.claim_epoch < 1) {
+    throw new TargetConfigurationError('TARGET_START_STATE_UNKNOWN');
+  }
+  return { ...startIdentity(row), ownerId: row.owner_id, epoch: row.claim_epoch, leaseUntil: row.lease_until };
+}
+
+function validateStartClaimInput(input: TargetStartRequestIdentity & { ownerId: string; now: string; leaseUntil: string }): void {
+  parseTargetRunRequestRecord({ requestId: input.requestId, runId: input.runId, targetId: input.targetId,
+    requestDigest: input.requestDigest, createdAt: input.now });
+  validateTimestamp(input.now);
+  validateTimestamp(input.leaseUntil);
+  if (input.ownerId.trim().length === 0 || Date.parse(input.leaseUntil) <= Date.parse(input.now)) {
+    throw new RangeError('Target start claim owner and future lease are required.');
+  }
+}
+
+function validateTimestamp(value: string): void {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new RangeError('Target start timestamp must be a canonical ISO timestamp.');
+  }
+}
+
+function hasRunStartedEvent(events: readonly PendingAgentEventV2[], runId: string): boolean {
+  return events.some((event) => {
+    try {
+      const parsed = parseAgentEventV2({ ...event, sequence: 1 });
+      return parsed.type === 'RUN_STARTED' && parsed.runId === runId;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function sameJson(left: unknown, right: unknown): boolean {

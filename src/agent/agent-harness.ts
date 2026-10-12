@@ -22,22 +22,23 @@ import type {
   HookRegistryLike,
   ProfileResolver,
   ToolCall,
+  Tool,
   RawToolCall,
   ToolExecutionResult,
   ToolExecutionRecord,
   RiskSeverity,
 } from '../contracts/index.js';
-import type { TargetBindingTransition, TrustedTargetBinding } from '../contracts/target.js';
+import type { TargetBindingTransition, TargetOperationPermit, TargetRecoveryGate, TargetRunRuntimeLease, TrustedTargetBinding } from '../contracts/target.js';
 import { visibilityForV2Event } from '../event/v2/visibility.js';
 import { toolExecutionAttemptId } from '../event/v2/attempt-id.js';
 import { CheckpointConflictError, TargetConfigurationError, checkpointChecksum, createInitialRunGovernanceState,
-  parseResolvedTargetSnapshot, parseTargetRunBindingRecord, toAgentError } from '../contracts/index.js';
+  parseExecutableTargetSnapshot, parseTargetRunBindingRecord, toAgentError } from '../contracts/index.js';
 import type { CompressionResult, ContextCompressor } from '../context-compressor/types.js';
 import type { EventBus } from '../event/event-bus.js';
 import type { EventFactory } from '../event/event-factory.js';
-import type { BatchExecutionCallbacks, ToolBatchExecutor } from '../tool/batch-executor.js';
-import type { Toolkit } from '../tool/toolkit.js';
-import type { ToolAdmission } from '../tool/admission.js';
+import type { BatchExecutionCallbacks, ToolBatchExecutionScope, ToolBatchExecutor } from '../tool/batch-executor.js';
+import { Toolkit } from '../tool/toolkit.js';
+import { ToolAdmission } from '../tool/admission.js';
 import type { AgentMemoryHarness } from './types.js';
 import type { MemoryCaptureIntent, MemoryEventFactory, MemoryOperation, RunMemoryControl, RunMemoryState } from '../contracts/diagnostic-memory.js';
 import { parseRunMemoryControl, parseRunMemoryState } from '../contracts/diagnostic-memory-schema.js';
@@ -46,7 +47,7 @@ import { toolInputJsonSchema } from '../tool/schema.js';
 import { legacyRunFinishedPayload } from '../event/v1-payloads.js';
 import { admitToolBatch } from './admit-tool-batch.js';
 import { planPendingBatchRecovery } from './run-recovery.js';
-import { toolInputDigest } from '../tool/schema.js';
+import { toolDefinitionDigest, toolInputDigest } from '../tool/schema.js';
 import { USER_RUN_CANCELLATION_REASON } from './types.js';
 import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
 import { createLoopCallSignature, isLoopCallBlocked, recordLoopSample, type LoopIntervention } from './loop-detection/index.js';
@@ -72,6 +73,10 @@ export interface AgentHarnessDependencies {
   hookRegistry?: HookRegistryLike;
   /** Optional host-injected, policy-gated historical memory ports. */
   memory?: AgentMemoryHarness;
+  /** Current Target policy gate; Target-bound start/resume fails closed when absent. */
+  targetRecoveryGate?: TargetRecoveryGate;
+  /** Internal source capability scope for a Target-bound child Harness. */
+  targetSourceScopeId?: string;
   durableState?: DurableRunState;
   v2Events?: Omit<EventPublisherV2Dependencies, 'correlationId'> & {
     correlationId: string | ((runId: string) => string);
@@ -85,6 +90,12 @@ interface RunExecutionFrame {
   context: AgentContext;
   /** Host-owned Target binding staged for the first durable RUN_STARTED transition. */
   targetBinding?: TargetBindingTransition;
+  /** Per-Run capabilities reconstructed from the immutable Target snapshot. */
+  targetRuntime?: {
+    lease: TargetRunRuntimeLease;
+    toolkit: Toolkit;
+    admission: ToolAdmission;
+  };
   finalText: string;
   activeStepId?: string;
   activeStepStartedAt?: number;
@@ -116,6 +127,9 @@ export class AgentHarness implements DiagnosisAgent {
       && (this.dependencies.durableState === undefined || this.dependencies.v2Events?.dispatcher === undefined)) {
       throw new TargetConfigurationError('TARGET_BINDING_INVALID');
     }
+    if (this.dependencies.targetSourceScopeId !== undefined && trustedTargetBinding === undefined) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
     const normalizedOptions: ReplyOptions = {
       ...options,
       runId,
@@ -126,12 +140,21 @@ export class AgentHarness implements DiagnosisAgent {
       ...(trustedTargetBinding === undefined ? {} : { targetBinding: {
         binding: trustedTargetBinding.binding,
         snapshot: trustedTargetBinding.snapshot,
+        ...(trustedTargetBinding.startClaim === undefined ? {} : { startClaim: trustedTargetBinding.startClaim }),
       } }),
       finalText: '',
       naturalExit: false,
       lifecycleEffects: new Map(),
     };
-    return yield* this.forwardRunStream(this.run(frame, options.signal ?? new AbortController().signal));
+    const signal = options.signal ?? new AbortController().signal;
+    if (trustedTargetBinding !== undefined && this.dependencies.targetRecoveryGate === undefined) {
+      throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+    }
+    try {
+      return yield* this.forwardRunStream(this.run(frame, signal));
+    } finally {
+      await frame.targetRuntime?.lease.release();
+    }
   }
 
   public async *resumeStream(
@@ -143,6 +166,38 @@ export class AgentHarness implements DiagnosisAgent {
     const loaded = await this.loadCheckpoint(runId);
     if (loaded === null) throw new Error(`Checkpoint not found: ${runId}`);
     const { context } = loaded;
+    const storedBinding = this.dependencies.durableState === undefined
+      ? null
+      : await this.dependencies.durableState.targetBindings.getBinding(runId);
+    const hasTargetBinding = context.targetBindingId !== undefined || storedBinding !== null;
+    if (this.dependencies.targetSourceScopeId !== undefined && !hasTargetBinding) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    let targetRuntime: RunExecutionFrame['targetRuntime'];
+    if (hasTargetBinding) {
+      if (context.targetBindingId === undefined || storedBinding === null
+        || storedBinding.bindingId !== context.targetBindingId || storedBinding.runId !== runId) {
+        throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+      }
+      const gate = this.dependencies.targetRecoveryGate;
+      if (gate === undefined) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      const lease = await gate.acquireForResume({
+        runId,
+        targetBindingId: storedBinding.bindingId,
+        signal,
+        ...(this.dependencies.targetSourceScopeId === undefined ? {} : { sourceScopeId: this.dependencies.targetSourceScopeId }),
+      });
+      try {
+        targetRuntime = createTargetExecutionScope(
+          lease,
+          this.dependencies.targetSourceScopeId,
+          this.dependencies.targetSourceScopeId === undefined ? undefined : this.dependencies.toolkit.list(),
+        );
+      } catch (error) {
+        await lease.release();
+        throw error;
+      }
+    }
     context.sessionId ??= this.dependencies.ids.next('session');
     context.replyId ??= this.dependencies.ids.next('reply');
     context.toolCallBudget = toolCallBudget ?? context.toolCallBudget ?? {
@@ -155,19 +210,24 @@ export class AgentHarness implements DiagnosisAgent {
     context.streamId = newStreamId;
     const frame: RunExecutionFrame = {
       context,
+      ...(targetRuntime === undefined ? {} : { targetRuntime }),
       finalText: '',
       naturalExit: false,
       ...(loaded.revision === undefined ? {} : { checkpointRevision: loaded.revision }),
       lifecycleEffects: new Map(),
     };
-    await this.publishTransitionV2(frame, 'RUN_RESUMED', {
-      checkpointVersion: loaded.revision === undefined
-        ? String(context.contextVersion)
-        : String(loaded.revision + 1),
-      resumeReason: 'explicit_resume',
-      newStreamId,
-    });
-    return yield* this.forwardRunStream(this.run(frame, signal, true));
+    try {
+      await this.publishTransitionV2(frame, 'RUN_RESUMED', {
+        checkpointVersion: loaded.revision === undefined
+          ? String(context.contextVersion)
+          : String(loaded.revision + 1),
+        resumeReason: 'explicit_resume',
+        newStreamId,
+      });
+      return yield* this.forwardRunStream(this.run(frame, signal, true));
+    } finally {
+      await frame.targetRuntime?.lease.release();
+    }
   }
 
   private async *forwardRunStream(
@@ -208,6 +268,7 @@ export class AgentHarness implements DiagnosisAgent {
     });
     try {
       if (!resumed) {
+        const targetBindingForStart = frame.targetBinding;
         if (frame.targetBinding !== undefined) {
           const governance = frame.context.governance ?? createInitialRunGovernanceState({
             profileId: frame.context.profileId,
@@ -234,6 +295,28 @@ export class AgentHarness implements DiagnosisAgent {
           versionSnapshot: governanceVersionSnapshot(frame.context),
         });
         yield* this.publishStream('RUN_STARTED', frame.context, { profileId: frame.context.profileId });
+        if (targetBindingForStart !== undefined) {
+          const gate = this.dependencies.targetRecoveryGate;
+          const binding = targetBindingForStart.binding;
+          const snapshot = targetBindingForStart.snapshot;
+          if (gate === undefined || snapshot === undefined) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+          const lease = await gate.acquireForStart({
+            binding,
+            snapshot: parseExecutableTargetSnapshot(snapshot),
+            signal,
+            ...(this.dependencies.targetSourceScopeId === undefined ? {} : { sourceScopeId: this.dependencies.targetSourceScopeId }),
+          });
+          try {
+            frame.targetRuntime = createTargetExecutionScope(
+              lease,
+              this.dependencies.targetSourceScopeId,
+              this.dependencies.targetSourceScopeId === undefined ? undefined : this.dependencies.toolkit.list(),
+            );
+          } catch (error) {
+            await lease.release();
+            throw error;
+          }
+        }
       }
 
       delete frame.context.failure;
@@ -393,7 +476,7 @@ export class AgentHarness implements DiagnosisAgent {
 
       const loopHint = frame.loopHint;
       delete frame.loopHint;
-      const response = yield* this.reasonStream(frame.context, stepId, signal, loopHint, memoryMessage);
+      const response = yield* this.reasonStream(frame, stepId, signal, loopHint, memoryMessage);
       const candidates: Array<ToolCall | RawToolCall> = [...response.toolCalls, ...(response.rawToolCalls ?? [])];
       const seenIds = new Set(frame.context.messages.flatMap((message) => message.blocks.flatMap((block) =>
         block.type === 'tool_call' || block.type === 'raw_tool_call' ? [block.call.id] : [])));
@@ -446,10 +529,10 @@ export class AgentHarness implements DiagnosisAgent {
       const admission = admitToolBatch(
         candidates,
         frame.context,
-        this.dependencies.admission,
+        this.admissionFor(frame),
         this.dependencies.clock,
         signal,
-        (call) => this.isLoopCallBlocked(frame.context, call),
+        (call) => this.isLoopCallBlocked(frame, call),
       );
       for (const repair of admission.repairs) {
         const repairPayload = { toolCallId: repair.toolCallId, stage: repair.stage, repairs: repair.repairs };
@@ -484,7 +567,8 @@ export class AgentHarness implements DiagnosisAgent {
         frame.context,
         stepId,
         signal,
-        this.completionCallbacks(frame, this.loopExecutableCalls(admission.calls), stepId),
+        this.completionCallbacks(frame, this.loopExecutableCalls(frame, admission.calls), stepId),
+        this.toolExecutionScope(frame),
       );
       const results = [...admission.rejected, ...batch.results];
       for (const deferred of batch.deferredActions) results.push(this.deferredResult(deferred));
@@ -551,7 +635,7 @@ export class AgentHarness implements DiagnosisAgent {
       frame.context.pendingToolCalls = [];
       delete frame.context.pendingToolBatch;
       frame.context.contextVersion += 1;
-      const nextStage = this.nextStage(admission.calls);
+      const nextStage = this.nextStage(frame, admission.calls);
       if (nextStage !== frame.context.stage) {
         const previousStage = frame.context.stage;
         frame.context.stage = nextStage;
@@ -575,7 +659,7 @@ export class AgentHarness implements DiagnosisAgent {
     if (context.pendingToolCalls.length === 0) return false;
     const pending = context.pendingToolCalls[0];
     if (pending === undefined) return false;
-    const invalidReason = this.pendingResumeInvalidReason(context, pending);
+    const invalidReason = this.pendingResumeInvalidReason(frame, pending);
     if (invalidReason !== undefined) return yield* this.rejectPendingInterruptStream(frame, pending, invalidReason);
     if (context.pendingInterrupt?.interruptType === 'external_tool_execution') return true;
     if (!context.confirmedToolCallIds.includes(pending.id)) return false;
@@ -587,6 +671,7 @@ export class AgentHarness implements DiagnosisAgent {
       stepId,
       signal,
       this.completionCallbacks(frame, [pending], stepId),
+      this.toolExecutionScope(frame),
     );
     context = frame.context;
     if (batch.interrupt !== undefined) {
@@ -631,7 +716,8 @@ export class AgentHarness implements DiagnosisAgent {
     return false;
   }
 
-  private pendingResumeInvalidReason(context: AgentContext, pending: ToolCall): string | undefined {
+  private pendingResumeInvalidReason(frame: RunExecutionFrame, pending: ToolCall): string | undefined {
+    const context = frame.context;
     const interrupt = context.pendingInterrupt;
     if (interrupt === undefined) return undefined;
     if (interrupt.toolCallId !== pending.id) return 'tool_call_mismatch';
@@ -640,8 +726,16 @@ export class AgentHarness implements DiagnosisAgent {
       const validation = registry.validate(interrupt, this.dependencies.clock.now());
       if (!validation.valid) return validation.reason;
     }
-    const tool = this.dependencies.toolkit.get(pending.name);
+    const tool = this.toolkitFor(frame).get(pending.name);
     if (tool === undefined) return 'tool_not_found';
+    const expectedDefinitionDigest = interrupt.payload.toolDefinitionDigest;
+    if (context.targetBindingId !== undefined && typeof expectedDefinitionDigest !== 'string') {
+      return 'tool_definition_digest_missing';
+    }
+    if (typeof expectedDefinitionDigest === 'string'
+      && expectedDefinitionDigest !== toolDefinitionDigest(tool)) {
+      return 'tool_definition_digest_mismatch';
+    }
     const digest = toolInputDigest(tool, pending);
     if (typeof interrupt.payload.inputDigest === 'string' && interrupt.payload.inputDigest !== digest) {
       return 'input_digest_mismatch';
@@ -716,7 +810,7 @@ export class AgentHarness implements DiagnosisAgent {
 
     const plan = await planPendingBatchRecovery({
       context,
-      toolkit: this.dependencies.toolkit,
+      toolkit: this.toolkitFor(frame),
       executions: durable.executions,
       now: this.dependencies.clock.now().toISOString(),
     });
@@ -768,7 +862,8 @@ export class AgentHarness implements DiagnosisAgent {
         context,
         pending.stepId,
         signal,
-      this.completionCallbacks(frame, this.loopExecutableCalls(plan.calls), pending.stepId),
+        this.completionCallbacks(frame, this.loopExecutableCalls(frame, plan.calls), pending.stepId),
+        this.toolExecutionScope(frame),
       );
       for (const result of batch.results) await this.persistUnjournaledResult(frame, result);
       this.throwIfLoopTerminated(frame);
@@ -865,7 +960,7 @@ export class AgentHarness implements DiagnosisAgent {
     result: ToolExecutionResult,
     stepId: string,
   ): LoopIntervention | undefined {
-    const tool = this.dependencies.toolkit.get(call.name);
+    const tool = this.toolkitFor(frame).get(call.name);
     if (tool === undefined) return undefined;
     const capturedAt = frame.context.governance?.profile.capturedAt ?? this.dependencies.clock.now().toISOString();
     const governance = frame.context.governance ?? createInitialRunGovernanceState({
@@ -889,18 +984,20 @@ export class AgentHarness implements DiagnosisAgent {
     return decision.intervention;
   }
 
-  private isLoopCallBlocked(context: AgentContext, call: ToolCall): boolean {
-    const tool = this.dependencies.toolkit.get(call.name);
+  private isLoopCallBlocked(frame: RunExecutionFrame, call: ToolCall): boolean {
+    const context = frame.context;
+    const tool = this.toolkitFor(frame).get(call.name);
     const loop = context.governance?.loop;
     return tool !== undefined && loop !== undefined
       && isLoopCallBlocked(loop, createLoopCallSignature({ stage: context.stage, tool, call }));
   }
 
-  private loopExecutableCalls(calls: readonly ToolCall[]): ToolCall[] {
-    const hasAction = calls.some((call) => this.dependencies.toolkit.get(call.name)?.kind === 'action');
-    const hasEvidence = calls.some((call) => this.dependencies.toolkit.get(call.name)?.kind !== 'action');
+  private loopExecutableCalls(frame: RunExecutionFrame, calls: readonly ToolCall[]): ToolCall[] {
+    const toolkit = this.toolkitFor(frame);
+    const hasAction = calls.some((call) => toolkit.get(call.name)?.kind === 'action');
+    const hasEvidence = calls.some((call) => toolkit.get(call.name)?.kind !== 'action');
     return hasAction && hasEvidence
-      ? calls.filter((call) => this.dependencies.toolkit.get(call.name)?.kind !== 'action')
+      ? calls.filter((call) => toolkit.get(call.name)?.kind !== 'action')
       : [...calls];
   }
 
@@ -1053,7 +1150,7 @@ export class AgentHarness implements DiagnosisAgent {
     delete frame.context.pendingInterrupt;
     delete frame.context.pendingToolBatch;
     frame.context.status = 'running';
-    const nextStage = this.nextStage(pending.calls);
+    const nextStage = this.nextStage(frame, pending.calls);
     if (nextStage !== frame.context.stage) frame.context.stage = nextStage;
     frame.context.contextVersion += 1;
   }
@@ -1154,12 +1251,13 @@ export class AgentHarness implements DiagnosisAgent {
   }
 
   private async *reasonStream(
-    context: AgentContext,
+    frame: RunExecutionFrame,
     stepId: string,
     signal: AbortSignal,
     loopHint?: string,
     memoryMessage?: AgentMessage,
   ): AsyncGenerator<AgentEvent, ModelResponse> {
+    const context = frame.context;
     const span = this.dependencies.observability.startSpan({
       name: 'model.reasoning', kind: 'llm', runId: context.runId, stepId,
       attributes: { stage: context.stage, iteration: context.budget.iteration },
@@ -1173,8 +1271,13 @@ export class AgentHarness implements DiagnosisAgent {
         blocks: [{ type: 'text' as const, text: loopHint }],
       });
     if (memoryMessage !== undefined) messages.push(memoryMessage);
-    const stream = this.dependencies.model.stream(messages, this.dependencies.toolkit.list(), {
-      signal,
+    const targetOperations = frame.targetRuntime?.lease.operations;
+    const operationPermit: TargetOperationPermit | undefined = targetOperations === undefined
+      ? undefined
+      : await targetOperations.authorize({ operation: 'model', capability: 'model', signal });
+    const operationSignal = operationPermit === undefined ? signal : AbortSignal.any([signal, operationPermit.signal]);
+    const stream = this.modelFor(frame).stream(messages, this.toolkitFor(frame).list(), {
+      signal: operationSignal,
       runId: context.runId,
       stepId,
       ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
@@ -1182,24 +1285,52 @@ export class AgentHarness implements DiagnosisAgent {
       ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       deadline,
       ...(context.governance?.loop.level === 'hard' ? { toolChoice: 'none' as const } : {}),
+      ...(targetOperations === undefined ? {} : { targetOperations }),
     });
     let completed = false;
     try {
       while (true) {
         const item = await stream.next();
         if (item.done) {
+          if (operationPermit !== undefined) await targetOperations!.validate(operationPermit, signal);
           completed = true;
           span.end({ toolCallCount: item.value.toolCalls.length + (item.value.rawToolCalls?.length ?? 0), usage: item.value.usage });
           return item.value;
         }
+        if (operationPermit !== undefined) await targetOperations!.validate(operationPermit, signal);
         if (item.value.type === 'text_delta') yield* this.publishStream('TEXT_DELTA', context, { delta: item.value.delta }, stepId);
       }
     } catch (error) {
+      if (operationPermit !== undefined) {
+        try {
+          await targetOperations!.validate(operationPermit, signal);
+        } catch (policyError) {
+          span.fail(policyError);
+          throw policyError;
+        }
+      }
       span.fail(error);
       throw error;
     } finally {
       if (!completed) await stream.return(undefined as unknown as ModelResponse).catch(() => undefined);
     }
+  }
+
+  private toolkitFor(frame: RunExecutionFrame): Toolkit {
+    return frame.targetRuntime?.toolkit ?? this.dependencies.toolkit;
+  }
+
+  private admissionFor(frame: RunExecutionFrame): ToolAdmission {
+    return frame.targetRuntime?.admission ?? this.dependencies.admission;
+  }
+
+  private modelFor(frame: RunExecutionFrame): ChatModel {
+    return frame.targetRuntime?.lease.model ?? this.dependencies.model;
+  }
+
+  private toolExecutionScope(frame: RunExecutionFrame): ToolBatchExecutionScope | undefined {
+    if (frame.targetRuntime === undefined) return undefined;
+    return { toolkit: frame.targetRuntime.toolkit, targetOperations: frame.targetRuntime.lease.operations };
   }
 
   private createContext(options: ReplyOptions): AgentContext {
@@ -1305,7 +1436,7 @@ export class AgentHarness implements DiagnosisAgent {
       return undefined;
     }
 
-    const operation = this.memoryOperation(frame.context, signal, nowDate, frame.loopHint);
+    const operation = this.memoryOperation(frame, signal, nowDate, frame.loopHint);
     const scopeKey = memoryScopeKey(control.scope);
     if (memoryScopeKey(previous.scope) !== scopeKey) {
       frame.context.memory = failClosed('MEMORY_SCOPE_INVALID');
@@ -1371,12 +1502,13 @@ export class AgentHarness implements DiagnosisAgent {
     }
   }
 
-  private memoryOperation(context: AgentContext, signal: AbortSignal, now: Date, loopHint?: string): MemoryOperation {
+  private memoryOperation(frame: RunExecutionFrame, signal: AbortSignal, now: Date, loopHint?: string): MemoryOperation {
+    const context = frame.context;
     const configured = this.dependencies.memory;
     const deadlineMs = Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
     let baseBytes: number;
     try {
-      const tools = this.dependencies.toolkit.list().map((tool) => ({
+      const tools = this.toolkitFor(frame).list().map((tool) => ({
         name: tool.name,
         description: tool.description,
         parameters: toolInputJsonSchema(tool),
@@ -1456,8 +1588,9 @@ export class AgentHarness implements DiagnosisAgent {
     };
   }
 
-  private nextStage(calls: ToolCall[]): AgentContext['stage'] {
-    return calls.some((call) => this.dependencies.toolkit.get(call.name)?.kind === 'action')
+  private nextStage(frame: RunExecutionFrame, calls: ToolCall[]): AgentContext['stage'] {
+    const toolkit = this.toolkitFor(frame);
+    return calls.some((call) => toolkit.get(call.name)?.kind === 'action')
       ? 'verification'
       : 'hypothesis';
   }
@@ -1826,12 +1959,59 @@ function validateTrustedTargetBinding(
   profileId: string,
 ): TrustedTargetBinding {
   const binding = parseTargetRunBindingRecord(value.binding);
-  const snapshot = parseResolvedTargetSnapshot(value.snapshot);
+  const snapshot = parseExecutableTargetSnapshot(value.snapshot);
   if (binding.runId !== runId || binding.targetId !== snapshot.targetId
     || binding.snapshotDigest !== snapshot.digest || profileId !== snapshot.profile.profileId) {
     throw new TargetConfigurationError('TARGET_BINDING_INVALID');
   }
-  return { binding, snapshot };
+  const startClaim = value.startClaim;
+  if (startClaim !== undefined && (binding.requestId === undefined || binding.requestDigest === undefined
+    || startClaim.requestId !== binding.requestId || startClaim.runId !== binding.runId
+    || startClaim.targetId !== binding.targetId || startClaim.requestDigest !== binding.requestDigest
+    || startClaim.ownerId.length === 0 || !Number.isSafeInteger(startClaim.epoch) || startClaim.epoch < 1
+    || !Number.isFinite(Date.parse(startClaim.leaseUntil)))) {
+    throw new TargetConfigurationError('TARGET_START_STATE_UNKNOWN');
+  }
+  return { binding, snapshot, ...(startClaim === undefined ? {} : { startClaim }) };
+}
+
+function createTargetExecutionScope(
+  lease: TargetRunRuntimeLease,
+  sourceScopeId?: string,
+  hostTools?: readonly Tool[],
+): NonNullable<RunExecutionFrame['targetRuntime']> {
+  const tools = sourceScopeId === undefined ? lease.tools : validateChildSourceTools(hostTools ?? [], sourceScopeId);
+  const toolkit = new Toolkit();
+  for (const tool of tools) toolkit.register(tool);
+  toolkit.freeze();
+  return { lease, toolkit, admission: new ToolAdmission(toolkit) };
+}
+
+function validateChildSourceTools(
+  tools: readonly Tool[],
+  sourceScopeId: string,
+): readonly Tool[] {
+  if (!isTargetSourceScopeId(sourceScopeId)) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+  let sourceToolCount = 0;
+  let reportToolCount = 0;
+  for (const tool of tools) {
+    if (tool.call === undefined || tool.kind === 'action') throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+    if (tool.name === 'source_report' && tool.kind === 'utility' && tool.source === 'builtin'
+      && tool.targetSourceId === undefined) {
+      reportToolCount += 1;
+      continue;
+    }
+    if (tool.kind !== 'evidence' || tool.source !== 'mcp' || tool.targetSourceId !== sourceScopeId) {
+      throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+    }
+    sourceToolCount += 1;
+  }
+  if (sourceToolCount === 0 || reportToolCount !== 1) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+  return Object.freeze([...tools]);
+}
+
+function isTargetSourceScopeId(value: string): boolean {
+  return value.length > 0 && value.length <= 256 && /^[\p{L}\p{N}][\p{L}\p{N}._:/-]*$/u.test(value);
 }
 
 /** Only current user text may form the lexical query; tool output and prompts stay out. */

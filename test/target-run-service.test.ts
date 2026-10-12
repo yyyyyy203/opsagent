@@ -1,12 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatModel, Clock } from '../src/contracts/index.js';
+import type { DiagnosisAgent } from '../src/agent/types.js';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { RunExecutionCoordinator } from '../src/application/run-execution-coordinator.js';
 import { TargetRunService } from '../src/application/target-run-service.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
 import { multiProjectConnectionRegistry, multiProjectProfiles, multiProjectTargetCatalog } from '../src/profiles/target-samples.js';
+import { WINDOW_FAILURE_RATE_INSTALLATION } from '../src/profiles/scenarios/window-failure-rate-v1.js';
+import { createTargetIdentityTestPorts } from './helpers/target-identity-test-ports.js';
 import { StaticProfileResolver } from '../src/profiles/profile-resolver.js';
+import type { ResolvedTargetSnapshotV2, TargetRecoveryGate, TargetRunBindingRecord,
+  TargetRunRuntimeLease } from '../src/contracts/target.js';
+import { TargetConfigurationError } from '../src/contracts/target.js';
 
 const now = '2026-10-11T10:00:00.000Z';
 const clock: Clock = { now: () => new Date(now) };
@@ -18,13 +24,59 @@ afterEach(async () => {
 
 async function createResolver() {
   return createStaticTargetResolver({
+    ...createTargetIdentityTestPorts(),
     catalog: multiProjectTargetCatalog,
     connections: multiProjectConnectionRegistry,
     profileResolver: new StaticProfileResolver(multiProjectProfiles),
-    installedScenarios: [{ id: 'window_failure_rate.v1', version: '1.0.0' }],
+    installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
     installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
     validationTime: now,
   });
+}
+
+function configureTestTargetGate(
+  runtime: Awaited<ReturnType<typeof createAgentRuntime>>,
+  model: ChatModel,
+): void {
+  const makeLease = (binding: TargetRunBindingRecord, snapshot: ResolvedTargetSnapshotV2): TargetRunRuntimeLease => ({
+    model,
+    tools: [],
+    operations: {
+      authorize: async input => ({
+        bindingId: binding.bindingId,
+        runId: binding.runId,
+        rootRunId: binding.rootRunId,
+        snapshotDigest: snapshot.digest,
+        operation: input.operation,
+        capability: input.capability,
+        policyEpoch: 1,
+        signal: input.signal,
+      }),
+      validate: async permit => {
+        if (permit.bindingId !== binding.bindingId || permit.snapshotDigest !== snapshot.digest
+          || permit.policyEpoch !== 1 || permit.signal.aborted) {
+          throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+        }
+      },
+    },
+    release: () => undefined,
+  });
+  const gate: TargetRecoveryGate = {
+    acquireForStart: async input => makeLease(input.binding, input.snapshot),
+    authorizeResume: async () => undefined,
+    acquireForResume: async input => {
+      const binding = await runtime.durableState?.targetBindings.getBinding(input.runId);
+      const snapshot = binding === null || binding === undefined
+        ? null
+        : await runtime.durableState?.targetBindings.getSnapshot(binding.bindingId) ?? null;
+      if (binding === null || binding === undefined || binding.bindingId !== input.targetBindingId
+        || snapshot === null || snapshot.schemaVersion !== 2) {
+        throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      }
+      return makeLease(binding, snapshot);
+    },
+  };
+  runtime.configureTargetRecoveryGate(gate);
 }
 
 describe('TargetRunService', () => {
@@ -48,10 +100,13 @@ describe('TargetRunService', () => {
       },
     };
     const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock });
+    configureTestTargetGate(runtime, model);
     runtimeRef.current = runtime;
     runtimes.push(runtime);
     if (runtime.durableState === undefined || runtime.queries === undefined) throw new Error('Durable query ports are unavailable.');
-    const execution = new RunExecutionCoordinator(runtime.agent, runtime.checkpoints);
+    const execution = new RunExecutionCoordinator(runtime.agent, runtime.checkpoints, {
+      ...(runtime.durableState.targetStarts === undefined ? {} : { targetStarts: runtime.durableState.targetStarts }), clock,
+    });
     const baseResolver = await createResolver();
     let resolveCalls = 0;
     let resolverUnavailable = false;
@@ -107,9 +162,27 @@ describe('TargetRunService', () => {
     const runtime = createAgentRuntime({
       model: new ScriptedModel([{ text: 'ok', toolCalls: [] }]), workspaceRoots: [], clock,
     });
+    const targetModel = new ScriptedModel([{ text: 'ok', toolCalls: [] }]);
+    // Target model capabilities are isolated from the runtime-global model.
+    runtime.configureTargetRecoveryGate({
+      acquireForStart: async input => ({
+        model: targetModel,
+        tools: [],
+        operations: { authorize: async request => ({
+          bindingId: input.binding.bindingId, runId: input.binding.runId, rootRunId: input.binding.rootRunId,
+          snapshotDigest: input.snapshot.digest, operation: request.operation, capability: request.capability,
+          policyEpoch: 1, signal: request.signal,
+        }), validate: async permit => { if (permit.policyEpoch !== 1) throw new TargetConfigurationError('TARGET_OPERATION_DENIED'); } },
+        release: () => undefined,
+      }),
+      authorizeResume: async () => undefined,
+      acquireForResume: async () => { throw new TargetConfigurationError('TARGET_OPERATION_DENIED'); },
+    });
     runtimes.push(runtime);
     if (runtime.durableState === undefined || runtime.queries === undefined) throw new Error('Durable query ports are unavailable.');
-    const execution = new RunExecutionCoordinator(runtime.agent, runtime.checkpoints);
+    const execution = new RunExecutionCoordinator(runtime.agent, runtime.checkpoints, {
+      ...(runtime.durableState.targetStarts === undefined ? {} : { targetStarts: runtime.durableState.targetStarts }), clock,
+    });
     let startCalls = 0;
     let notifyStartEntered!: () => void;
     const startEntered = new Promise<void>(resolve => { notifyStartEntered = resolve; });
@@ -140,6 +213,150 @@ describe('TargetRunService', () => {
     expect(startCalls).toBe(1);
     expect(await runtime.durableState.targetBindings.listByTarget({ targetId: input.targetId, limit: 10 }))
       .toMatchObject({ items: [{ runId: results[0]?.runId }] });
+    await execution.close();
+  });
+
+  it('treats a lost RUN_STARTED acknowledgement as the original accepted Run without invoking the model', async () => {
+    let modelCalls = 0;
+    const model: ChatModel = {
+      async *stream() {
+        modelCalls += 1;
+        yield { type: 'text_delta', delta: 'unexpected' };
+        return { text: 'unexpected', toolCalls: [] };
+      },
+    };
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock });
+    configureTestTargetGate(runtime, model);
+    runtimes.push(runtime);
+    if (runtime.durableState?.targetStarts === undefined || runtime.queries === undefined) {
+      throw new Error('Durable Target start ports are unavailable.');
+    }
+    let streamCalls = 0;
+    const agent: DiagnosisAgent = {
+      reply: options => runtime.agent.reply(options),
+      async *replyStream(options) {
+        streamCalls += 1;
+        const stream = runtime.agent.replyStream(options);
+        try {
+          const first = await stream.next();
+          if (first.done) return first.value;
+          if (first.value.type !== 'RUN_STARTED') throw new Error('unexpected first event');
+          throw new Error('simulated acknowledgement loss after durable start');
+        } finally {
+          await stream.return(undefined as never).catch(() => undefined);
+        }
+      },
+      resumeStream: (runId, signal, toolCallBudget, networkAttemptBudget) =>
+        runtime.agent.resumeStream(runId, signal, toolCallBudget, networkAttemptBudget),
+    };
+    const execution = new RunExecutionCoordinator(agent, runtime.checkpoints, {
+      targetStarts: runtime.durableState.targetStarts, clock,
+    });
+    const service = new TargetRunService({ resolver: await createResolver(),
+      bindings: runtime.durableState.targetBindings, queries: runtime.queries, clock,
+      start: { startAccepted: options => execution.startAccepted(options) } });
+
+    const request = { targetId: 'market-a-sim', requestId: 'lost-start-ack', message: 'inspect failures' };
+    const first = await service.start(request);
+    expect(first).toMatchObject({ status: 'accepted' });
+    expect(await service.start(request)).toEqual({ ...first, status: 'reused' });
+    expect(streamCalls).toBe(1);
+    expect(modelCalls).toBe(0);
+    expect(await runtime.durableState.targetBindings.getBinding(first.runId)).toMatchObject({ runId: first.runId });
+    await execution.close();
+  });
+
+  it('retries a confirmed-absent start with the same reserved Run ID', async () => {
+    let modelCalls = 0;
+    const model: ChatModel = {
+      async *stream() {
+        modelCalls += 1;
+        yield { type: 'text_delta', delta: 'ok' };
+        return { text: 'ok', toolCalls: [] };
+      },
+    };
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock });
+    configureTestTargetGate(runtime, model);
+    runtimes.push(runtime);
+    if (runtime.durableState?.targetStarts === undefined || runtime.queries === undefined) {
+      throw new Error('Durable Target start ports are unavailable.');
+    }
+    let streamCalls = 0;
+    const agent: DiagnosisAgent = {
+      reply: options => runtime.agent.reply(options),
+      async *replyStream(options) {
+        streamCalls += 1;
+        if (streamCalls === 1) throw new Error('transient failure before durable start');
+        return yield* runtime.agent.replyStream(options);
+      },
+      resumeStream: (runId, signal, toolCallBudget, networkAttemptBudget) =>
+        runtime.agent.resumeStream(runId, signal, toolCallBudget, networkAttemptBudget),
+    };
+    const execution = new RunExecutionCoordinator(agent, runtime.checkpoints, {
+      targetStarts: runtime.durableState.targetStarts, clock,
+    });
+    const service = new TargetRunService({ resolver: await createResolver(),
+      bindings: runtime.durableState.targetBindings, queries: runtime.queries, clock,
+      start: { startAccepted: options => execution.startAccepted(options) } });
+    const request = { targetId: 'market-a-sim', requestId: 'confirmed-absent-retry', message: 'inspect failures' };
+
+    await expect(service.start(request)).rejects.toMatchObject({ code: 'RUN_CONFLICT' });
+    const reserved = await runtime.durableState.targetBindings.getRequest(request.requestId);
+    if (reserved === null) throw new Error('Expected the original request reservation to remain.');
+    expect(await runtime.durableState.targetBindings.getBinding(reserved.runId)).toBeNull();
+    const accepted = await service.start(request);
+    expect(accepted).toEqual({ runId: reserved.runId, status: 'reused' });
+    expect(streamCalls).toBe(2);
+    await execution.close();
+    expect(modelCalls).toBe(1);
+  });
+
+  it('keeps an unknown initial commit fenced and never substitutes a new Run ID', async () => {
+    let modelCalls = 0;
+    const model: ChatModel = {
+      async *stream() {
+        modelCalls += 1;
+        yield { type: 'text_delta', delta: 'unexpected' };
+        return { text: 'unexpected', toolCalls: [] };
+      },
+    };
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock });
+    configureTestTargetGate(runtime, model);
+    runtimes.push(runtime);
+    if (runtime.durableState?.targetStarts === undefined || runtime.queries === undefined) {
+      throw new Error('Durable Target start ports are unavailable.');
+    }
+    let streamCalls = 0;
+    const agent: DiagnosisAgent = {
+      reply: options => runtime.agent.reply(options),
+      async *replyStream() {
+        streamCalls += 1;
+        throw new Error('simulated pre-transition failure with unavailable reconciliation');
+      },
+      resumeStream: (runId, signal, toolCallBudget, networkAttemptBudget) =>
+        runtime.agent.resumeStream(runId, signal, toolCallBudget, networkAttemptBudget),
+    };
+    const underlyingStarts = runtime.durableState.targetStarts;
+    const starts = {
+      claimStart: (input: Parameters<typeof underlyingStarts.claimStart>[0]) => underlyingStarts.claimStart(input),
+      releaseStartClaim: () => Promise.resolve(false),
+      reconcileStart: () => Promise.resolve({ status: 'unknown' as const }),
+    };
+    const checkpointLoad = vi.fn(async () => { throw new Error('checkpoint read unavailable'); });
+    const execution = new RunExecutionCoordinator(agent, { load: checkpointLoad }, { targetStarts: starts, clock });
+    const service = new TargetRunService({ resolver: await createResolver(),
+      bindings: runtime.durableState.targetBindings, queries: runtime.queries, clock,
+      start: { startAccepted: options => execution.startAccepted(options) } });
+
+    const request = { targetId: 'market-a-sim', requestId: 'unknown-start', message: 'inspect failures' };
+    await expect(service.start(request)).rejects.toMatchObject({ code: 'RUN_START_STATE_UNKNOWN' });
+    const original = await runtime.durableState.targetBindings.getRequest(request.requestId);
+    expect(original).not.toBeNull();
+    await expect(service.start(request)).rejects.toMatchObject({ code: 'RUN_CONFLICT' });
+    expect(await runtime.durableState.targetBindings.getRequest(request.requestId)).toEqual(original);
+    expect(streamCalls).toBe(0);
+    expect(checkpointLoad).toHaveBeenCalledTimes(1);
+    expect(modelCalls).toBe(0);
     await execution.close();
   });
 });

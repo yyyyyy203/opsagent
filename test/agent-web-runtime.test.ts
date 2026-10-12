@@ -8,6 +8,7 @@ import { stableSourceChildRunId } from '../src/bootstrap/source-subagent-identit
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
 import { multiProjectConnectionRegistry, multiProjectProfiles, multiProjectTargetCatalog } from '../src/profiles/target-samples.js';
+import { WINDOW_FAILURE_RATE_INSTALLATION } from '../src/profiles/scenarios/window-failure-rate-v1.js';
 import { StaticProfileResolver } from '../src/profiles/profile-resolver.js';
 import { RecordingObservability } from './fixtures/recording-observability.js';
 
@@ -124,21 +125,28 @@ describe('local Agent web runtime', () => {
   it('mounts the Target catalog through host bootstrap but keeps Target starts disabled without a scope-aware starter', async () => {
     const root = await mkdtemp(join(tmpdir(), 'opsangent-web-targets-'));
     roots.push(root);
-    const resolver = await createStaticTargetResolver({
-      catalog: multiProjectTargetCatalog,
-      connections: multiProjectConnectionRegistry,
-      profileResolver: new StaticProfileResolver(multiProjectProfiles),
-      installedScenarios: [{ id: 'window_failure_rate.v1', version: '1.0.0' }],
-      installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
-      validationTime: '2026-10-11T10:00:00.000Z',
-    });
+    let identityPortsSeen = false;
     const runtime = await startFetchableRuntime(() => startAgentWebRuntime({
       dataDirectory: root, workspaceRoots: [root], model: new ScriptedModel([]), port: 0,
-      targetRuntime: { resolver },
+      targetRuntime: {
+        createResolver: ports => {
+          identityPortsSeen = ports.identityRegistry !== undefined && ports.knowledgePolicies !== undefined;
+          return createStaticTargetResolver({
+            ...ports,
+            catalog: multiProjectTargetCatalog,
+            connections: multiProjectConnectionRegistry,
+            profileResolver: new StaticProfileResolver(multiProjectProfiles),
+            installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
+            installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+            validationTime: '2026-10-11T10:00:00.000Z',
+          });
+        },
+      },
     }));
     try {
       const catalogResponse = await fetch(`${runtime.url}/targets`);
       expect(catalogResponse.status).toBe(200);
+      expect(identityPortsSeen).toBe(true);
       const catalog = await catalogResponse.json() as Array<Record<string, unknown>>;
       expect(catalog).toEqual(expect.arrayContaining([
         expect.objectContaining({ targetId: 'market-a-sim', canStart: false, readOnly: true }),

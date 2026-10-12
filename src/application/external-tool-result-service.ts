@@ -18,7 +18,10 @@ import type { EventFactory } from '../event/event-factory.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
 import type { HookExecutor } from '../hooks/hook-executor.js';
 import type { Toolkit } from '../tool/toolkit.js';
-import { toolInputDigest } from '../tool/schema.js';
+import { toolDefinitionDigest, toolInputDigest } from '../tool/schema.js';
+import type { TargetRecoveryGate } from '../contracts/target.js';
+import { TargetConfigurationError } from '../contracts/target.js';
+import type { Tool } from '../contracts/tool.js';
 
 export interface ExternalToolResultSubmission {
   runId: string;
@@ -38,6 +41,8 @@ export class ExternalToolResultService {
     private readonly v2Events?: EventPublisherV2Dependencies,
     private readonly durableState?: DurableRunState,
     private readonly hookRegistry?: HookRegistryLike,
+    private readonly targetRecoveryGate?: TargetRecoveryGate,
+    private readonly targetSourceScopeId?: string,
   ) {}
 
   public async submit(submission: ExternalToolResultSubmission): Promise<void> {
@@ -57,125 +62,137 @@ export class ExternalToolResultService {
     }
     const pending = this.pendingCall(context, submission.toolCallId);
 
-    const now = this.clock.now().toISOString();
-    let replacement: ToolExecutionResult = {
-      toolCallId: pending.id,
-      toolName: pending.name,
-      status: submission.response.isError === true ? 'failed' : 'success',
-      response: submission.response,
-      startedAt: interrupt.createdAt,
-      finishedAt: now,
-    };
-    const tool = this.toolkit.get(pending.name);
-    if (tool === undefined) throw new Error(`Tool not found while ingesting external result: ${pending.name}`);
-    const expectedInputDigest = typeof interrupt.payload.inputDigest === 'string' ? interrupt.payload.inputDigest : undefined;
-    if (expectedInputDigest !== undefined && expectedInputDigest !== toolInputDigest(tool, pending)) {
-      throw new Error(`External result input digest does not match pending tool call: ${pending.id}`);
-    }
-    const governanceDecision = context.pendingToolBatch?.governance?.decisions.find((decision) => decision.toolCallId === pending.id);
-    if (governanceDecision !== undefined && governanceDecision.inputDigest !== toolInputDigest(tool, pending)) {
-      throw new Error(`External result governance digest does not match pending tool call: ${pending.id}`);
-    }
-    let execution: ToolExecutionRecord | undefined;
+    const resolvedTool = await this.currentTool(context, pending);
     try {
-      execution = await this.externalExecution(context, pending, tool.kind, stored.revision);
-    } catch (error) {
-      throw durableStorageError(error);
-    }
-    const risk = await this.guard.inspect({ runId: context.runId, tool, toolCall: pending });
-    const hookResult = await this.hooks.runAfter({
-      context,
-      stepId: `external-${pending.id}`,
-      toolCall: pending,
-      tool,
-      input: pending.input,
-      risk: isResolvedRisk(interrupt.payload.risk) ? interrupt.payload.risk : risk,
-      result: replacement,
-    });
-    if (hookResult.type === 'abort') {
-      replacement = { ...replacement, status: 'failed', error: hookResult.error };
-    }
-    for (const evidenceId of submission.response.evidenceIds ?? []) {
-      if (!context.evidenceIds.includes(evidenceId)) context.evidenceIds.push(evidenceId);
-    }
-    if (tool.kind === 'action'
-      && interrupt.payload.mode === 'execute'
-      && replacement.status === 'success') {
-      context.executedActions.push(replacement);
-    }
-    for (const message of context.messages) {
-      message.blocks = message.blocks.map((block) => (
-        block.type === 'tool_result' && block.result.toolCallId === pending.id
-          ? { type: 'tool_result' as const, result: replacement }
-          : block
-      ));
-    }
-    context.pendingToolCalls = [];
-    delete context.pendingInterrupt;
-    if (context.pendingToolBatch !== undefined) context.pendingToolBatch.state = 'executing';
-    context.status = 'running';
-    context.stage = pending.name === 'bash' ? 'verification' : context.stage;
-    context.contextVersion += 1;
-    this.storeTerminalPendingResult(context, replacement);
-    const pendingEvents: PendingAgentEventV2[] = this.v2Events === undefined ? [] : [
-      this.v2Events.factory.create('EXTERNAL_EXECUTION_RESOLVED', {
-        runId: context.runId,
-        ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
-        ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
-        ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
-        correlationId: this.v2Events.correlationId(context.runId),
-        visibility: 'audit',
-        durability: 'durable',
+      const tool = resolvedTool.tool;
+      const now = this.clock.now().toISOString();
+      let replacement: ToolExecutionResult = {
         toolCallId: pending.id,
-      }, {
-        requestId: `external:${context.runId}:${pending.id}`,
-        resultBlock: submission.response.blocks[0] ?? { type: 'text', text: '' },
-        externalExecutionType: 'host_submission',
-      }),
-      this.v2Events.factory.create('TOOL_RESULT', {
-        runId: context.runId,
-        ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
-        ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
-        ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
-        correlationId: this.v2Events.correlationId(context.runId),
-        visibility: 'audit',
-        durability: 'durable',
-        toolCallId: pending.id,
-      }, { result: replacement, durationMs: 0, evidenceIds: replacement.response?.evidenceIds ?? [] }),
-    ];
-    if (this.durableState === undefined || execution === undefined) {
-      if (tool.kind === 'action'
-        && interrupt.payload.mode === 'execute'
-        && replacement.status === 'success') {
-        await this.checkpoints.recordExecuted(pending, replacement);
+        toolName: pending.name,
+        status: submission.response.isError === true ? 'failed' : 'success',
+        response: submission.response,
+        startedAt: interrupt.createdAt,
+        finishedAt: now,
+      };
+      const expectedDefinitionDigest = interrupt.payload.toolDefinitionDigest;
+      if (resolvedTool.targetBound && typeof expectedDefinitionDigest !== 'string') {
+        throw new Error(`External Tool definition digest is missing for Target-bound call: ${pending.id}`);
       }
-      await this.checkpoints.save(context);
-    } else {
-      if (pendingEvents.length > 0 && this.v2Events?.dispatcher === undefined) {
-        throw new Error(`Durable V2 event dispatcher is not configured: ${context.runId}`);
+      if (typeof expectedDefinitionDigest === 'string'
+        && expectedDefinitionDigest !== toolDefinitionDigest(tool)) {
+        throw new Error(`External Tool definition digest does not match pending tool call: ${pending.id}`);
       }
+      const expectedInputDigest = typeof interrupt.payload.inputDigest === 'string' ? interrupt.payload.inputDigest : undefined;
+      if (expectedInputDigest !== undefined && expectedInputDigest !== toolInputDigest(tool, pending)) {
+        throw new Error(`External result input digest does not match pending tool call: ${pending.id}`);
+      }
+      const governanceDecision = context.pendingToolBatch?.governance?.decisions.find((decision) => decision.toolCallId === pending.id);
+      if (governanceDecision !== undefined && governanceDecision.inputDigest !== toolInputDigest(tool, pending)) {
+        throw new Error(`External result governance digest does not match pending tool call: ${pending.id}`);
+      }
+      let execution: ToolExecutionRecord | undefined;
       try {
-        await this.durableState.transitions.commit({
-          expectedRevision: this.requireRevision(stored.revision, context.runId),
-          context,
-          execution: { kind: 'completed', record: execution, result: replacement },
-          outboxEvents: pendingEvents,
-        });
-        if (pendingEvents.length > 0) await this.v2Events!.dispatcher!.drainRun(context.runId);
+        execution = await this.externalExecution(context, pending, tool.kind, stored.revision);
       } catch (error) {
         throw durableStorageError(error);
       }
-    }
-    if (this.v2Events === undefined) {
-      await this.events.publish(this.eventFactory.create(
-        'TOOL_RESULT',
-        context.runId,
-        replacement,
-        `external-${pending.id}`,
-      ));
-    }
-    if (this.v2Events !== undefined && this.durableState === undefined) {
-      for (const event of pendingEvents) await this.v2Events.publisher.publish(event);
+      const risk = await this.guard.inspect({ runId: context.runId, tool, toolCall: pending });
+      const hookResult = await this.hooks.runAfter({
+        context,
+        stepId: `external-${pending.id}`,
+        toolCall: pending,
+        tool,
+        input: pending.input,
+        risk: isResolvedRisk(interrupt.payload.risk) ? interrupt.payload.risk : risk,
+        result: replacement,
+      });
+      if (hookResult.type === 'abort') {
+        replacement = { ...replacement, status: 'failed', error: hookResult.error };
+      }
+      for (const evidenceId of submission.response.evidenceIds ?? []) {
+        if (!context.evidenceIds.includes(evidenceId)) context.evidenceIds.push(evidenceId);
+      }
+      if (tool.kind === 'action'
+        && interrupt.payload.mode === 'execute'
+        && replacement.status === 'success') {
+        context.executedActions.push(replacement);
+      }
+      for (const message of context.messages) {
+        message.blocks = message.blocks.map((block) => (
+          block.type === 'tool_result' && block.result.toolCallId === pending.id
+            ? { type: 'tool_result' as const, result: replacement }
+            : block
+        ));
+      }
+      context.pendingToolCalls = [];
+      delete context.pendingInterrupt;
+      if (context.pendingToolBatch !== undefined) context.pendingToolBatch.state = 'executing';
+      context.status = 'running';
+      context.stage = pending.name === 'bash' ? 'verification' : context.stage;
+      context.contextVersion += 1;
+      this.storeTerminalPendingResult(context, replacement);
+      const pendingEvents: PendingAgentEventV2[] = this.v2Events === undefined ? [] : [
+        this.v2Events.factory.create('EXTERNAL_EXECUTION_RESOLVED', {
+          runId: context.runId,
+          ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+          ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+          ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
+          correlationId: this.v2Events.correlationId(context.runId),
+          visibility: 'audit',
+          durability: 'durable',
+          toolCallId: pending.id,
+        }, {
+          requestId: `external:${context.runId}:${pending.id}`,
+          resultBlock: submission.response.blocks[0] ?? { type: 'text', text: '' },
+          externalExecutionType: 'host_submission',
+        }),
+        this.v2Events.factory.create('TOOL_RESULT', {
+          runId: context.runId,
+          ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+          ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+          ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
+          correlationId: this.v2Events.correlationId(context.runId),
+          visibility: 'audit',
+          durability: 'durable',
+          toolCallId: pending.id,
+        }, { result: replacement, durationMs: 0, evidenceIds: replacement.response?.evidenceIds ?? [] }),
+      ];
+      if (this.durableState === undefined || execution === undefined) {
+        if (tool.kind === 'action'
+          && interrupt.payload.mode === 'execute'
+          && replacement.status === 'success') {
+          await this.checkpoints.recordExecuted(pending, replacement);
+        }
+        await this.checkpoints.save(context);
+      } else {
+        if (pendingEvents.length > 0 && this.v2Events?.dispatcher === undefined) {
+          throw new Error(`Durable V2 event dispatcher is not configured: ${context.runId}`);
+        }
+        try {
+          await this.durableState.transitions.commit({
+            expectedRevision: this.requireRevision(stored.revision, context.runId),
+            context,
+            execution: { kind: 'completed', record: execution, result: replacement },
+            outboxEvents: pendingEvents,
+          });
+          if (pendingEvents.length > 0) await this.v2Events!.dispatcher!.drainRun(context.runId);
+        } catch (error) {
+          throw durableStorageError(error);
+        }
+      }
+      if (this.v2Events === undefined) {
+        await this.events.publish(this.eventFactory.create(
+          'TOOL_RESULT',
+          context.runId,
+          replacement,
+          `external-${pending.id}`,
+        ));
+      }
+      if (this.v2Events !== undefined && this.durableState === undefined) {
+        for (const event of pendingEvents) await this.v2Events.publisher.publish(event);
+      }
+    } finally {
+      await resolvedTool.release();
     }
   }
 
@@ -186,6 +203,53 @@ export class ExternalToolResultService {
     }
     const checkpoint = await this.durableState.checkpoints.load(runId);
     return checkpoint === null ? null : { context: checkpoint.context, revision: checkpoint.revision };
+  }
+
+  private async currentTool(context: AgentContext, pending: ToolCall): Promise<{
+    tool: Tool;
+    targetBound: boolean;
+    release: () => Promise<void>;
+  }> {
+    const binding = this.durableState === undefined
+      ? null
+      : await this.durableState.targetBindings.getBinding(context.runId);
+    const targetBound = context.targetBindingId !== undefined || binding !== null;
+    if (!targetBound) {
+      const tool = this.toolkit.get(pending.name);
+      if (tool === undefined) throw new Error(`Tool not found while ingesting external result: ${pending.name}`);
+      return { tool, targetBound: false, release: async () => {} };
+    }
+    if (this.durableState === undefined || binding === null || binding.runId !== context.runId
+      || context.targetBindingId !== binding.bindingId) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    const snapshot = await this.durableState.targetBindings.getSnapshot(binding.bindingId);
+    if (snapshot === null || snapshot.digest !== binding.snapshotDigest) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    if (this.targetSourceScopeId !== undefined) {
+      throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+    }
+    if (this.targetRecoveryGate === undefined) {
+      throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+    }
+    const lease = await this.targetRecoveryGate.acquireForResume({
+      runId: context.runId,
+      targetBindingId: binding.bindingId,
+      signal: new AbortController().signal,
+    });
+    try {
+      const tool = lease.tools.find(candidate => candidate.name === pending.name);
+      if (tool === undefined) throw new Error(`Target Tool not found while ingesting external result: ${pending.name}`);
+      return {
+        tool,
+        targetBound: true,
+        release: async () => { await lease.release(); },
+      };
+    } catch (error) {
+      await lease.release();
+      throw error;
+    }
   }
 
   private pendingCall(context: AgentContext, toolCallId: string): ToolCall {

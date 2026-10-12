@@ -31,6 +31,23 @@ export function toolInputDigest(tool: Tool, call: ToolCall): string {
   return checkpointChecksum(normalizeToolCall(tool, call).input);
 }
 
+/** Digest the serializable Tool contract used to bind confirmations to an implementation. */
+export function toolDefinitionDigest(tool: Tool): string {
+  return checkpointChecksum({
+    schemaVersion: 1,
+    name: tool.name,
+    kind: tool.kind,
+    source: tool.source ?? null,
+    targetSourceId: tool.targetSourceId ?? null,
+    implementationVersion: tool.implementationVersion ?? null,
+    executionMode: tool.call === undefined ? 'external' : 'internal',
+    inputSchema: toolInputJsonSchema(tool),
+    requireUserConfirm: tool.requireUserConfirm === true,
+    trustedWhenInWorkspace: tool.trustedWhenInWorkspace === true,
+    recoveryPolicy: tool.recoveryPolicy ?? null,
+  });
+}
+
 export function toolInputJsonSchema(tool: Tool): Record<string, unknown> {
   if (isToolInputSchema(tool.inputSchema)) return tool.inputSchema.jsonSchema;
   return zodToJsonSchema(tool.inputSchema, { $refStrategy: 'none' });

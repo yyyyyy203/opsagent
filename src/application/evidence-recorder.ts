@@ -13,7 +13,7 @@ export interface EvidenceCaptureRequest {
 }
 
 export interface EvidenceRecorder {
-  capture(request: EvidenceCaptureRequest): Promise<EvidenceRecord>;
+  capture(request: EvidenceCaptureRequest, options?: { validateBeforeCommit?: () => Promise<void> }): Promise<EvidenceRecord>;
 }
 
 export interface EvidenceRecorderEventChannel {
@@ -38,21 +38,25 @@ export class DefaultEvidenceRecorder implements EvidenceRecorder {
 
   public constructor(private readonly options: DefaultEvidenceRecorderOptions) {}
 
-  public capture(request: EvidenceCaptureRequest): Promise<EvidenceRecord> {
+  public capture(request: EvidenceCaptureRequest, options: { validateBeforeCommit?: () => Promise<void> } = {}): Promise<EvidenceRecord> {
     const previous: Promise<unknown> = this.tails.get(request.record.evidenceId) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => this.captureOne(request));
+    const current = previous.catch(() => undefined).then(() => this.captureOne(request, options));
     this.tails.set(request.record.evidenceId, current);
     return current.finally(() => {
       if (this.tails.get(request.record.evidenceId) === current) this.tails.delete(request.record.evidenceId);
     });
   }
 
-  private async captureOne(request: EvidenceCaptureRequest): Promise<EvidenceRecord> {
+  private async captureOne(
+    request: EvidenceCaptureRequest,
+    options: { validateBeforeCommit?: () => Promise<void> },
+  ): Promise<EvidenceRecord> {
     validateRequest(request);
     if (request.record.toolCallId !== undefined && request.record.toolCallId !== request.toolCallId) {
       throw new Error(`Evidence tool call does not match capture request: ${request.record.evidenceId}`);
     }
     const record: EvidenceRecord = { ...request.record, toolCallId: request.toolCallId };
+    await options.validateBeforeCommit?.();
     await this.options.evidence.save(record);
     const stored = await this.options.evidence.get(record.evidenceId);
     if (stored === null
@@ -62,6 +66,8 @@ export class DefaultEvidenceRecorder implements EvidenceRecorder {
       throw new Error(`Evidence was not durably readable after capture: ${record.evidenceId}`);
     }
     if (this.options.events === undefined) return stored;
+
+    await options.validateBeforeCommit?.();
 
     const eventId = evidenceEventId(stored.evidenceId);
     const existing = await this.options.events.store.findById(eventId);

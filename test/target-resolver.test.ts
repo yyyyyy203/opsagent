@@ -3,14 +3,17 @@ import type { ImpactPolicy } from '../src/contracts/index.js';
 import { StaticProfileResolver, type ProfileDefinition } from '../src/profiles/profile-resolver.js';
 import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
 import { multiProjectTargetCatalog, multiProjectConnectionRegistry, multiProjectProfiles } from '../src/profiles/target-samples.js';
+import { WINDOW_FAILURE_RATE_INSTALLATION } from '../src/profiles/scenarios/window-failure-rate-v1.js';
+import { createTargetIdentityTestPorts } from './helpers/target-identity-test-ports.js';
 
 const capturedAt = '2026-10-11T10:00:00.000Z';
-const installedScenarios = [{ id: 'window_failure_rate.v1', version: '1.0.0' }];
+const installedScenarios = [WINDOW_FAILURE_RATE_INSTALLATION];
 const installedAdapters = [{ id: 'prometheus-mcp.v1', kind: 'metrics' as const }];
 
 describe('StaticTargetResolver', () => {
   it('resolves each project to a separate immutable snapshot and exact memory scope', async () => {
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog: multiProjectTargetCatalog,
       connections: multiProjectConnectionRegistry,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),
@@ -36,7 +39,7 @@ describe('StaticTargetResolver', () => {
       scenario: { threshold: 0.02, metricMapping: { metricName: 'orders_submit_window_count', outcomeLabel: 'result' } },
       memoryScope: { profileId: 'market-b.lab.settlement', targetFingerprint: 'market-b-lab-dataset-b', datasetId: 'dataset-b-v1' },
     });
-    expect(marketA.digest).toMatch(/^sha256:v1:[a-f0-9]{64}$/u);
+    expect(marketA.digest).toMatch(/^sha256:v2:[a-f0-9]{64}$/u);
     expect(marketA.digest).not.toBe(marketB.digest);
     expect(Object.isFrozen(marketA)).toBe(true);
     expect(Object.isFrozen(marketA.scenario.metricMapping.staticLabels)).toBe(true);
@@ -45,6 +48,7 @@ describe('StaticTargetResolver', () => {
 
   it('keeps endpoint and secret references out of resolved snapshots and catalog DTOs', async () => {
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog: multiProjectTargetCatalog,
       connections: multiProjectConnectionRegistry,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),
@@ -67,9 +71,10 @@ describe('StaticTargetResolver', () => {
   });
 
   it('isolates a Target whose required source is missing while retaining a valid sibling', async () => {
-    const connections = structuredClone(multiProjectConnectionRegistry) as { schemaVersion: 1; connections: Record<string, unknown>[] };
+    const connections = structuredClone(multiProjectConnectionRegistry) as { schemaVersion: 2; connections: Record<string, unknown>[] };
     connections.connections = connections.connections.filter(connection => connection.sourceId !== 'market-a-metrics');
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog: multiProjectTargetCatalog,
       connections,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),
@@ -93,6 +98,7 @@ describe('StaticTargetResolver', () => {
       required: false, allowedServiceIds: ['checkout'],
     }];
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog,
       connections: multiProjectConnectionRegistry,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),
@@ -108,9 +114,10 @@ describe('StaticTargetResolver', () => {
   });
 
   it('rejects a source registry entry with unrecognized private fields only for its referencing Target', async () => {
-    const connections = structuredClone(multiProjectConnectionRegistry) as { schemaVersion: 1; connections: Record<string, unknown>[] };
+    const connections = structuredClone(multiProjectConnectionRegistry) as { schemaVersion: 2; connections: Record<string, unknown>[] };
     connections.connections[0] = { ...connections.connections[0], apiKey: 'never-accepted' };
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog: multiProjectTargetCatalog,
       connections,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),
@@ -126,10 +133,11 @@ describe('StaticTargetResolver', () => {
 
   it('rejects unknown scenario versions and unavailable adapters without enabling that Target', async () => {
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog: multiProjectTargetCatalog,
       connections: multiProjectConnectionRegistry,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),
-      installedScenarios: [{ id: 'window_failure_rate.v1', version: '9.9.9' }],
+      installedScenarios: [{ ...WINDOW_FAILURE_RATE_INSTALLATION, version: '9.9.9' }],
       installedAdapters,
       validationTime: capturedAt,
     });
@@ -141,10 +149,33 @@ describe('StaticTargetResolver', () => {
     ]);
   });
 
+  it('reports original catalog indices when an earlier malformed Target is isolated', async () => {
+    const catalog = structuredClone(multiProjectTargetCatalog) as { schemaVersion: 1; targets: Record<string, unknown>[] };
+    catalog.targets[0] = { ...catalog.targets[0], profileRevision: undefined };
+    catalog.targets[1] = { ...catalog.targets[1], scenario: {
+      ...(catalog.targets[1]?.scenario as Record<string, unknown>), version: '9.9.9',
+    } };
+    const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
+      catalog,
+      connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles),
+      installedScenarios,
+      installedAdapters,
+      validationTime: capturedAt,
+    });
+
+    expect(resolver.rejected).toEqual([
+      { index: 0, targetId: 'market-a-sim', reasonCode: 'TARGET_BINDING_INVALID' },
+      { index: 1, targetId: 'market-b-sim', reasonCode: 'SCENARIO_VERSION_UNSUPPORTED' },
+    ]);
+  });
+
   it('fails closed on a reused fingerprint that points to a different deployment generation', async () => {
     const catalog = structuredClone(multiProjectTargetCatalog) as { schemaVersion: 1; targets: Record<string, unknown>[] };
     catalog.targets[1] = { ...catalog.targets[1], targetFingerprint: 'market-a-lab-dataset-a' };
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog,
       connections: multiProjectConnectionRegistry,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),
@@ -155,7 +186,7 @@ describe('StaticTargetResolver', () => {
 
     expect(resolver.listCatalog()).toEqual([]);
     expect(resolver.rejected).toHaveLength(2);
-    expect(resolver.rejected.every(item => item.reasonCode === 'TARGET_BINDING_INVALID')).toBe(true);
+    expect(resolver.rejected.every(item => item.reasonCode === 'TARGET_IDENTITY_CONFLICT')).toBe(true);
   });
 
   it('registers and resolves the full host-configured 200-Target bound', async () => {
@@ -174,8 +205,9 @@ describe('StaticTargetResolver', () => {
       profiles.push(profileDefinition(profileId));
     }
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog: { schemaVersion: 1, targets },
-      connections: { schemaVersion: 1, connections },
+      connections: { schemaVersion: 2, connections },
       profileResolver: new StaticProfileResolver(profiles),
       installedScenarios,
       installedAdapters,
@@ -191,6 +223,7 @@ describe('StaticTargetResolver', () => {
     const disabled = structuredClone(multiProjectTargetCatalog) as { schemaVersion: 1; targets: Record<string, unknown>[] };
     disabled.targets[0] = { ...disabled.targets[0], enabled: false };
     const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
       catalog: disabled,
       connections: multiProjectConnectionRegistry,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),
@@ -225,7 +258,8 @@ function sampleTarget(input: { targetId: string; projectId: string; projectName:
     displayName: input.projectName,
     description: 'Generated target for capacity acceptance.',
     enabled: true,
-    scenario: { id: 'window_failure_rate.v1', version: '1.0.0', serviceId: 'checkout', serviceName: 'Checkout',
+    scenario: { id: 'window_failure_rate.v1', version: '1.0.0',
+      implementationDigest: WINDOW_FAILURE_RATE_INSTALLATION.implementationDigest, serviceId: 'checkout', serviceName: 'Checkout',
       metricSemantics: 'integer_window_snapshot', metricMapping: { metricName: input.metricName,
         outcomeLabel: 'outcome', successValue: 'success', failureValue: 'failed',
         serviceSelector: { label: 'service', value: 'checkout' }, staticLabels: {} },
@@ -238,7 +272,8 @@ function sampleTarget(input: { targetId: string; projectId: string; projectName:
 
 function sampleConnection(sourceId: string) {
   return { sourceId, version: 'connection/v1', kind: 'metrics', adapterId: 'prometheus-mcp.v1', enabled: true,
-    endpoint: `https://${sourceId}.invalid/mcp`, secretRef: `secret.${sourceId}`, allowedServiceIds: ['checkout'] };
+    endpoint: `https://${sourceId}.invalid/mcp`, secretRef: `secret.${sourceId}`, allowedServiceIds: ['checkout'],
+    dataDomainId: `${sourceId}-domain`, sourceGeneration: 1, permissionScopeDigest: 'c'.repeat(64) };
 }
 
 function profileDefinition(profileId: string): ProfileDefinition {

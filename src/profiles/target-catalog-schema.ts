@@ -61,6 +61,7 @@ const knowledgeReference = z.object({
 const scenario = z.object({
   id: z.literal('window_failure_rate.v1'),
   version: z.string().regex(/^\d+\.\d+\.\d+$/u),
+  implementationDigest: z.string().regex(/^sha256:v1:[a-f0-9]{64}$/u),
   serviceId: identifier,
   serviceName: boundedText(128),
   metricSemantics: z.literal('integer_window_snapshot'),
@@ -149,6 +150,7 @@ export function parseTargetCatalog(
   });
 
   const accepted: TargetCatalogDefinition[] = [];
+  const targetIndices: number[] = [];
   const rejected: TargetCatalogParseResult['rejected'][number][] = [];
   envelope.data.targets.forEach((candidate, index) => {
     const identity = safeCandidateIdentity(candidate);
@@ -164,8 +166,9 @@ export function parseTargetCatalog(
       return;
     }
     accepted.push(parsed.data as TargetCatalogDefinition);
+    targetIndices.push(index);
   });
-  return { targets: accepted, rejected };
+  return { targets: accepted, targetIndices, rejected, presentTargetIds: [...targetIdCounts.keys()].sort() };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -16,7 +16,7 @@ import type { ProjectionCheckpointStoreV2 } from '../../event/v2/projection-runn
 import type { ProjectionFailureSinkV2 } from '../../event/v2/event-publisher.js';
 import type { InspectionQueryService } from '../../contracts/read-model.js';
 import type { MessageCursorCodec, WebMessageQueries } from '../../contracts/web-read-model.js';
-import type { TargetBindingStore } from '../../contracts/target.js';
+import type { TargetBindingStore, TargetIdentityRegistry, TargetKnowledgePolicyStore, TargetStartStore } from '../../contracts/target.js';
 import { SqliteDatabase } from './database.js';
 import { SqliteDurableStateStore } from './durable-state-store.js';
 import { SqliteEventOutboxStore } from './event-outbox-store.js';
@@ -29,6 +29,7 @@ import { SqliteInspectionQueryService } from './inspection-query-service.js';
 import { SqliteWebMessageQuery } from './web-message-query.js';
 import { SqliteDiagnosticMemoryStore } from './diagnostic-memory-store.js';
 import { SqliteMemoryCaptureSource } from './memory-capture-source.js';
+import { SqliteTargetIdentityStore } from './target-identity-store.js';
 
 export interface SqlitePersistenceLimits {
   maxEvidenceRawBytes?: number;
@@ -52,6 +53,9 @@ export interface SqlitePersistenceBundle {
   transitions: DurableTransitionUnitOfWork;
   outbox: DurableEventOutbox;
   targetBindings: TargetBindingStore;
+  targetStarts: TargetStartStore;
+  targetIdentityRegistry: TargetIdentityRegistry;
+  targetKnowledgePolicies: TargetKnowledgePolicyStore;
   evidence: EvidenceStore & EvidenceQueryStore;
   evidenceManifests: EvidenceManifestStore;
   evidenceBlobs?: EvidenceBlobStore;
@@ -68,6 +72,7 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
   try {
     const clock = options.clock ?? systemClock;
     const durable = new SqliteDurableStateStore(database, clock);
+    const targetIdentityStore = new SqliteTargetIdentityStore(database, { clock });
     const outbox = new SqliteEventOutboxStore(database);
     const eventMessages = new SqliteEventMessageStore(database);
     const evidence = new SqliteEvidenceStore(database, {
@@ -97,6 +102,9 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       transitions: durable,
       outbox,
       targetBindings: durable,
+      targetStarts: durable,
+      targetIdentityRegistry: targetIdentityStore,
+      targetKnowledgePolicies: targetIdentityStore,
       evidence,
       evidenceManifests,
       ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),

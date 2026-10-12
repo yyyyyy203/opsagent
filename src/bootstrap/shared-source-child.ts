@@ -4,6 +4,7 @@ import type { SharedRuntimeEventPorts } from '../application/runtime-ports.js';
 import { createInspectionRuntime } from './inspection-runtime.js';
 import type { SourceChildAgentFactory } from '../application/source-subagent-runner.js';
 import type { ModelIdentity } from './model-identity.js';
+import type { TargetRecoveryGate } from '../contracts/target.js';
 
 export interface SharedSourceChildFactoryOptions {
   model: ChatModel;
@@ -12,6 +13,7 @@ export interface SharedSourceChildFactoryOptions {
   evidence: EvidenceStore;
   evidenceRecorder: EvidenceRecorder;
   sharedEvents: SharedRuntimeEventPorts;
+  targetRecoveryGate: TargetRecoveryGate;
   modelIdentity?: ModelIdentity;
   /** Keep child deadlines and event/message identities on the parent runtime clock. */
   clock?: Clock;
@@ -32,6 +34,8 @@ export function createSharedSourceChildAgentFactory(
         ...(options.sharedEvents.durableState === undefined
           ? { checkpoints: options.checkpoints }
           : { durableState: options.sharedEvents.durableState }),
+        targetRecoveryGate: options.targetRecoveryGate,
+        ...(input.targetSourceId === undefined ? {} : { targetSourceScopeId: input.targetSourceId }),
         evidence: options.evidence,
         evidenceRecorder: options.evidenceRecorder,
         eventMessageStore: options.sharedEvents.store,

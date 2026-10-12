@@ -1,5 +1,6 @@
 import type { z } from 'zod';
-import type { AgentError } from './errors.js';
+import type { AgentError, AgentErrorCode } from './errors.js';
+import type { TargetOperationGuard, TargetOperationPermit } from './target.js';
 
 export type ToolKind = 'evidence' | 'action' | 'utility';
 export type ToolSource = 'builtin' | 'mcp' | 'skill' | 'subagent' | 'external';
@@ -55,6 +56,12 @@ export interface ToolCallOptions {
   profileRevision?: string;
   /** Host-owned Target binding scope inherited from the current Run. */
   targetBindingId?: string;
+  /** Run-scoped authorization; transient and never checkpointed. */
+  targetOperations?: TargetOperationGuard;
+  /** Parent logical Tool authorization; low-level retry adapters still authorize every network attempt. */
+  targetOperationPermit?: TargetOperationPermit;
+  /** Host-assigned source binding identity, not a model/tool argument. */
+  targetSourceId?: string;
   signal: AbortSignal;
   mode: 'dry_run' | 'execute';
   deadline?: number;
@@ -64,6 +71,13 @@ export interface ToolCallOptions {
   /** Remaining parent Tool-call budget available to a delegated source Run. */
   remainingToolCalls?: number;
 }
+
+/** Safe, structured source-health notifications that may travel through a Tool stream. */
+export type SourceResilienceEvent =
+  | { type: 'retry_scheduled'; sourceId: string; attempt: number; reasonCode: AgentErrorCode; delayMs: number }
+  | { type: 'circuit_opened'; sourceId: string; failureWindow: { failures: number; windowMs: number }; openUntil: number }
+  | { type: 'circuit_half_opened'; sourceId: string; probePolicy: 'single_probe' | 'limited_probe' }
+  | { type: 'circuit_closed'; sourceId: string; recoveryEvidence: string[] };
 
 export type ToolResponseBlock =
   | { type: 'text'; text: string }
@@ -98,6 +112,10 @@ export interface Tool {
   readonly kind: ToolKind;
   /** Execution origin used by governance and presentation; omitted only for legacy adapters. */
   readonly source?: ToolSource;
+  /** Present for source/subagent Tools built from a Target snapshot. */
+  readonly targetSourceId?: string;
+  /** Host-maintained revision of execution/validation behavior; Target runtime Tools require a non-empty value. */
+  readonly implementationVersion?: string;
   readonly inputSchema: z.ZodObject<z.ZodRawShape> | ToolInputSchema;
   readonly call?: (input: Record<string, unknown>, options: ToolCallOptions) => ToolCallReturn;
   readonly requireUserConfirm?: boolean;

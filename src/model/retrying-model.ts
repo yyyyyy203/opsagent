@@ -1,6 +1,8 @@
 import type { AgentMessage, ChatModel, ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../contracts/index.js';
 import { ModelFailure, type ModelFailureCategory } from './model-failure.js';
 import { NOOP_MODEL_ATTEMPT_OBSERVER, type ModelAttemptObserver } from './model-attempt-observer.js';
+import type { TargetOperationPermit } from '../contracts/target.js';
+import { TargetConfigurationError } from '../contracts/target.js';
 
 export interface RetryingChatModelOptions {
   maxAttempts: number;
@@ -30,8 +32,12 @@ export class RetryingChatModel implements ChatModel {
   ): AsyncGenerator<ModelStreamEvent, ModelResponse> {
     let lastError: ModelFailure | undefined;
     for (let attempt = 1; attempt <= this.options.maxAttempts; attempt += 1) {
+      let permit: TargetOperationPermit | undefined;
       try {
-        return yield* this.runAttempt(this.primary, messages, tools, callOptions, attempt);
+        permit = callOptions.targetOperations === undefined ? undefined : await callOptions.targetOperations.authorize({
+          operation: 'model', capability: 'model', signal: callOptions.signal,
+        });
+        return yield* this.runAttempt(this.primary, messages, tools, callOptions, attempt, permit);
       } catch (error) {
         if (error instanceof ExposedStreamFailure) throw error.originalError;
         const failure = asModelFailure(error);
@@ -41,33 +47,42 @@ export class RetryingChatModel implements ChatModel {
         const delayMs = this.delay(attempt, failure);
         if (delayMs === undefined) break;
         await this.options.observer!.record({ type: 'retry_scheduled', runId: callOptions.runId, stepId: callOptions.stepId, ...identityFields(callOptions), attempt, category: categoryOf(failure), delayMs });
-        await this.options.sleep!(delayMs, callOptions.signal);
+        const retrySignal = permit === undefined ? callOptions.signal : AbortSignal.any([callOptions.signal, permit.signal]);
+        await this.options.sleep!(delayMs, retrySignal);
       }
     }
     if (this.options.fallback !== undefined && (lastError === undefined || lastError.fallbackAllowed)) {
       if (lastError !== undefined) await this.options.onFallback?.({ runId: callOptions.runId, stepId: callOptions.stepId, ...identityFields(callOptions), reason: lastError, fromAttempt: this.options.maxAttempts });
-      return yield* this.runAttempt(this.options.fallback, messages, tools, callOptions, 1);
+      const permit = callOptions.targetOperations === undefined ? undefined : await callOptions.targetOperations.authorize({
+        operation: 'model', capability: 'model', signal: callOptions.signal,
+      });
+      return yield* this.runAttempt(this.options.fallback, messages, tools, callOptions, 1, permit);
     }
     throw lastError ?? new ModelFailure('protocol', 'Model call failed without an error.', false);
   }
 
   private async *runAttempt(
     model: ChatModel, messages: AgentMessage[], tools: Tool[], options: ModelCallOptions, attempt: number,
+    permit?: TargetOperationPermit,
   ): AsyncGenerator<ModelStreamEvent, ModelResponse> {
     await this.options.observer!.record({ type: 'started', runId: options.runId, stepId: options.stepId, ...identityFields(options), attempt });
-    const upstream = model.stream(messages, tools, options);
+    const operationSignal = permit === undefined ? options.signal : AbortSignal.any([options.signal, permit.signal]);
+    const upstream = model.stream(messages, tools, { ...options, signal: operationSignal });
     let exposed = false;
     try {
       while (true) {
         const item = await upstream.next();
         if (item.done) {
+          if (permit !== undefined) await options.targetOperations!.validate(permit, options.signal);
           await this.options.observer!.record({ type: 'succeeded', runId: options.runId, stepId: options.stepId, ...identityFields(options), attempt, ...(item.value.usage === undefined ? {} : { usage: item.value.usage }) });
           return item.value;
         }
+        if (permit !== undefined) await options.targetOperations!.validate(permit, options.signal);
         exposed = true;
         yield item.value;
       }
     } catch (error) {
+      if (permit !== undefined) await options.targetOperations!.validate(permit, options.signal);
       if (exposed) throw new ExposedStreamFailure(error);
       throw error;
     }
@@ -103,7 +118,14 @@ class ExposedStreamFailure extends Error {
 
 function asModelFailure(error: unknown): ModelFailure {
   if (error instanceof ModelFailure) return error;
+  if (isTargetOperationDenied(error)) {
+    return new ModelFailure('protocol', 'Target operation denied by current policy.', false, {}, { disposition: 'terminal' });
+  }
   return new ModelFailure('protocol', error instanceof Error ? error.message : 'Model call failed.', false);
+}
+
+function isTargetOperationDenied(error: unknown): boolean {
+  return error instanceof TargetConfigurationError && error.code === 'TARGET_OPERATION_DENIED';
 }
 
 function defaultSleep(delayMs: number, signal: AbortSignal): Promise<void> {

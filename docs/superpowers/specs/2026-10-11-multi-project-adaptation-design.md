@@ -1,7 +1,7 @@
 # 多项目巡检适配设计 Spec
 
 - 日期：2026-10-11
-- 决策状态：设计草案，待审核；本次不实施运行时代码。
+- 决策状态：M1/M2a 的配置与归属基础已实现；本次修订风险边界，R0 补强仍待实施，不代表安全恢复已经闭环。
 - 适用范围：一套本地 Agent 宿主，由一个可信操作者切换多个项目、部署环境和巡检场景。
 - 首轮数据：两个可区分的模拟项目；不依赖真实业务压测、付费模型或 LangSmith 请求。
 - 基线：沿用本仓库 AGENTS.md、Event/Message V2、统一工具管线、Source Subagent、Durable State 和受控诊断记忆，不另建主循环。
@@ -91,6 +91,18 @@ Project/Deployment 本身不能授权读写。ID 只能作为查找键，真正�
 
 targetFingerprint 必须唯一对应项目、部署世代和实际数据域；部署世代或数据域改变时分配新值，禁止继续复用旧值。解析器检查该映射的一致性，不能仅因仍叫 checkout/production 就认为是同一目标。普通密钥值轮换不改变数据域身份。
 
+该检查不能只比较当前 Catalog 中的条目。宿主必须持久化 append-only `TargetIdentityRegistry` 身份账本，并在目录发布、解析和恢复时与历史记录比较：
+
+- `targetId` 固定对应 projectId、deploymentId、scenarioId 和主 serviceId；规则版本、显示名可升级，逻辑身份不能删除后重用。停用记录保留 tombstone。
+- `targetFingerprint` 固定对应 projectId、deploymentId、deploymentGeneration、dataClass、datasetId 和受控数据域身份；世代不得倒退，新世代/新数据域不得复用历史 fingerprint。跨重启也必须成立。
+- 来源另有宿主分配的非敏感 `dataDomainId`、`sourceGeneration` 和权限范围摘要；它们不是 URL/密钥的哈希。SourceBinding 的内容版本与来源身份世代不同，不能用更新凭据的配置版本冒充新数据域。
+- Connection Registry 必须声明并匹配上述身份；切换到另一数据域要更新来源世代、Target fingerprint 及绑定规则版本。同数据域的副本端点切换、同权限的密钥轮换可保持身份，但由宿主核验并审计，不能由模型声明“相同”。权限撤销由独立的当前策略立即收紧。
+- Catalog 与账本冲突时隔离对应 Target，不覆盖账本、不分配一个临时 scope 继续运行。隔离冲突项后，只发布通过全部检查的条目及安全的不可启动信息；Catalog envelope 无法解析则整体拒绝。目录发布使用 CAS，首次登记、更新和 tombstone 均有审计。
+
+R0 新增 `ResolvedTargetSnapshotV2`，冻结来源身份、Scenario 实现 digest 和宿主知识使用策略。现有 `TargetSourceBinding`、`TargetKnowledgeReference`、Snapshot V1 不原地改义；新增版本化解析/运行端口接纳 V1/V2 判别联合，旧公开 V1 类型和 parser 保留，摘要按各自版本计算。V1 保持只读及校验，缺少历史身份依据时不得执行恢复；不得用今天的配置补造旧身份。显式核验/迁移另行记录，不覆盖原快照。legacy simulation 兼容路径不因该限制被重新绑定。
+
+身份账本只能证明宿主声明的一致性，不能证明远端确实属于声明的数据域；M3 仍必须编译查询范围、校验返回 scope，并拒绝越界响应。
+
 示例 profileId 可使用 `market-a.lab.settlement`、`market-b.lab.settlement`，但不要依靠分割字符串获取归属，归属必须查注册表。现有 `simulation` 保留为显式 legacy Target，不重命名历史 Run。
 
 ### 4.2 配置源与装载
@@ -157,6 +169,11 @@ interface TargetRuntimeProvider {
   acquire(snapshot: ResolvedTargetSnapshot): Promise<TargetRuntimeLease>;
 }
 
+interface TargetOperationPolicy {
+  // 恢复、模型、来源执行均检查原绑定与当前限制；许可不扩大原快照。
+  authorize(input: TargetOperationRequest): Promise<TargetOperationPermit>;
+}
+
 interface ScenarioPack {
   readonly id: string;
   readonly version: string;
@@ -171,6 +188,8 @@ interface SourceAdapterFactory {
 ```
 
 ScenarioAssessment 是注册场景的判别联合，不是未校验的 Record<string, unknown>。来源查询和证据采集异步执行；analyze 对已验证事实做确定性分析，不发网络请求。
+
+`TargetOperationRequest` 由宿主生成，包含 bindingId、runId/rootRunId、原快照 digest、operation（resume/model/source）、受限 capability 和 signal；permit 绑定该请求及当前 policyEpoch，不能跨操作复用。接口实现由 application/bootstrap 注入，Harness 和 Tool Pipeline 只依赖契约。`TargetRecoveryGate` 负责恢复协调，不另建 ReAct 循环；当前策略不可读取或校验失败时拒绝执行。
 
 模块建议：
 
@@ -217,6 +236,18 @@ Toolkit 在快照对应的运行能力组装后冻结，Run 中途不增删工�
 - L0/L1/L2 不裁剪或改写目标绑定引用、版本、未解决风险及证据归属；模型渲染只输出获准背景，不序列化完整私有配置。
 - Snapshot/ref 必须随活跃/可恢复 Run 保留，不允许普通配置清理删掉恢复所需版本。
 
+#### 初始提交不确定状态
+
+接受请求与首事务提交必须区分 `confirmed_absent`、`confirmed_present`、`unknown`。Checkpoint 读取抛错不是“没有提交”：
+
+| 状态 | 判定依据 | 允许的处理 |
+| --- | --- | --- |
+| confirmed_absent | 在同一一致性读取中确认原 request reservation 存在，且 binding、checkpoint、首事件均未提交；旧执行 claim 已被 fencing 排除 | CAS 重新领取原 requestId/runId 的执行 claim，可安全重试首事务，不另建 Run |
+| confirmed_present | 原首事务的 binding、checkpoint、起始 outbox 一致且摘要匹配 | 返回原 Run；投影延迟不等于提交失败，不再次 start |
+| unknown | 读取失败、部分记录矛盾、旧执行者未被排除或无法确认提交结果 | 保留持久化 reservation，返回 `TARGET_START_STATE_UNKNOWN`；不释放为可再次执行 |
+
+恢复协调器使用持久化 reservation、提交事实和带 epoch 的执行 claim 做显式 reconciliation；进程重启、租约超时或内存集合淘汰本身都不能证明 absent。旧 claim 失效后其迟到提交必须被事务 CAS 拒绝。相同 key/摘要返回同一 Run，冲突摘要拒绝；不得通过自动换 requestId 掩盖 unknown。内存 accepted/started 集合只是有界缓存，不是幂等权威。测试同时覆盖“读取返回 null”和“读取抛错”，不能合并两条分支。
+
 当前 createAgentRuntime 的 sharedEvents 不能满足完整 Durable State/Memory 注入。实施时新增明确的“完整 runtime persistence ports”注入边界，包含 transitions/outbox/executions/queries/evidence/memory 及生命周期；不可用部分注入默默退回 InMemoryDurableState。
 
 SQLite、Outbox dispatcher、V2 Publisher/Projectors 和回放管理由宿主唯一所有者初始化和关闭。各目标运行能力持有作用域端口和租约，不各自重复初始化投影、回放全库或 flush/close 共享所有者；子 Run 的事件与父 Run 继续使用同一条权威持久化链路。
@@ -227,7 +258,15 @@ SQLite、Outbox dispatcher、V2 Publisher/Projectors 和回放管理由宿主唯
 
 同时重新检查当前限制：目标是否禁用、来源权限是否撤销、部署/数据集世代是否改变、知识是否撤销、HITL 是否过期。旧快照只保证可复现，不授予永久权限。收紧立即生效，放宽不会自动扩大旧 Run 的权限。
 
+Target-bound Run 的待确认工具调用及端侧外部执行请求还必须绑定工具定义。中断 payload 持久化 `toolDefinitionDigest`，由规范化输入 JSON Schema、工具身份/来源/类型/执行模式、安全与恢复策略字段及宿主维护的 `implementationVersion` 计算。每个 `TargetRuntimeProvider` 返回的 Tool 都必须带非空、去首尾空格且不超过 256 字符的 `implementationVersion`；宿主在执行、校验、授权或恢复语义变化时必须递增该版本。恢复原快照并重建 Tool 后、执行待确认调用之前校验摘要；批准时也必须通过 `TargetRecoveryGate` 重建当前 Target Tool 并比较定义摘要，不得用同名全局 Toolkit Tool 代替；安全的用户拒绝是终态，不依赖当前 Target 可用性。接收外部执行结果时必须重建当前 Tool 并再次校验，且持有其运行时租约直至摘要/输入校验、Guard/Hook 处理及持久化完成。批准和外部结果入口都必须将 Checkpoint 的 `targetBindingId` 与 Durable Target Binding 记录及 Snapshot 一致性校验；不能仅因 Checkpoint 缺少绑定字段就退回全局 Toolkit。绑定缺失、不匹配、当前 Tool 不存在、Schema 或版本不匹配、Target-bound 旧 Checkpoint 缺少摘要时必须 fail closed：不得执行旧批准或接受旧外部结果，恢复路径写入标准 `POLICY_DENIED` ToolResult；批准/外部结果入口拒绝时不消费原中断，也不得先读取/消费执行记录或运行 Guard/Hook。摘要存入现有可序列化中断 payload，不新增 SQLite Schema、事件或消息字段；历史 Checkpoint 仍可读取，但缺失摘要的 Target-bound pending interaction 不可继续。
+
 原场景包或绑定版本不存在、已被撤销或无法校验 digest 时，拒绝继续执行并返回固定错误码，提供只读历史结果；不能隐式迁移到新版本。需要变更版本时只能走显式、审计过的兼容性迁移或新建 Run。普通密钥轮换可重新解析同一权限/数据范围的 secretRef；如果访问的是另一数据域，必须改变来源/部署世代并阻止旧 Run 再取证。
+
+恢复顺序固定为：读取并校验原 Checkpoint/Binding/Snapshot → `TargetRecoveryGate` 检查当前身份/权限/Scenario digest 和有效期 → `TargetRuntimeProvider.acquire(originalSnapshot)` 重建原能力 → 记录成功的 `RUN_RESUMED` → 进入原 Harness。被拒绝的恢复不得先发布成功恢复事件、调用模型、解析成最新 Toolkit 或访问来源。
+
+恢复前检查一次还不够：父/子 Run 每个实际模型/来源请求（含 retry、JSON 修复和半开探测）都走 `TargetOperationPolicy`。权限或身份变更递增 policyEpoch，并取消已登记的在途操作；结果落证据前再次检查 permit/epoch，过期结果不能作为新事实落库。授权放行与发出请求有明确线性化点；撤销不能撤回已发出的网络请求，但之后的请求和未提交结果必须被阻断。这些检查不改变既有 Hook/Guard/HITL 顺序，也不额外授予动作权限。
+
+当前源码只覆盖归属持久化和重开读取，未接入上述当前策略执行检查。读取原快照测试不等于恢复执行测试；R0 验收需真正驱动 resumeStream 和父/子工具路径，并断言被拒绝时外部调用数为零。
 
 ## 8. 隔离不仅是记忆隔离
 
@@ -243,7 +282,7 @@ SQLite、Outbox dispatcher、V2 Publisher/Projectors 和回放管理由宿主唯
 | HITL/resume/cancel | 先验证 Run 归属，再执行具体 toolCallId 的现有授权流程 |
 | SSE/messages | 连接绑定 runId 与目标归属；前端切换项目不能接收旧选择的流到新视图 |
 
-来源状态不按全局字符串 prometheus 或 elk 存。宿主 SourcePartitionRegistry 的分区键至少包含 projectId、deploymentId/generation、sourceBindingId 和 sourceGeneration。
+来源状态不按全局字符串 prometheus 或 elk 存。宿主 SourcePartitionRegistry 的分区键至少包含 projectId、deploymentId/generation、sourceBindingId、sourceGeneration、dataDomainId 和权限范围摘要；这些字段来自历史身份验证，不来自模型参数。
 
 同部署、同权限/数据域的多个场景共享同一来源分区的客户端、熔断器和并发配额，避免通过切换场景绕过熔断；不同项目/部署/数据域不得共用分区，即使连接到了同一个 Prometheus/MCP 服务。
 
@@ -274,6 +313,8 @@ Semantic 的使用时机明确为 Triage 和取证计划阶段，按 Target、�
 
 知识引用使用独立的 knowledgeRef/version/source/review 信息，不能伪装为 evidenceId、增加当前证据 coverage，或替代失败率观测和 Risk Gate。未审核、过期、撤销或与当前部署版本不兼容的内容不注入。
 
+`TargetKnowledgeReference { id, version, digest, approval }` 保持原样；requiredness 由宿主独立、版本化的 `TargetKnowledgePolicy` 指定（精确引用、semantic/procedural 类型、optional/required），与引用一起冻结到 Snapshot V2。未声明的现有引用默认为 optional，不猜测 Profile 文本含义。批准知识并不自动启用到 Target；显式发布的知识绑定只影响未来 Run，旧 Run 不自动换版本。详细开关/降级矩阵、审批 CAS 和启用事务以 [完整受治理记忆 Spec](2026-10-11-complete-governed-memory-system.md) 为准。
+
 第一增量只渲染受信任配置中已有、明确审核的描述和 Runbook 引用，不开放自动 LLM 提取、跨项目检索或完整 Semantic CRUD。Runbook 内容只能提供背景，不能改变系统提示词中的权限和执行规则。
 
 ### 9.2 现有记忆范围怎样接上
@@ -295,6 +336,8 @@ Target Resolver 生成 trustedMemoryControl，浏览器只提交现有 capture/r
 列表必须在存储查询和分页之前应用目标归属过滤，不允许先全库分页再在页面上过滤。每个下一页游标固定原目标和查询条件，目标切换必须重置分页及流订阅。
 
 所有访问 Run 的入口都要经过归属判断，包括列表、详情、证据、消息、SSE、用量、取消、恢复、确认以及记忆查看/审核。不得只校验创建 Run。不存在与不属于该 Target 的资源返回统一安全结果，避免利用错误详情探测另一目标。
+
+R0 先在 application 门面封闭恢复/确认/取消的归属检查及当前策略入口；未完成接线的 Target HTTP 命令不发布，不能回退 legacy 命令处理器。禁用/撤销目标仍允许获准操作者只读历史、拒绝确认和取消在途工作，但不能批准后继续执行。M4 再补齐所有 Target 消息、证据及前端入口；在此之前缺失路由应安全拒绝，不宣称全 Web 闭环已完成。
 
 旧 `/profiles`、`/runs` 等入口保留 legacy simulation 兼容行为；不能成为访问任意新 Target 的无作用域后门。legacy 路由携带新的 Run ID 时也必须拒绝跨范围访问。新 Run 一律使用 Target 绑定入口；旧 Run 默认只读，不能按当前 profile 名称或 `profileId` 推断绑定。只有旧记录中存在可核验的来源、部署/数据集世代等不可变元数据时，才可列为显式恢复候选。Legacy 的退役应先盘点调用量、备份/保留策略和验收覆盖，再由独立评审决定只读、归档或删除路由；本 Spec 不设未经使用数据支持的固定六个月截止日期，也不允许批量静默补造绑定。
 
@@ -320,22 +363,25 @@ LangSmith/审计中的父子 Trace 关联与模型用量继续按 Run 收集；�
 - 最初提交事务失败不允许执行模型/来源请求；Outbox 投影暂时失败不改变已经持久化的归属事实。
 - 原有只读、Dry Run、HITL、工具四道闸门、压缩完整性与动作幂等不因多项目而放宽。
 
-建议固定原因码：TARGET_NOT_FOUND、TARGET_DISABLED、TARGET_BINDING_INVALID、TARGET_SCOPE_MISMATCH、TARGET_SNAPSHOT_UNAVAILABLE、TARGET_GENERATION_CHANGED、SCENARIO_VERSION_UNSUPPORTED、SCENARIO_VERSION_REVOKED、SCENARIO_MIGRATION_REQUIRED、SOURCE_MAPPING_INVALID。按现有 AgentError 的分类承载并只投影经白名单审核的原因码；不能把连接报错或配置原文当公共错误详情。
+建议固定原因码：TARGET_NOT_FOUND、TARGET_DISABLED、TARGET_BINDING_INVALID、TARGET_SCOPE_MISMATCH、TARGET_SNAPSHOT_UNAVAILABLE、TARGET_GENERATION_CHANGED、TARGET_IDENTITY_CONFLICT、TARGET_START_STATE_UNKNOWN、TARGET_RECOVERY_DENIED、SCENARIO_VERSION_UNSUPPORTED、SCENARIO_VERSION_REVOKED、SCENARIO_DIGEST_MISMATCH、SCENARIO_MIGRATION_REQUIRED、SOURCE_MAPPING_INVALID、SOURCE_PERMISSION_REVOKED。新增原因码先更新严格契约/安全投影，不改旧码语义；按现有 AgentError 分类承载，不能把连接报错或配置原文当公共错误详情。
 
-一般来源失败复用现有超时/重试/熔断标准结果，产出 partial/unavailable 与 missingEvidence；语义/归属校验失败不可重试为另一个目标。不存在来源与运行中不可用是不同状态。
+迁移分配：当前数据库为 v6，R0 只追加 v7（身份/策略/执行 claim）；完整知识库在 R0 后追加 v8。Checkpoint v4 的 targetBindingId 可引用版本化快照，不因快照 V2 强制重写 Checkpoint；如确需新增上下文字段，再另增 codec 版本及迁移。不得改写 v1–v6、覆盖历史快照或在两个计划里竞争同一个 migration 版本。若实施前已有其他迁移占用该版本，先同步两份计划的版本分配。
+
+一般来源失败复用现有超时/重试/熔断标准结果，产出 partial/unavailable 与 missingEvidence；语义/归属校验失败不可重试为另一个目标。Target 策略拒绝、过期 permit/claim 不属于来源网络故障，不计熔断失败、不触发网络重试或付费 JSON 修复。不存在来源与运行中不可用是不同状态。
 
 ## 12. 逐步落地顺序与依赖
 
 | 增量 | 交付 | 必须依赖 |
 | --- | --- | --- |
 | M1 身份与配置 | 严格目录、TargetResolver、场景/来源绑定校验、安全目录 DTO、两项目静态样本 | 本 Spec 审核；不调用模型 |
-| M2a 新 Run 归属与恢复 | 完整持久化注入、新快照和 Run 归属的原子写入、scope 门面、新 Run 重启恢复；旧 Run 暂保持只读 legacy | M1；先确认 codec/事务迁移测试 |
+| M2a 新 Run 归属基础 | 完整持久化注入、新快照和 Run 归属的原子写入、scope 门面、重开读取；安全恢复需 R0 补强 | M1；先确认 codec/事务迁移测试 |
+| R0 M1/M2a 风险补强 | 历史身份账本、Snapshot V2、当前策略恢复/逐操作校验、初始提交三态 reconciliation、执行 fencing | M1+M2a 基础；完整记忆实现和新 Target 执行前必过 |
 | M2b 可选旧 Run 恢复 | 盘点并报告具备可核验来源元数据的旧 Run；仅对通过审核且可证明兼容的记录执行显式、审计迁移；其余保持只读 | M2a；不得按 profile 名称猜绑定；不作为 M3–M5 的前置条件 |
-| M3 场景适配 | window_failure_rate.v1、确定性分析、受控 Prometheus 映射、来源分区/租约、子 Run 继承 | M1+M2a；保留旧 settlement 实验 |
+| M3 场景适配 | window_failure_rate.v1、确定性分析、受控 Prometheus 映射、来源分区/租约、子 Run 继承 | M1+M2a+R0；保留旧 settlement 实验 |
 | M4 Web 与知识接线 | 目标选择、所有读写入口范围校验、有限知识快照、独立记忆策略和熔断展示 | M2a+M3；不新建完整知识库 |
 | M5 联合验收 | 两项目并发/故障/恢复/隔离测试、浏览器验收及 legacy 回归；若实施 M2b，额外覆盖其迁移路径 | M1–M4；M2b 可选 |
 
-M1/M2a 通过后才能在新 Target 发起模型或来源操作；不能先做界面选择，再用单个共享可变配置凑多项目运行。M2b 是可选的历史恢复增量，不阻塞新 Target 能力；Legacy 兼容入口何时退役需依据实际使用与保留策略另行评审。完整 Semantic/Procedural 管理、Counter 场景、真实 group-buy-market 接入、多人 ACL 和真实动作分别另立增量。
+M1/M2a 基础及 R0 安全门通过后才能在新 Target 发起模型或来源操作；不能先做界面选择，再用单个共享可变配置凑多项目运行。下一步实施顺序为 R0 → 完整记忆 T1–T7；M2b 是可选的历史恢复增量，不阻塞新 Target 能力。Legacy 兼容入口何时退役需依据实际使用与保留策略另行评审；Counter 场景、真实 group-buy-market 接入、多人 ACL 和真实动作仍各立增量。
 
 ## 13. 第一版验收矩阵
 
@@ -357,6 +403,10 @@ M1/M2a 通过后才能在新 Target 发起模型或来源操作；不能先做�
 14. 在具名、版本化的基准环境中注册并解析至少 200 个 Target；Target 目录首屏查询 p95 < 100 ms。记录硬件、数据规模、冷热状态和运行版本，容量配置上调时按声明的最大规模重新测量。
 15. 注册至少 50 个 SourcePartition；仅内存中的分区状态查找 p95 < 10 ms，且该测量不得触发外部数据源请求。
 16. 在 opt-in 压测配置下（并发上限可覆盖生产默认值 2），使用确定性模型/数据源桩执行 10 个并发父 Run，验证范围隔离、公平调度和有界资源，并报告 p50/p95/p99 排队及 Agent 自身调度开销。性能门槛在固定硬件/运行时基准环境测量；不以外部模型/网络的端到端延迟作为回归阈值，也不调用真实模型做性能压测。
+17. 先发布 Catalog A，重启后发布 B：同 fingerprint 改世代/数据域、重用已删除 targetId、世代倒退均被历史账本拒绝；合法新世代产生新 MemoryScope。轮换同域凭据不改变身份，换域必须可检测。
+18. 实际恢复暂停的父/子 Run：禁用、来源撤权、Scenario 同版本 digest 变化、旧版本缺失均在 RUN_RESUMED/模型/来源操作前拒绝；正常恢复仍使用原阈值/映射。恢复后再撤销、重试中撤销和迟到响应也被 epoch 栅栏阻断。
+19. 首事务提交前失败、提交后响应丢失、重读抛错、部分记录不一致、进程重启、双协调器抢占、旧 owner 迟到提交分别验证三态判定；unknown 不再次 start，不自动新建 Run；只有 confirmed_absent 且旧 owner 被 fencing 后可重试。
+20. Target-bound HITL 与外部执行请求绑定 `toolDefinitionDigest`：同版本/同 Schema 跨 SQLite 重开可恢复；批准时使用 Gate 重建当前 Target Tool，不能回退到同名全局 Tool；实现版本或 Schema 在批准前/批准后改变、旧中断缺摘要时不得批准/执行旧操作；用户拒绝在 Target 撤销后仍可安全完成；Checkpoint 绑定缺失或与 Durable Binding 不一致时，在读取执行记录或运行 Guard/Hook 前拒绝；外部结果处理在完整校验和持久化完成前持续持有 Target Tool 租约；缺少 `implementationVersion` 的 Target Runtime Tool 在租约建立前被拒绝。
 
 提交实现前执行仓库既有 lint/typecheck/test/build 与相关浏览器验收，并区分既有失败与新增回归。本次 Markdown 设计只做文档一致性与 diff 检查，不声明上述能力已通过。
 
@@ -365,3 +415,14 @@ M1/M2a 通过后才能在新 Target 发起模型或来源操作；不能先做�
 第一版建议确认以下组合：同一宿主/可信操作者、多 Target；Target 绑定优先而不是记忆驱动选项目；同场景声明式映射、新场景经审核代码；单完整持久化所有者；默认只读；先两个模拟项目验收。
 
 如果第一目标改为团队远程共用或每项目独立部署，身份/授权或生命周期边界需要调整，应在生成逐文件实施计划前修订本 Spec，而不是在实现中临时增加隐式全局权限。
+
+## 15. 风险修订与实施追踪
+
+| 风险 | 本文决策 | 实施/验证归属 |
+| --- | --- | --- |
+| R1 历史身份漂移导致 scope 混用 | §4.1 历史账本、来源身份与 Snapshot V2 | R0.1；验收 17 |
+| R2 重开快照被误当成安全恢复 | §7.2 原快照恢复 + 当前策略 + 逐操作 epoch | R0.3；验收 18 |
+| R3 unknown 被当作 absent 放行 | §7.1 三态、reservation 和 claim fencing | R0.2；验收 19 |
+| R4–R7 知识降级、启用、治理 CAS、审计契约 | §9.1 引用/策略边界；完整记忆 Spec §5、§7、§8 | 完整记忆 T1–T7，必须在 R0 之后 |
+
+此表只表示文档已给出解决决策，不表示对应运行时代码或验收已经完成。

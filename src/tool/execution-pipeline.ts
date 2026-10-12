@@ -6,6 +6,7 @@ import type {
   Observability,
   ToolCall,
   ToolResponse,
+  ToolResponseChunk,
   ToolExecutionResult,
   ToolExecutionJournal,
   ToolExecutionRecord,
@@ -19,6 +20,9 @@ import type {
   ResolvedRisk,
   ToolLifecycleFact,
 } from '../contracts/index.js';
+import { subsystemEventPayloadSchemaMap } from '../contracts/event-v2/subsystem.js';
+import type { TargetOperationGuard, TargetOperationPermit } from '../contracts/target.js';
+import { TargetConfigurationError } from '../contracts/target.js';
 import { checkpointChecksum, toAgentError } from '../contracts/index.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
 import type { ControlHookExecutor } from '../hooks/control-hook-executor.js';
@@ -30,7 +34,7 @@ import type { CheckpointStore } from '../contracts/storage.js';
 import type { ExecutionOutcome } from './execution-types.js';
 import type { Toolkit } from './toolkit.js';
 import type { ToolRunner } from './tool-runner.js';
-import { toolInputDigest, validateToolInput } from './schema.js';
+import { toolDefinitionDigest, toolInputDigest, validateToolInput } from './schema.js';
 import {
   legacyToolProgressFromChunk,
   legacyToolStartedPayload,
@@ -86,21 +90,24 @@ export class ToolExecutionPipeline {
     stepId: string,
     signal: AbortSignal,
     governance?: ToolBatchGovernanceSnapshot,
+    scope?: ToolExecutionScope,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     const attemptId = toolExecutionAttemptId(context.streamId, stepId, call.id);
     let outcome: ExecutionOutcome;
     try {
       if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
-      outcome = yield* this.executeValidatedStream(call, context, stepId, signal, attemptId, governance);
+      outcome = yield* this.executeValidatedStream(call, context, stepId, signal, attemptId, governance, scope);
     } catch (error) {
-      const agentError = toAgentError(error);
+      const agentError = isTargetOperationDenied(error)
+        ? { code: 'POLICY_DENIED' as const, message: 'Target operation denied by current policy.', retryable: false }
+        : toAgentError(error);
       outcome = {
         type: 'completed',
         result: this.result(call, signal.aborted ? 'aborted' : 'failed', this.clock.now().toISOString(), undefined, agentError),
         risk: { severity: 'SAFE', requireConfirmation: false, findings: [] },
       };
     }
-    const observation = await this.observeLifecycle(call, context, stepId, outcome);
+    const observation = await this.observeLifecycle(call, context, stepId, outcome, scope?.toolkit ?? this.toolkit);
     outcome = {
       ...outcome,
       effects: observation.effects,
@@ -137,9 +144,11 @@ export class ToolExecutionPipeline {
     signal: AbortSignal,
     attemptId: string,
     governance?: ToolBatchGovernanceSnapshot,
+    scope?: ToolExecutionScope,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     const startedAt = this.clock.now().toISOString();
-    const tool = this.toolkit.get(call.name);
+    const toolkit = scope?.toolkit ?? this.toolkit;
+    const tool = toolkit.get(call.name);
     if (tool === undefined) {
       const result = this.result(call, 'failed', startedAt, undefined, {
         code: 'TOOL_NOT_FOUND', message: `Unknown tool: ${call.name}`, retryable: false,
@@ -253,6 +262,7 @@ export class ToolExecutionPipeline {
           toolName: tool.name,
           input: hookContext.input,
           inputDigest: toolInputDigest(tool, hookContext.toolCall),
+          toolDefinitionDigest: toolDefinitionDigest(tool),
           label: tool.userFacingLabel?.(hookContext.input) ?? tool.description,
           mode: tool.kind === 'action' ? this.options.actionMode : 'execute',
           risk,
@@ -269,6 +279,16 @@ export class ToolExecutionPipeline {
       remaining: Math.max(0, context.budget.maxToolCalls - context.budget.toolCallsUsed),
     };
     const delegatedBudgetBefore = toolCallBudget.remaining;
+    let operationPermit: TargetOperationPermit | undefined;
+    let operationSignal = signal;
+    if (scope?.targetOperations !== undefined
+      && (tool.source === 'mcp' || tool.source === 'subagent' || tool.targetSourceId !== undefined)) {
+      if (tool.targetSourceId === undefined) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      operationPermit = await scope.targetOperations.authorize({
+        operation: 'source', capability: tool.targetSourceId, signal,
+      });
+      operationSignal = AbortSignal.any([signal, operationPermit.signal]);
+    }
     const toolContext = {
       toolCallId: call.id,
       runId: context.runId,
@@ -279,12 +299,15 @@ export class ToolExecutionPipeline {
       profileId: context.profileId,
       ...(context.governance?.profile.revision === undefined ? {} : { profileRevision: context.governance.profile.revision }),
       ...(context.targetBindingId === undefined ? {} : { targetBindingId: context.targetBindingId }),
-      signal,
+      signal: operationSignal,
       mode: tool.kind === 'action' ? this.options.actionMode : 'execute' as const,
       deadline: Date.parse(context.budget.startedAt) + context.budget.maxDurationMs,
       toolCallBudget,
       networkAttemptBudget: context.networkAttemptBudget ??= { remaining: context.budget.maxToolCalls * 3 },
       remainingToolCalls: toolCallBudget.remaining,
+      ...(scope?.targetOperations === undefined ? {} : { targetOperations: scope.targetOperations }),
+      ...(operationPermit === undefined ? {} : { targetOperationPermit: operationPermit }),
+      ...(tool.targetSourceId === undefined ? {} : { targetSourceId: tool.targetSourceId }),
     };
     await this.publishV2('TOOL_STARTED', context, {
       toolName: tool.name,
@@ -315,13 +338,39 @@ export class ToolExecutionPipeline {
       toolStream = stream;
       let response: ToolResponse;
       while (true) {
-        const item = await stream.next();
+        let item: IteratorResult<ToolResponseChunk, ToolResponse>;
+        try {
+          item = await stream.next();
+        } catch (error) {
+          if (operationPermit !== undefined) await scope!.targetOperations!.validate(operationPermit, signal);
+          throw error;
+        }
         if (item.done) {
+          if (operationPermit !== undefined) await scope!.targetOperations!.validate(operationPermit, operationSignal);
           streamCompleted = true;
           response = item.value;
           break;
         }
+        if (operationPermit !== undefined) await scope!.targetOperations!.validate(operationPermit, operationSignal);
         const chunk = item.value;
+        const sourceEvent = sourceResilienceEventFromChunk(chunk);
+        if (sourceEvent !== undefined) {
+          switch (sourceEvent.type) {
+            case 'DATASOURCE_RETRY_SCHEDULED':
+              await this.publishV2(sourceEvent.type, context, sourceEvent.payload, stepId, call.id, attemptId);
+              break;
+            case 'DATASOURCE_CIRCUIT_OPENED':
+              await this.publishV2(sourceEvent.type, context, sourceEvent.payload, stepId, call.id, attemptId);
+              break;
+            case 'DATASOURCE_CIRCUIT_HALF_OPENED':
+              await this.publishV2(sourceEvent.type, context, sourceEvent.payload, stepId, call.id, attemptId);
+              break;
+            case 'DATASOURCE_CIRCUIT_CLOSED':
+              await this.publishV2(sourceEvent.type, context, sourceEvent.payload, stepId, call.id, attemptId);
+              break;
+          }
+          continue;
+        }
         if (chunk.type === 'text_delta') {
           await this.publishV2('TOOL_OUTPUT_DELTA', context, {
             blockId: `tool-output:${call.id}`,
@@ -435,9 +484,10 @@ export class ToolExecutionPipeline {
     context: AgentContext,
     stepId: string,
     outcome: ExecutionOutcome,
+    toolkit: Toolkit = this.toolkit,
   ): Promise<LifecycleObserverResult> {
     if (this.lifecycleObservers === undefined) return { effects: [], failedObserverIds: [] };
-    const tool = this.toolkit.get(call.name);
+    const tool = toolkit.get(call.name);
     const fact: ToolLifecycleFact = {
       schemaVersion: 1,
       runId: context.runId,
@@ -554,6 +604,55 @@ export class ToolExecutionPipeline {
     if (this.v2Events === undefined) await this.events.publish(event);
     yield event;
   }
+}
+
+export interface ToolExecutionScope {
+  toolkit: Toolkit;
+  targetOperations?: TargetOperationGuard;
+}
+
+type ProjectedSourceResilienceEvent =
+  | { type: 'DATASOURCE_RETRY_SCHEDULED'; payload: AgentEventPayloadMap['DATASOURCE_RETRY_SCHEDULED'] }
+  | { type: 'DATASOURCE_CIRCUIT_OPENED'; payload: AgentEventPayloadMap['DATASOURCE_CIRCUIT_OPENED'] }
+  | { type: 'DATASOURCE_CIRCUIT_HALF_OPENED'; payload: AgentEventPayloadMap['DATASOURCE_CIRCUIT_HALF_OPENED'] }
+  | { type: 'DATASOURCE_CIRCUIT_CLOSED'; payload: AgentEventPayloadMap['DATASOURCE_CIRCUIT_CLOSED'] };
+
+function sourceResilienceEventFromChunk(chunk: ToolResponseChunk): ProjectedSourceResilienceEvent | undefined {
+  if (chunk.type !== 'event' || chunk.name !== 'source_resilience') return undefined;
+  const { kind, ...payload } = chunk.payload;
+  switch (kind) {
+    case 'retry_scheduled': {
+      const parsed = subsystemEventPayloadSchemaMap.DATASOURCE_RETRY_SCHEDULED.safeParse(payload);
+      if (!parsed.success) throw new Error('INVALID_SOURCE_RESILIENCE_EVENT');
+      return { type: 'DATASOURCE_RETRY_SCHEDULED', payload: parsed.data };
+    }
+    case 'circuit_opened': {
+      const openUntil = payload.openUntil;
+      if (typeof openUntil !== 'number' || !Number.isSafeInteger(openUntil)) throw new Error('INVALID_SOURCE_RESILIENCE_EVENT');
+      const parsed = subsystemEventPayloadSchemaMap.DATASOURCE_CIRCUIT_OPENED.safeParse({
+        ...payload,
+        openUntil: new Date(openUntil).toISOString(),
+      });
+      if (!parsed.success) throw new Error('INVALID_SOURCE_RESILIENCE_EVENT');
+      return { type: 'DATASOURCE_CIRCUIT_OPENED', payload: parsed.data };
+    }
+    case 'circuit_half_opened': {
+      const parsed = subsystemEventPayloadSchemaMap.DATASOURCE_CIRCUIT_HALF_OPENED.safeParse(payload);
+      if (!parsed.success) throw new Error('INVALID_SOURCE_RESILIENCE_EVENT');
+      return { type: 'DATASOURCE_CIRCUIT_HALF_OPENED', payload: parsed.data };
+    }
+    case 'circuit_closed': {
+      const parsed = subsystemEventPayloadSchemaMap.DATASOURCE_CIRCUIT_CLOSED.safeParse(payload);
+      if (!parsed.success) throw new Error('INVALID_SOURCE_RESILIENCE_EVENT');
+      return { type: 'DATASOURCE_CIRCUIT_CLOSED', payload: parsed.data };
+    }
+    default:
+      throw new Error('INVALID_SOURCE_RESILIENCE_EVENT');
+  }
+}
+
+function isTargetOperationDenied(error: unknown): error is TargetConfigurationError {
+  return error instanceof TargetConfigurationError && error.code === 'TARGET_OPERATION_DENIED';
 }
 
 function durationOf(result: ToolExecutionResult): number {

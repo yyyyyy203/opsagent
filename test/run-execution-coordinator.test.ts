@@ -72,6 +72,27 @@ describe('RunExecutionCoordinator', () => {
     await coordinator.close();
   });
 
+  it('keeps an acceptance fenced when rereading the checkpoint fails after a start error', async () => {
+    const agent = fakeAgent(
+      async function* () { throw new Error('agent failed before first event'); },
+      async function* (runId) { yield* []; return result(runId); },
+    );
+    const checkpoints = checkpointStore(new Map());
+    let loadCalls = 0;
+    vi.mocked(checkpoints.load).mockImplementation(async () => {
+      loadCalls += 1;
+      if (loadCalls === 2) throw new Error('checkpoint read unavailable');
+      return null;
+    });
+    const coordinator = new RunExecutionCoordinator(agent, checkpoints);
+    const options = { runId: 'uncertain-acceptance', message: 'inspect', profileId: 'legacy-profile' };
+
+    await expect(coordinator.startAccepted(options)).rejects.toThrow('agent failed before first event');
+    await expect(coordinator.startAccepted(options)).rejects.toMatchObject({ code: 'RUN_CONFLICT', statusCode: 409 });
+    expect(loadCalls).toBe(2);
+    expect(agent.replyStream).toHaveBeenCalledTimes(1);
+  });
+
   it('registers a start before awaiting the agent and drains one stream for duplicate requests', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -93,6 +114,19 @@ describe('RunExecutionCoordinator', () => {
     release();
     await first;
     expect(coordinator.isActive('run-1')).toBe(false);
+  });
+
+  it('rejects a Target-bound root from the legacy start entry point', async () => {
+    const agent = fakeAgent(
+      async function* (options) { yield* []; return result(options.runId!); },
+      async function* (runId) { yield* []; return result(runId); },
+    );
+    const coordinator = new RunExecutionCoordinator(agent, checkpointStore(new Map()));
+
+    await expect(coordinator.start({ runId: 'target-root', message: 'inspect', profileId: 'target',
+      trustedTargetBinding: {} as NonNullable<ReplyOptions['trustedTargetBinding']> }))
+      .rejects.toMatchObject({ code: 'RUN_START_STATE_UNKNOWN', statusCode: 409 });
+    expect(agent.replyStream).not.toHaveBeenCalled();
   });
 
   it('allows at most one concurrent resume and rejects an unknown Run', async () => {

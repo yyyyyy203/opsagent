@@ -4,11 +4,16 @@ import {
   type TargetCatalogDefinition,
   type TargetCatalogDto,
   type TargetCatalogRejection,
+  type TargetIdentityCandidate,
+  type TargetIdentityRegistry,
+  type TargetKnowledgePolicy,
+  type TargetKnowledgePolicyStore,
+  type TargetSourceIdentity,
   type TargetResolver,
   type TargetScenarioBinding,
   type TargetSourceBinding,
   type TargetSourceKind,
-  type ResolvedTargetSnapshot,
+  type ResolvedTargetSnapshotV2,
 } from '../contracts/target.js';
 import type { MemoryScope } from '../contracts/diagnostic-memory.js';
 import { parseTargetCatalog } from './target-catalog-schema.js';
@@ -16,6 +21,7 @@ import { parseTargetCatalog } from './target-catalog-schema.js';
 export interface TargetScenarioVersion {
   id: string;
   version: string;
+  implementationDigest: string;
 }
 
 export interface TargetSourceAdapter {
@@ -32,12 +38,16 @@ interface PrivateConnectionDefinition {
   endpoint?: string;
   secretRef?: string;
   allowedServiceIds: string[];
+  dataDomainId: string;
+  sourceGeneration: number;
+  permissionScopeDigest: string;
 }
 
 interface TargetResolverEntry {
   definition: TargetCatalogDefinition;
   profile: ResolvedProfileSnapshot;
   unavailableOptionalSourceIds: readonly string[];
+  sourceIdentities: readonly TargetSourceIdentity[];
 }
 
 export interface CreateStaticTargetResolverOptions {
@@ -47,6 +57,8 @@ export interface CreateStaticTargetResolverOptions {
   profileResolver: ProfileResolver;
   installedScenarios: readonly TargetScenarioVersion[];
   installedAdapters: readonly TargetSourceAdapter[];
+  identityRegistry: TargetIdentityRegistry;
+  knowledgePolicies: TargetKnowledgePolicyStore;
   validationTime: string;
   maxRegisteredTargets?: number;
 }
@@ -72,24 +84,20 @@ export async function createStaticTargetResolver(
   const profiles = new Map<string, ResolvedProfileSnapshot>();
   const unavailableOptionals = new Map<string, readonly string[]>();
 
-  const fingerprintScopes = new Map<string, Set<string>>();
-  for (const definition of parsed.targets) {
-    const scope = fingerprintScope(definition);
-    const scopes = fingerprintScopes.get(definition.targetFingerprint) ?? new Set<string>();
-    scopes.add(scope);
-    fingerprintScopes.set(definition.targetFingerprint, scopes);
-  }
+  const sourceIdentities = new Map<string, readonly TargetSourceIdentity[]>();
+  const identityCandidates: TargetIdentityCandidate[] = [];
 
-  for (let index = 0; index < parsed.targets.length; index += 1) {
-    const definition = parsed.targets[index];
+  for (let acceptedIndex = 0; acceptedIndex < parsed.targets.length; acceptedIndex += 1) {
+    const definition = parsed.targets[acceptedIndex];
     if (definition === undefined) continue;
-    const collision = (fingerprintScopes.get(definition.targetFingerprint)?.size ?? 0) > 1;
-    if (collision) {
-      rejected.push(rejection(index, definition.targetId, 'TARGET_BINDING_INVALID'));
+    const index = parsed.targetIndices[acceptedIndex] ?? acceptedIndex;
+    const installedDigest = scenarioRegistry.get(scenarioKey(definition.scenario));
+    if (installedDigest === undefined) {
+      rejected.push(rejection(index, definition.targetId, 'SCENARIO_VERSION_UNSUPPORTED'));
       continue;
     }
-    if (!scenarioRegistry.has(scenarioKey(definition.scenario))) {
-      rejected.push(rejection(index, definition.targetId, 'SCENARIO_VERSION_UNSUPPORTED'));
+    if (installedDigest !== definition.scenario.implementationDigest) {
+      rejected.push(rejection(index, definition.targetId, 'SCENARIO_DIGEST_MISMATCH'));
       continue;
     }
     const sourceValidation = validateSources(definition, privateConnections, adapterRegistry);
@@ -110,13 +118,44 @@ export async function createStaticTargetResolver(
       candidates.push(definition);
       profiles.set(definition.targetId, cloneProfile(profile));
       unavailableOptionals.set(definition.targetId, sourceValidation.unavailableOptionalSourceIds);
+      sourceIdentities.set(definition.targetId, sourceValidation.sourceIdentities);
+      identityCandidates.push({
+        targetId: definition.targetId,
+        projectId: definition.projectId,
+        deploymentId: definition.deploymentId,
+        deploymentGeneration: definition.deploymentGeneration,
+        scenarioId: definition.scenario.id,
+        primaryServiceId: definition.scenario.serviceId,
+        profileId: definition.profileId,
+        targetFingerprint: definition.targetFingerprint,
+        dataClass: definition.dataClass,
+        ...(definition.datasetId === undefined ? {} : { datasetId: definition.datasetId }),
+        sourceIdentities: sourceValidation.sourceIdentities,
+      });
     } catch {
       rejected.push(rejection(index, definition.targetId, 'TARGET_BINDING_INVALID'));
     }
   }
 
-  return new StaticTargetResolver(candidates, profiles, unavailableOptionals, rejected,
-    options.profileResolver, scenarioRegistry, privateConnections, adapterRegistry);
+  const identitySnapshot = await options.identityRegistry.readSnapshot();
+  const publication = await options.identityRegistry.publishCatalog({
+    expectedVersion: identitySnapshot.version,
+    presentTargetIds: parsed.presentTargetIds,
+    candidates: identityCandidates,
+    publishedAt: options.validationTime,
+  });
+  const candidateIndices = new Map(parsed.targets.map((definition, acceptedIndex) => [
+    definition.targetId, parsed.targetIndices[acceptedIndex] ?? acceptedIndex,
+  ]));
+  for (const conflict of publication.rejected) {
+    const index = candidateIndices.get(conflict.targetId);
+    if (index !== undefined) rejected.push(rejection(index, conflict.targetId, conflict.reasonCode));
+  }
+  const acceptedIds = new Set(publication.acceptedTargetIds);
+  const acceptedCandidates = candidates.filter(definition => acceptedIds.has(definition.targetId));
+
+  return new StaticTargetResolver(acceptedCandidates, profiles, unavailableOptionals, sourceIdentities, rejected,
+    options.profileResolver, scenarioRegistry, privateConnections, adapterRegistry, options.knowledgePolicies);
 }
 
 export class StaticTargetResolver implements TargetResolver {
@@ -128,11 +167,13 @@ export class StaticTargetResolver implements TargetResolver {
     definitions: readonly TargetCatalogDefinition[],
     profiles: ReadonlyMap<string, ResolvedProfileSnapshot>,
     unavailableOptionalSourceIds: ReadonlyMap<string, readonly string[]>,
+    sourceIdentities: ReadonlyMap<string, readonly TargetSourceIdentity[]>,
     rejected: readonly TargetCatalogRejection[],
     private readonly profileResolver: ProfileResolver,
-    private readonly scenarios: ReadonlySet<string>,
+    private readonly scenarios: ReadonlyMap<string, string>,
     private readonly connections: ReadonlyMap<string, PrivateConnectionDefinition>,
     private readonly adapters: ReadonlyMap<string, TargetSourceKind>,
+    private readonly knowledgePolicies: TargetKnowledgePolicyStore,
   ) {
     for (const definition of definitions) {
       const profile = profiles.get(definition.targetId);
@@ -141,6 +182,7 @@ export class StaticTargetResolver implements TargetResolver {
         definition: cloneTarget(definition),
         profile,
         unavailableOptionalSourceIds: [...(unavailableOptionalSourceIds.get(definition.targetId) ?? [])],
+        sourceIdentities: (sourceIdentities.get(definition.targetId) ?? []).map(cloneSourceIdentity),
       });
     }
     this.rejected = Object.freeze(rejected.map(item => Object.freeze({ ...item })));
@@ -170,7 +212,7 @@ export class StaticTargetResolver implements TargetResolver {
     }));
   }
 
-  public resolve(input: { targetId: string; capturedAt: string; signal: AbortSignal }): Promise<ResolvedTargetSnapshot> {
+  public resolve(input: { targetId: string; capturedAt: string; signal: AbortSignal }): Promise<ResolvedTargetSnapshotV2> {
     return Promise.resolve().then(async () => {
       throwIfAborted(input.signal);
       if (!isIdentifier(input.targetId) || !isTimestamp(input.capturedAt)) {
@@ -179,8 +221,12 @@ export class StaticTargetResolver implements TargetResolver {
       const entry = this.entries.get(input.targetId);
       if (entry === undefined) throw new TargetConfigurationError('TARGET_NOT_FOUND');
       if (!entry.definition.enabled) throw new TargetConfigurationError('TARGET_DISABLED');
-      if (!this.scenarios.has(scenarioKey(entry.definition.scenario))) {
+      const installedDigest = this.scenarios.get(scenarioKey(entry.definition.scenario));
+      if (installedDigest === undefined) {
         throw new TargetConfigurationError('SCENARIO_VERSION_UNSUPPORTED');
+      }
+      if (installedDigest !== entry.definition.scenario.implementationDigest) {
+        throw new TargetConfigurationError('SCENARIO_DIGEST_MISMATCH');
       }
       if (validateSources(entry.definition, this.connections, this.adapters) === undefined) {
         throw new TargetConfigurationError('SOURCE_MAPPING_INVALID');
@@ -195,8 +241,13 @@ export class StaticTargetResolver implements TargetResolver {
         throw new TargetConfigurationError('TARGET_BINDING_INVALID');
       }
       const memoryScope = deriveMemoryScope(entry.definition);
+      const knowledgePolicy = resolveKnowledgePolicy(
+        await this.knowledgePolicies.get(entry.definition.targetId),
+        entry.definition.targetId,
+        entry.definition.knowledgeRefs,
+      );
       const unsigned = {
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         targetId: entry.definition.targetId,
         projectId: entry.definition.projectId,
         deploymentId: entry.definition.deploymentId,
@@ -207,13 +258,16 @@ export class StaticTargetResolver implements TargetResolver {
         targetFingerprint: entry.definition.targetFingerprint,
         profile: cloneProfile(profile),
         scenario: cloneScenario(entry.definition.scenario),
+        scenarioImplementationDigest: installedDigest,
         sourceBindings: entry.definition.sourceBindings.map(cloneSourceBinding),
+        sourceIdentities: entry.sourceIdentities.map(cloneSourceIdentity),
         unavailableOptionalSourceIds: [...entry.unavailableOptionalSourceIds],
         knowledgeRefs: entry.definition.knowledgeRefs.map(reference => ({ ...reference })),
+        knowledgePolicy,
         memoryScope,
         capturedAt: input.capturedAt,
       };
-      const digest = `sha256:v1:${checkpointChecksum({ algorithm: 'sha256', version: 1, target: unsigned })}`;
+      const digest = `sha256:v2:${checkpointChecksum({ algorithm: 'sha256', version: 2, target: unsigned })}`;
       return deepFreeze({ ...unsigned, digest });
     });
   }
@@ -221,7 +275,7 @@ export class StaticTargetResolver implements TargetResolver {
 
 function parsePrivateConnections(input: unknown): ReadonlyMap<string, PrivateConnectionDefinition> {
   if (!isRecord(input) || Object.keys(input).some(key => key !== 'schemaVersion' && key !== 'connections')
-    || input.schemaVersion !== 1 || !Array.isArray(input.connections) || input.connections.length > 2_000) {
+    || input.schemaVersion !== 2 || !Array.isArray(input.connections) || input.connections.length > 2_000) {
     throw new TargetConfigurationError('TARGET_CATALOG_INVALID');
   }
   const valid: PrivateConnectionDefinition[] = [];
@@ -248,10 +302,13 @@ function parsePrivateConnections(input: unknown): ReadonlyMap<string, PrivateCon
 }
 
 function parsePrivateConnection(value: unknown): PrivateConnectionDefinition | undefined {
-  const allowedKeys = new Set(['sourceId', 'version', 'kind', 'adapterId', 'enabled', 'endpoint', 'secretRef', 'allowedServiceIds']);
+  const allowedKeys = new Set(['sourceId', 'version', 'kind', 'adapterId', 'enabled', 'endpoint', 'secretRef',
+    'allowedServiceIds', 'dataDomainId', 'sourceGeneration', 'permissionScopeDigest']);
   if (!isRecord(value) || Object.keys(value).some(key => !allowedKeys.has(key))
     || !isIdentifier(value.sourceId) || !isRevision(value.version)
     || !isSourceKind(value.kind) || !isIdentifier(value.adapterId) || typeof value.enabled !== 'boolean'
+    || !isIdentifier(value.dataDomainId) || !Number.isSafeInteger(value.sourceGeneration) || (value.sourceGeneration as number) < 1
+    || typeof value.permissionScopeDigest !== 'string' || !/^[a-f0-9]{64}$/iu.test(value.permissionScopeDigest)
     || !Array.isArray(value.allowedServiceIds)) return undefined;
   const allowedServiceIds: string[] = [];
   for (const serviceId of value.allowedServiceIds as unknown[]) {
@@ -271,6 +328,9 @@ function parsePrivateConnection(value: unknown): PrivateConnectionDefinition | u
     ...(typeof value.endpoint === 'string' ? { endpoint: value.endpoint } : {}),
     ...(typeof value.secretRef === 'string' ? { secretRef: value.secretRef } : {}),
     allowedServiceIds,
+    dataDomainId: value.dataDomainId,
+    sourceGeneration: value.sourceGeneration as number,
+    permissionScopeDigest: value.permissionScopeDigest.toLowerCase(),
   };
 }
 
@@ -278,8 +338,9 @@ function validateSources(
   definition: TargetCatalogDefinition,
   connections: ReadonlyMap<string, PrivateConnectionDefinition>,
   adapters: ReadonlyMap<string, TargetSourceKind>,
-): { unavailableOptionalSourceIds: readonly string[] } | undefined {
+): { unavailableOptionalSourceIds: readonly string[]; sourceIdentities: readonly TargetSourceIdentity[] } | undefined {
   const unavailableOptionalSourceIds: string[] = [];
+  const sourceIdentities: TargetSourceIdentity[] = [];
   for (const source of definition.sourceBindings) {
     if (adapters.get(source.adapterId) !== source.kind) return undefined;
     const connection = connections.get(source.sourceId);
@@ -292,20 +353,28 @@ function validateSources(
     if (!valid) {
       if (source.required) return undefined;
       unavailableOptionalSourceIds.push(source.sourceId);
+    } else if (connection !== undefined) {
+      sourceIdentities.push({
+        sourceId: connection.sourceId,
+        dataDomainId: connection.dataDomainId,
+        sourceGeneration: connection.sourceGeneration,
+        permissionScopeDigest: connection.permissionScopeDigest,
+      });
     }
   }
   const requiredKinds = new Set(definition.sourceBindings.filter(source => source.required).map(source => source.kind));
   if (!requiredKinds.has('metrics')) return undefined;
-  return { unavailableOptionalSourceIds };
+  return { unavailableOptionalSourceIds, sourceIdentities };
 }
 
-function buildScenarioRegistry(scenarios: readonly TargetScenarioVersion[]): ReadonlySet<string> {
-  const result = new Set<string>();
+function buildScenarioRegistry(scenarios: readonly TargetScenarioVersion[]): ReadonlyMap<string, string> {
+  const result = new Map<string, string>();
   for (const scenario of scenarios) {
-    if (!isIdentifier(scenario.id) || !/^\d+\.\d+\.\d+$/u.test(scenario.version)) {
+    if (!isIdentifier(scenario.id) || !/^\d+\.\d+\.\d+$/u.test(scenario.version)
+      || !isSnapshotDigestV1(scenario.implementationDigest) || result.has(`${scenario.id}@${scenario.version}`)) {
       throw new TargetConfigurationError('TARGET_CATALOG_INVALID');
     }
-    result.add(`${scenario.id}@${scenario.version}`);
+    result.set(`${scenario.id}@${scenario.version}`, scenario.implementationDigest);
   }
   return result;
 }
@@ -333,11 +402,6 @@ function deriveMemoryScope(definition: TargetCatalogDefinition): MemoryScope {
     return { ...base, environment: definition.environment, dataClass: 'simulated', datasetId: definition.datasetId };
   }
   return { ...base, environment: definition.environment, dataClass: 'live' };
-}
-
-function fingerprintScope(definition: TargetCatalogDefinition): string {
-  return JSON.stringify([definition.projectId, definition.deploymentId, definition.deploymentGeneration,
-    definition.dataClass, definition.datasetId ?? null]);
 }
 
 function scenarioKey(scenario: TargetScenarioBinding): string {
@@ -396,13 +460,55 @@ function cloneProfile(profile: ResolvedProfileSnapshot): ResolvedProfileSnapshot
 }
 
 function cloneScenario(scenario: TargetScenarioBinding): TargetScenarioBinding {
-  return { ...scenario, metricMapping: { ...scenario.metricMapping,
+  return { id: scenario.id, version: scenario.version, serviceId: scenario.serviceId,
+    serviceName: scenario.serviceName, metricSemantics: scenario.metricSemantics,
+    threshold: scenario.threshold, minSamples: scenario.minSamples, metricMapping: { ...scenario.metricMapping,
     serviceSelector: { ...scenario.metricMapping.serviceSelector },
     staticLabels: { ...scenario.metricMapping.staticLabels } } };
 }
 
 function cloneSourceBinding(source: TargetSourceBinding): TargetSourceBinding {
   return { ...source, allowedServiceIds: [...source.allowedServiceIds] };
+}
+
+function cloneSourceIdentity(identity: TargetSourceIdentity): TargetSourceIdentity {
+  return { ...identity };
+}
+
+function resolveKnowledgePolicy(
+  policy: TargetKnowledgePolicy | null,
+  targetId: string,
+  references: TargetCatalogDefinition['knowledgeRefs'],
+): TargetKnowledgePolicy {
+  if (policy !== null && (policy.targetId !== targetId || policy.schemaVersion !== 1
+    || !Number.isSafeInteger(policy.policyEpoch) || policy.policyEpoch < 0
+    || !isRevision(policy.policyVersion) || policy.defaultRequiredness !== 'optional')) {
+    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  }
+  const configured = new Map((policy?.requirements ?? []).map(requirement => [
+    `${requirement.id}\u0000${requirement.version}\u0000${requirement.digest}`, requirement,
+  ]));
+  const requirements = references.map(reference => {
+    const requirement = configured.get(`${reference.id}\u0000${reference.version}\u0000${reference.digest}`);
+    if (requirement !== undefined) return { ...requirement };
+    return { id: reference.id, version: reference.version, digest: reference.digest, requiredness: 'optional' as const };
+  });
+  if (policy !== null && policy.requirements.some(requirement => !references.some(reference =>
+    reference.id === requirement.id && reference.version === requirement.version && reference.digest === requirement.digest))) {
+    throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  }
+  return {
+    schemaVersion: 1,
+    targetId,
+    policyVersion: policy?.policyVersion ?? 'default/v1',
+    policyEpoch: policy?.policyEpoch ?? 0,
+    defaultRequiredness: 'optional',
+    requirements,
+  };
+}
+
+function isSnapshotDigestV1(value: unknown): value is string {
+  return typeof value === 'string' && /^sha256:v1:[a-f0-9]{64}$/u.test(value);
 }
 
 function deepFreeze<T>(value: T): T {

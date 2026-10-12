@@ -15,6 +15,7 @@ import type {
   StreamingEvidenceCaptureRequest,
   StreamingEvidenceRecorder,
 } from '../contracts/index.js';
+import { TargetConfigurationError } from '../contracts/target.js';
 
 const DEFAULT_PAGE_BYTES = 512 * 1024;
 const DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -74,7 +75,7 @@ export class DefaultStreamingEvidenceRecorder implements StreamingEvidenceRecord
 
   public async capture(
     request: StreamingEvidenceCaptureRequest,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; validateBeforeCommit?: () => Promise<void> } = {},
   ): Promise<EvidenceCaptureResult> {
     validateRequest(request);
     assertEvidenceCaptureBudget(request.budget);
@@ -84,6 +85,7 @@ export class DefaultStreamingEvidenceRecorder implements StreamingEvidenceRecord
     if (existing !== null && existing.state !== 'pending') {
       if (existing.state === 'committed' || existing.state === 'partial') {
         if (existing.summary === undefined) throw new StreamingEvidenceCaptureError('STORAGE_ERROR', 'Visible Evidence Manifest has no summary');
+        await options.validateBeforeCommit?.();
         await this.publishEvidenceEvent(existing, existing.summary);
         return toCaptureResult(existing, existing.summary);
       }
@@ -107,6 +109,7 @@ export class DefaultStreamingEvidenceRecorder implements StreamingEvidenceRecord
     });
     if (pending.state === 'committed' || pending.state === 'partial') {
       if (pending.summary === undefined) throw new StreamingEvidenceCaptureError('STORAGE_ERROR', 'Visible Evidence Manifest has no summary');
+      await options.validateBeforeCommit?.();
       await this.publishEvidenceEvent(pending, pending.summary);
       return toCaptureResult(pending, pending.summary);
     }
@@ -228,8 +231,17 @@ export class DefaultStreamingEvidenceRecorder implements StreamingEvidenceRecord
         coverage,
         truncated,
         missingEvidence,
+        ...(options.validateBeforeCommit === undefined ? {} : { validateBeforeCommit: options.validateBeforeCommit }),
       });
     } catch (error) {
+      if (isTargetOperationDenied(error)) {
+        await this.options.manifests.markFailed({
+          evidenceId: request.evidenceId,
+          reasonCode: 'TARGET_OPERATION_DENIED',
+          updatedAt: this.clock.now().toISOString(),
+        }).catch(() => undefined);
+        throw error;
+      }
       if (isAbort(error, signal)) {
         await this.options.manifests.markFailed({
           evidenceId: request.evidenceId,
@@ -259,6 +271,7 @@ export class DefaultStreamingEvidenceRecorder implements StreamingEvidenceRecord
           coverage,
           truncated: true,
           missingEvidence: unique(sourceFailure),
+          ...(options.validateBeforeCommit === undefined ? {} : { validateBeforeCommit: options.validateBeforeCommit }),
         });
       }
       await this.options.manifests.markFailed({
@@ -283,6 +296,7 @@ export class DefaultStreamingEvidenceRecorder implements StreamingEvidenceRecord
     coverage: number;
     truncated: boolean;
     missingEvidence: readonly string[];
+    validateBeforeCommit?: () => Promise<void>;
   }): Promise<EvidenceCaptureResult> {
     const now = this.clock.now().toISOString();
     const descriptor = {
@@ -305,6 +319,18 @@ export class DefaultStreamingEvidenceRecorder implements StreamingEvidenceRecord
       updatedAt: now,
       committedAt: now,
     };
+    try {
+      await input.validateBeforeCommit?.();
+    } catch (error) {
+      if (isTargetOperationDenied(error)) {
+        await this.options.manifests.markFailed({
+          evidenceId: input.request.evidenceId,
+          reasonCode: 'TARGET_OPERATION_DENIED',
+          updatedAt: this.clock.now().toISOString(),
+        }).catch(() => undefined);
+      }
+      throw error;
+    }
     const manifest = await this.options.manifests.commit(commit);
     if (manifest.summary === undefined || (manifest.state !== 'committed' && manifest.state !== 'partial')) {
       throw new StreamingEvidenceCaptureError('STORAGE_ERROR', 'Evidence Manifest was not visible after commit');
@@ -509,6 +535,10 @@ function addMissing(values: string[], value: string): void {
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+function isTargetOperationDenied(error: unknown): error is TargetConfigurationError {
+  return error instanceof TargetConfigurationError && error.code === 'TARGET_OPERATION_DENIED';
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

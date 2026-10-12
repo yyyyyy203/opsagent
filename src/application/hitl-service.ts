@@ -1,8 +1,11 @@
 import type { AgentContext, AgentEventPayloadMap, CheckpointStore, Clock, ConfirmationDecision, DurableRunState, EventPublisherV2Dependencies, HookRegistryLike, PendingAgentEventV2, ToolCall, ToolExecutionResult } from '../contracts/index.js';
 import { CheckpointConflictError, checkpointChecksum } from '../contracts/index.js';
 import type { AgentMessage } from '../contracts/message.js';
+import type { TargetRecoveryGate } from '../contracts/target.js';
+import { TargetConfigurationError } from '../contracts/target.js';
+import type { Tool } from '../contracts/tool.js';
 import type { Toolkit } from '../tool/toolkit.js';
-import { toolInputDigest } from '../tool/schema.js';
+import { toolDefinitionDigest, toolInputDigest } from '../tool/schema.js';
 import { visibilityForV2Event } from '../event/v2/visibility.js';
 
 export type HitlDecisionOutcome = 'approved' | 'rejected' | 'expired';
@@ -15,6 +18,8 @@ export class HitlService {
     private readonly durableState?: DurableRunState,
     private readonly hookRegistry?: HookRegistryLike,
     private readonly toolkit?: Toolkit,
+    private readonly targetRecoveryGate?: TargetRecoveryGate,
+    private readonly targetSourceScopeId?: string,
   ) {}
 
   public async decide(decision: ConfirmationDecision): Promise<void> {
@@ -46,16 +51,49 @@ export class HitlService {
       }
     }
     const pending = this.pendingCall(context, decision.toolCallId);
-    if (this.toolkit !== undefined) {
-      const tool = this.toolkit.get(pending.name);
-      if (tool === undefined) throw new Error(`Tool not found while confirming pending call: ${pending.name}`);
-      const currentDigest = toolInputDigest(tool, pending);
-      if (typeof interrupt.payload.inputDigest === 'string' && interrupt.payload.inputDigest !== currentDigest) {
-        throw new Error(`Confirmation input digest does not match pending tool call: ${pending.id}`);
-      }
-      const governanceDecision = context.pendingToolBatch?.governance?.decisions.find((candidate) => candidate.toolCallId === pending.id);
-      if (governanceDecision !== undefined && governanceDecision.inputDigest !== currentDigest) {
-        throw new Error(`Confirmation governance digest does not match pending tool call: ${pending.id}`);
+    const durableBinding = this.durableState === undefined
+      ? null
+      : await this.durableState.targetBindings.getBinding(context.runId);
+    const targetBound = context.targetBindingId !== undefined || durableBinding !== null;
+    // Target rejection is always a safe terminal choice. Do not make it depend
+    // on current Target availability; approval remains fail-closed below.
+    if (decision.confirmed || !targetBound) {
+      const targetBindingId = await this.persistedTargetBindingId(context);
+      if (this.toolkit !== undefined || targetBindingId !== undefined) {
+        const capturedInput = interrupt.payload.input;
+        const expectedDigest = interrupt.payload.inputDigest;
+        const expectedDefinitionDigest = interrupt.payload.toolDefinitionDigest;
+        if (targetBindingId !== undefined && typeof expectedDefinitionDigest !== 'string') {
+          throw new Error(`Confirmation tool definition digest is missing for Target-bound call: ${pending.id}`);
+        }
+        const { tool, release } = await this.currentTool(context, pending, targetBindingId);
+        try {
+          let currentDigest: string;
+          if (tool === undefined) {
+            if (typeof expectedDigest !== 'string'
+              || interrupt.payload.toolName !== pending.name
+              || !isRecord(capturedInput)
+              || checkpointChecksum(capturedInput) !== checkpointChecksum(pending.input)) {
+              throw new Error(`Confirmation input digest does not match pending tool call: ${pending.id}`);
+            }
+            currentDigest = expectedDigest;
+          } else {
+            currentDigest = toolInputDigest(tool, pending);
+          }
+          if (tool !== undefined && typeof expectedDefinitionDigest === 'string'
+            && expectedDefinitionDigest !== toolDefinitionDigest(tool)) {
+            throw new Error(`Confirmation tool definition digest does not match pending tool call: ${pending.id}`);
+          }
+          if (typeof expectedDigest === 'string' && expectedDigest !== currentDigest) {
+            throw new Error(`Confirmation input digest does not match pending tool call: ${pending.id}`);
+          }
+          const governanceDecision = context.pendingToolBatch?.governance?.decisions.find((candidate) => candidate.toolCallId === pending.id);
+          if (governanceDecision !== undefined && governanceDecision.inputDigest !== currentDigest) {
+            throw new Error(`Confirmation governance digest does not match pending tool call: ${pending.id}`);
+          }
+        } finally {
+          await release();
+        }
       }
     }
     if (interrupt.expiresAt !== undefined && this.clock.now().getTime() >= Date.parse(interrupt.expiresAt)) {
@@ -147,6 +185,54 @@ export class HitlService {
     }
     const checkpoint = await this.durableState.checkpoints.load(runId);
     return checkpoint === null ? null : { context: checkpoint.context, revision: checkpoint.revision };
+  }
+
+  private async persistedTargetBindingId(context: AgentContext): Promise<string | undefined> {
+    const contextBindingId = context.targetBindingId;
+    const binding = this.durableState === undefined
+      ? null
+      : await this.durableState.targetBindings.getBinding(context.runId);
+    if (contextBindingId === undefined && binding === null) return undefined;
+    if (this.durableState === undefined || binding === null || binding.runId !== context.runId
+      || contextBindingId !== binding.bindingId) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    const snapshot = await this.durableState.targetBindings.getSnapshot(binding.bindingId);
+    if (snapshot === null || snapshot.digest !== binding.snapshotDigest) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    return binding.bindingId;
+  }
+
+  private async currentTool(
+    context: AgentContext,
+    pending: ToolCall,
+    targetBindingId: string | undefined,
+  ): Promise<{ tool: Tool | undefined; release: () => Promise<void> }> {
+    if (targetBindingId === undefined) {
+      const tool = this.toolkit?.get(pending.name);
+      if (tool === undefined && this.toolkit !== undefined) {
+        throw new Error(`Tool not found while confirming pending call: ${pending.name}`);
+      }
+      return { tool, release: async () => {} };
+    }
+    if (this.targetRecoveryGate === undefined) {
+      throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+    }
+    const lease = await this.targetRecoveryGate.acquireForResume({
+      runId: context.runId,
+      targetBindingId,
+      signal: new AbortController().signal,
+      ...(this.targetSourceScopeId === undefined ? {} : { sourceScopeId: this.targetSourceScopeId }),
+    });
+    try {
+      const tool = lease.tools.find(candidate => candidate.name === pending.name);
+      if (tool === undefined) throw new Error(`Target Tool not found while confirming pending call: ${pending.name}`);
+      return { tool, release: async () => { await lease.release(); } };
+    } catch (error) {
+      await lease.release();
+      throw error;
+    }
   }
 
   private async saveCheckpoint(context: AgentContext, revision: number | undefined): Promise<void> {
@@ -265,6 +351,10 @@ function confirmationId(runId: string, toolCallId: string): string { return `con
 
 function isProvisionalResult(result: ToolExecutionResult): boolean {
   return result.status === 'interrupted' || result.status === 'awaiting_external';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function durableStorageError(error: unknown): Error {

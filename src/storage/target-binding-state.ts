@@ -1,18 +1,18 @@
 import type { AgentContext } from '../contracts/context.js';
-import { TargetConfigurationError, type ResolvedTargetSnapshot, type TargetBindingTransition,
+import { TargetConfigurationError, type VersionedResolvedTargetSnapshot, type TargetBindingTransition,
   type TargetRunBindingRecord, type TargetRunRequestRecord } from '../contracts/target.js';
-import { parseResolvedTargetSnapshot, parseTargetRunBindingRecord } from '../contracts/target-schema.js';
+import { parseExecutableTargetSnapshot, parseTargetRunBindingRecord } from '../contracts/target-schema.js';
 import { checkpointChecksum } from '../contracts/stable-json.js';
 
 export interface TargetBindingStateReader {
   bindingByRunId(runId: string): TargetRunBindingRecord | null;
-  snapshotByBindingId(bindingId: string): ResolvedTargetSnapshot | null;
+  snapshotByBindingId(bindingId: string): VersionedResolvedTargetSnapshot | null;
   requestById(requestId: string): TargetRunRequestRecord | null;
 }
 
 export interface ValidatedTargetBindingTransition {
   binding?: TargetRunBindingRecord;
-  snapshot?: ResolvedTargetSnapshot;
+  snapshot?: VersionedResolvedTargetSnapshot;
 }
 
 /** Shared persistence invariants for SQLite and in-memory durable stores. */
@@ -48,7 +48,7 @@ export function validateTargetBindingState(
   const savedSnapshot = reader.snapshotByBindingId(binding.bindingId);
   const suppliedSnapshot = transition.snapshot === undefined
     ? null
-    : parseResolvedTargetSnapshot(transition.snapshot);
+    : parseExecutableTargetSnapshot(transition.snapshot);
   if (savedSnapshot !== null && savedSnapshot.digest !== binding.snapshotDigest) {
     throw new TargetConfigurationError('TARGET_BINDING_INVALID');
   }
@@ -59,6 +59,9 @@ export function validateTargetBindingState(
   }
   const snapshot = savedSnapshot ?? suppliedSnapshot;
   if (snapshot === null || snapshot === undefined) throw new TargetConfigurationError('TARGET_SNAPSHOT_UNAVAILABLE');
+  // A new binding transition represents permission to execute. Historical V1
+  // snapshots remain queryable, but cannot be used to create or extend a Run.
+  parseExecutableTargetSnapshot(snapshot);
   assertSnapshotMatches(context, binding, snapshot);
 
   if (binding.runId === binding.rootRunId) {
@@ -88,8 +91,8 @@ export function sameTargetRecord(left: unknown, right: unknown): boolean {
 function assertSnapshotMatches(
   context: AgentContext,
   binding: TargetRunBindingRecord,
-  snapshot: ResolvedTargetSnapshot | null,
-): asserts snapshot is ResolvedTargetSnapshot {
+  snapshot: VersionedResolvedTargetSnapshot | null,
+): asserts snapshot is VersionedResolvedTargetSnapshot {
   if (snapshot === null || snapshot.digest !== binding.snapshotDigest || snapshot.targetId !== binding.targetId
     || context.profileId !== snapshot.profile.profileId
     || (context.governance !== undefined && (context.governance.profile.profileId !== snapshot.profile.profileId

@@ -2,8 +2,16 @@ import type { Clock, IdGenerator, InspectionQueryService, PublicRunDetail, Publi
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import type { ReplyOptions } from '../agent/types.js';
 import type { TargetResolver, TargetRunBindingPage, TargetBindingStore, TargetRunRequestRecord, TrustedTargetBinding } from '../contracts/target.js';
+import type { TargetRecoveryGate } from '../contracts/target.js';
 import { TargetConfigurationError } from '../contracts/target.js';
 import { checkpointChecksum } from '../contracts/stable-json.js';
+import type { WebConfirmationDecisionInput, WebConfirmationService } from './web-confirmation-service.js';
+
+export interface TargetRunExecutionCommands {
+  /** Schedules recovery without awaiting the entire long-running Run. */
+  resume(runId: string): void;
+  cancel(runId: string): Promise<void>;
+}
 
 export interface TargetRunStarter {
   /** Resolves only after the first RUN_STARTED transition is durably committed. */
@@ -26,6 +34,9 @@ export interface TargetRunServiceOptions {
   bindings: TargetBindingStore;
   queries: InspectionQueryService;
   start?: TargetRunStarter;
+  execution?: TargetRunExecutionCommands;
+  confirmation?: Pick<WebConfirmationService, 'decide'>;
+  targetRecoveryGate?: Pick<TargetRecoveryGate, 'authorizeResume'>;
   clock?: Clock;
   ids?: IdGenerator;
 }
@@ -167,8 +178,55 @@ export class TargetRunService {
     return binding !== null && binding.targetId === targetId;
   }
 
+  public async resume(targetId: string, runId: string): Promise<void> {
+    const binding = await this.requireOwnedBinding(targetId, runId);
+    const { execution, targetRecoveryGate } = this.options;
+    if (execution === undefined || targetRecoveryGate === undefined) {
+      throw new TargetConfigurationError('TARGET_RUN_UNAVAILABLE');
+    }
+    await targetRecoveryGate.authorizeResume({
+      runId,
+      targetBindingId: binding.bindingId,
+      signal: new AbortController().signal,
+    });
+    execution.resume(runId);
+  }
+
+  public async cancel(targetId: string, runId: string): Promise<void> {
+    await this.requireOwnedBinding(targetId, runId);
+    if (this.options.execution === undefined) throw new TargetConfigurationError('TARGET_RUN_UNAVAILABLE');
+    await this.options.execution.cancel(runId);
+  }
+
+  public async decideConfirmation(
+    targetId: string,
+    runId: string,
+    input: WebConfirmationDecisionInput,
+  ) {
+    const binding = await this.requireOwnedBinding(targetId, runId);
+    const confirmation = this.options.confirmation;
+    if (confirmation === undefined) throw new TargetConfigurationError('TARGET_RUN_UNAVAILABLE');
+    if (input.confirmed) {
+      const targetRecoveryGate = this.options.targetRecoveryGate;
+      if (targetRecoveryGate === undefined) throw new TargetConfigurationError('TARGET_RUN_UNAVAILABLE');
+      await targetRecoveryGate.authorizeResume({
+        runId,
+        targetBindingId: binding.bindingId,
+        signal: new AbortController().signal,
+      });
+    }
+    return confirmation.decide(runId, input);
+  }
+
   public async bindingForRun(runId: string) {
     return this.options.bindings.getBinding(runId);
+  }
+
+  private async requireOwnedBinding(targetId: string, runId: string) {
+    if (!isIdentifier(targetId) || !isIdentifier(runId)) throw new TargetConfigurationError('TARGET_NOT_FOUND');
+    const binding = await this.options.bindings.getBinding(runId);
+    if (binding === null || binding.targetId !== targetId) throw new TargetConfigurationError('TARGET_NOT_FOUND');
+    return binding;
   }
 
   private assertKnownTarget(targetId: string): void {

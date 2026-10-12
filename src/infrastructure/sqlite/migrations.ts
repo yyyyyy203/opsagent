@@ -253,6 +253,59 @@ const MIGRATIONS = [
     CREATE INDEX run_target_bindings_target_run ON run_target_bindings(target_id, run_id);
     CREATE INDEX run_target_bindings_root ON run_target_bindings(root_run_id, run_id);
   `,
+  `
+    CREATE TABLE target_identity_registry_state (
+      singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+      registry_version INTEGER NOT NULL CHECK (registry_version >= 0),
+      snapshot_json TEXT NOT NULL CHECK (length(CAST(snapshot_json AS BLOB)) <= 16777216),
+      snapshot_checksum TEXT NOT NULL CHECK (length(snapshot_checksum) = 64)
+    );
+
+    CREATE TABLE target_identity_audit (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      target_id TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('registered', 'updated', 'tombstoned')),
+      registry_version INTEGER NOT NULL CHECK (registry_version > 0),
+      identity_digest TEXT NOT NULL CHECK (length(identity_digest) = 64),
+      recorded_at TEXT NOT NULL
+    );
+    CREATE INDEX target_identity_audit_target_sequence
+      ON target_identity_audit(target_id, sequence);
+    CREATE TRIGGER target_identity_audit_no_update
+      BEFORE UPDATE ON target_identity_audit
+      BEGIN SELECT RAISE(ABORT, 'target identity audit is append-only'); END;
+    CREATE TRIGGER target_identity_audit_no_delete
+      BEFORE DELETE ON target_identity_audit
+      BEGIN SELECT RAISE(ABORT, 'target identity audit is append-only'); END;
+
+    CREATE TABLE target_knowledge_policies (
+      target_id TEXT PRIMARY KEY,
+      policy_epoch INTEGER NOT NULL CHECK (policy_epoch > 0),
+      policy_version TEXT NOT NULL,
+      policy_json TEXT NOT NULL CHECK (length(CAST(policy_json AS BLOB)) <= 32768),
+      policy_checksum TEXT NOT NULL CHECK (length(policy_checksum) = 64),
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE target_run_start_claims (
+      request_id TEXT PRIMARY KEY REFERENCES target_run_requests(request_id) ON DELETE RESTRICT,
+      run_id TEXT NOT NULL UNIQUE,
+      target_id TEXT NOT NULL,
+      request_digest TEXT NOT NULL,
+      owner_id TEXT,
+      claim_epoch INTEGER NOT NULL CHECK (claim_epoch >= 0),
+      lease_until TEXT,
+      state TEXT NOT NULL CHECK (state IN ('reserved', 'claimed', 'started')),
+      CHECK (
+        (state IN ('reserved', 'started') AND owner_id IS NULL AND lease_until IS NULL)
+        OR (state = 'claimed' AND owner_id IS NOT NULL AND lease_until IS NOT NULL AND claim_epoch > 0)
+      )
+    );
+    CREATE INDEX target_run_start_claims_lease ON target_run_start_claims(state, lease_until);
+    INSERT INTO target_run_start_claims(request_id, run_id, target_id, request_digest, owner_id, claim_epoch, lease_until, state)
+      SELECT request_id, run_id, target_id, request_digest, NULL, 0, NULL, 'reserved'
+      FROM target_run_requests;
+  `,
 ] as const;
 
 export function migrateSqlite(database: Database.Database): void {

@@ -95,7 +95,9 @@ export class MetricsSourceReportCollector implements SourceReportCollector {
 
   public finalize(input: SourceReportFinalizeInput): SourceSubagentResult {
     assertRunIdentity(input);
-    if (this.observations.length === 0) return this.result(input, 'unavailable', '没有获得可验证的结算指标证据。', [], [], 0);
+    if (this.observations.length === 0) {
+      return this.result(input, 'unavailable', '没有获得可验证的结算指标证据。', [], [], 0, ['metrics']);
+    }
 
     const evidenceIds = this.observations.map((observation) => observation.evidenceId);
     const missingEvidence: string[] = [];

@@ -149,6 +149,36 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     }
   }
 
+  const targetRunCommandMatch = method === 'POST'
+    ? /^\/targets\/([^/]+)\/runs\/([^/]+)\/(resume|cancel|confirmation)$/u.exec(parsed.pathname)
+    : null;
+  if (targetRunCommandMatch?.[1] !== undefined && targetRunCommandMatch[2] !== undefined
+    && targetRunCommandMatch[3] !== undefined) {
+    if (options.targetRuns === undefined) throw unavailable();
+    const targetId = decodePath(targetRunCommandMatch[1]);
+    const runId = decodePath(targetRunCommandMatch[2]);
+    switch (targetRunCommandMatch[3]) {
+      case 'resume':
+        await options.targetRuns.resume(targetId, runId);
+        writeJson(response, 202, {
+          runId,
+          status: 'resuming',
+          eventsUrl: `/targets/${encodeURIComponent(targetId)}/runs/${encodeURIComponent(runId)}/events`,
+        });
+        return;
+      case 'cancel':
+        await options.targetRuns.cancel(targetId, runId);
+        writeJson(response, 202, { runId, status: 'cancelling' });
+        return;
+      case 'confirmation': {
+        const body = await readJson(request, maxBodyBytes);
+        const result = await options.targetRuns.decideConfirmation(targetId, runId, toConfirmationInput(body));
+        writeJson(response, 200, result);
+        return;
+      }
+    }
+  }
+
   const targetEventsMatch = method === 'GET'
     ? /^\/targets\/([^/]+)\/runs\/([^/]+)\/events$/u.exec(parsed.pathname)
     : null;
@@ -546,7 +576,8 @@ function statusForError(error: unknown): number {
     && typeof error.statusCode === 'number') return error.statusCode;
   if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string') {
     if (error.code === 'TARGET_NOT_FOUND') return 404;
-    if (error.code === 'TARGET_REQUEST_CONFLICT' || error.code === 'TARGET_DISABLED'
+    if (error.code === 'TARGET_OPERATION_DENIED') return 403;
+    if (error.code === 'TARGET_REQUEST_CONFLICT' || error.code === 'TARGET_START_STATE_UNKNOWN' || error.code === 'TARGET_DISABLED'
       || error.code === 'TARGET_SCOPE_MISMATCH') return 409;
     if (error.code === 'TARGET_RUN_UNAVAILABLE' || error.code === 'TARGET_SNAPSHOT_UNAVAILABLE') return 503;
     if (['TARGET_BINDING_INVALID', 'TARGET_CATALOG_INVALID', 'TARGET_CATALOG_LIMIT_EXCEEDED',

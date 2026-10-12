@@ -3,7 +3,9 @@ import { checkpointChecksum } from './stable-json.js';
 import { memoryScopeSchema } from './diagnostic-memory-schema.js';
 import {
   TargetConfigurationError,
+  type ResolvedTargetSnapshotV2,
   type ResolvedTargetSnapshot,
+  type VersionedResolvedTargetSnapshot,
   type TargetRunBindingRecord,
   type TargetRunRequestRecord,
 } from './target.js';
@@ -12,6 +14,8 @@ const identifier = z.string().min(1).max(256).refine(value => value.trim().lengt
 const revision = z.string().min(1).max(128).refine(value => value.trim().length > 0);
 const timestamp = z.string().max(64).datetime({ offset: true });
 const snapshotDigest = z.string().regex(/^sha256:v1:[a-f0-9]{64}$/u);
+const snapshotDigestV2 = z.string().regex(/^sha256:v2:[a-f0-9]{64}$/u);
+const versionedSnapshotDigest = z.union([snapshotDigest, snapshotDigestV2]);
 const hexDigest = z.string().regex(/^[a-f0-9]{64}$/iu);
 
 const profileSnapshot = z.object({
@@ -123,12 +127,98 @@ const resolvedSnapshot = z.discriminatedUnion('dataClass', [
   }
 });
 
+const sourceIdentity = z.object({
+  sourceId: identifier,
+  dataDomainId: identifier,
+  sourceGeneration: z.number().int().positive().safe(),
+  permissionScopeDigest: hexDigest,
+}).strict();
+
+const knowledgeRequirement = z.object({
+  id: identifier,
+  version: revision,
+  digest: hexDigest,
+  requiredness: z.enum(['optional', 'required']),
+  knowledgeClass: z.enum(['semantic', 'procedural']).optional(),
+}).strict();
+
+const knowledgePolicy = z.object({
+  schemaVersion: z.literal(1),
+  targetId: identifier,
+  policyVersion: revision,
+  policyEpoch: z.number().int().nonnegative().safe(),
+  defaultRequiredness: z.literal('optional'),
+  requirements: z.array(knowledgeRequirement).max(20),
+}).strict();
+
+const snapshotV2Base = z.object({
+  schemaVersion: z.literal(2),
+  targetId: identifier,
+  projectId: identifier,
+  deploymentId: identifier,
+  deploymentGeneration: z.number().int().positive().safe(),
+  environment: z.enum(['simulation', 'development', 'staging', 'production']),
+  dataClass: z.enum(['simulated', 'live']),
+  datasetId: identifier.optional(),
+  targetFingerprint: identifier,
+  profile: profileSnapshot,
+  scenario,
+  scenarioImplementationDigest: snapshotDigest,
+  sourceBindings: z.array(sourceBinding).min(1).max(8),
+  sourceIdentities: z.array(sourceIdentity).max(8),
+  unavailableOptionalSourceIds: z.array(identifier).max(8),
+  knowledgeRefs: z.array(knowledgeRef).max(20),
+  knowledgePolicy,
+  memoryScope: memoryScopeSchema,
+  capturedAt: timestamp,
+  digest: snapshotDigestV2,
+});
+
+const resolvedSnapshotV2 = z.discriminatedUnion('dataClass', [
+  snapshotV2Base.extend({
+    dataClass: z.literal('simulated'),
+    environment: z.enum(['simulation', 'development', 'staging']),
+    datasetId: identifier,
+  }).strict(),
+  snapshotV2Base.extend({
+    dataClass: z.literal('live'),
+    environment: z.enum(['development', 'staging', 'production']),
+    datasetId: z.never().optional(),
+  }).strict(),
+]).superRefine((value, ctx) => {
+  if (value.profile.profileId !== value.memoryScope.profileId
+    || value.profile.revision !== value.memoryScope.profileRevision
+    || value.scenario.serviceId !== value.memoryScope.serviceId
+    || value.scenario.id !== value.memoryScope.faultType
+    || value.targetFingerprint !== value.memoryScope.targetFingerprint
+    || value.environment !== value.memoryScope.environment
+    || value.dataClass !== value.memoryScope.dataClass
+    || (value.dataClass === 'simulated' && (value.memoryScope.dataClass !== 'simulated'
+      || value.datasetId !== value.memoryScope.datasetId))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['memoryScope'], message: 'Target memory scope does not match its snapshot.' });
+  }
+  if (new Set(value.sourceBindings.map(source => source.sourceId)).size !== value.sourceBindings.length
+    || new Set(value.sourceIdentities.map(source => source.sourceId)).size !== value.sourceIdentities.length
+    || value.sourceIdentities.some(identity => !value.sourceBindings.some(source => source.sourceId === identity.sourceId))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sourceIdentities'], message: 'Target source identities must be unique and bound.' });
+  }
+  if (value.knowledgePolicy.targetId !== value.targetId
+    || new Set(value.knowledgePolicy.requirements.map(item => `${item.id}\u0000${item.version}\u0000${item.digest}`)).size
+      !== value.knowledgePolicy.requirements.length
+    || value.knowledgePolicy.requirements.length !== value.knowledgeRefs.length
+    || value.knowledgeRefs.some(reference => !value.knowledgePolicy.requirements.some(requirement =>
+      requirement.id === reference.id && requirement.version === reference.version
+        && requirement.digest === reference.digest))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['knowledgePolicy'], message: 'Target knowledge policy does not match its references.' });
+  }
+});
+
 const bindingRecord = z.object({
   bindingId: identifier,
   targetId: identifier,
   runId: identifier,
   rootRunId: identifier,
-  snapshotDigest,
+  snapshotDigest: versionedSnapshotDigest,
   createdAt: timestamp,
   requestId: identifier.optional(),
   requestDigest: snapshotDigest.optional(),
@@ -158,6 +248,32 @@ export function parseResolvedTargetSnapshot(value: unknown): ResolvedTargetSnaps
   } catch {
     throw new TargetConfigurationError('TARGET_SNAPSHOT_UNAVAILABLE');
   }
+}
+
+export function parseResolvedTargetSnapshotV2(value: unknown): ResolvedTargetSnapshotV2 {
+  try {
+    const parsed = resolvedSnapshotV2.parse(value) as ResolvedTargetSnapshotV2;
+    const { digest, ...unsigned } = parsed;
+    const expected = `sha256:v2:${checkpointChecksum({ algorithm: 'sha256', version: 2, target: unsigned })}`;
+    if (digest !== expected) throw new Error('Target snapshot V2 digest mismatch.');
+    return deepFreeze(structuredClone(parsed));
+  } catch {
+    throw new TargetConfigurationError('TARGET_SNAPSHOT_UNAVAILABLE');
+  }
+}
+
+/** Dispatches by version while preserving the historical V1 parser byte-for-byte. */
+export function parseVersionedResolvedTargetSnapshot(value: unknown): VersionedResolvedTargetSnapshot {
+  if (isRecord(value) && value.schemaVersion === 1) return parseResolvedTargetSnapshot(value);
+  if (isRecord(value) && value.schemaVersion === 2) return parseResolvedTargetSnapshotV2(value);
+  throw new TargetConfigurationError('TARGET_SNAPSHOT_UNAVAILABLE');
+}
+
+/** V1 snapshots remain readable but are not execution-capable without a separately recorded proof. */
+export function parseExecutableTargetSnapshot(value: unknown): ResolvedTargetSnapshotV2 {
+  const parsed = parseVersionedResolvedTargetSnapshot(value);
+  if (parsed.schemaVersion !== 2) throw new TargetConfigurationError('TARGET_IDENTITY_UNPROVEN');
+  return parsed;
 }
 
 export function parseTargetRunBindingRecord(value: unknown): TargetRunBindingRecord {
@@ -192,4 +308,8 @@ function deepFreeze<T>(value: T): T {
     for (const child of Object.values(value)) deepFreeze(child);
   }
   return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

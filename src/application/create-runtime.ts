@@ -90,6 +90,8 @@ import type { InspectionQueryService } from '../contracts/read-model.js';
 import type { MessageCursorCodec, WebMessageQueries } from '../contracts/web-read-model.js';
 import { InMemoryWebMessageQuery } from '../storage/in-memory-web-message-query.js';
 import type { RuntimeEventPublisher, RuntimeShutdownRegistry, SharedRuntimeEventPorts } from './runtime-ports.js';
+import type { TargetRecoveryGate } from '../contracts/target.js';
+import { TargetConfigurationError } from '../contracts/target.js';
 
 type EventMessageStore = EventStore & MessageStore;
 
@@ -108,6 +110,8 @@ export interface RuntimeToolPorts {
   checkpoints: CheckpointStore;
   /** Shared host-owned durable state for child Runs that must atomically inherit Target scope. */
   durableState?: DurableRunState;
+  /** Deferred host policy gate shared with Target-bound source child runtimes. */
+  targetRecoveryGate: TargetRecoveryGate;
   clock: Clock;
   ids: IdGenerator;
 }
@@ -116,6 +120,10 @@ export type RuntimeToolFactory = (ports: RuntimeToolPorts) => readonly Tool[];
 
 export interface AgentRuntimeOptions {
   model: ChatModel;
+  /** Optional host-provided gate; bootstrap may configure the per-runtime gate after persistence opens. */
+  targetRecoveryGate?: TargetRecoveryGate;
+  /** Internal source scope for a Target-bound source child runtime. */
+  targetSourceScopeId?: string;
   /** Host/test-injected memory ports. Production assembly is owned by bootstrap. */
   memoryHarness?: AgentMemoryHarness;
   /** Production host assembly, called only after the complete durable ports exist. */
@@ -379,6 +387,21 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     replay: replayV2,
     ...(durableState === undefined ? {} : { durableState }),
   };
+  let configuredTargetRecoveryGate = options.targetRecoveryGate;
+  const targetRecoveryGate: TargetRecoveryGate = {
+    acquireForStart: input => {
+      if (configuredTargetRecoveryGate === undefined) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      return configuredTargetRecoveryGate.acquireForStart(input);
+    },
+    authorizeResume: input => {
+      if (configuredTargetRecoveryGate === undefined) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      return configuredTargetRecoveryGate.authorizeResume(input);
+    },
+    acquireForResume: input => {
+      if (configuredTargetRecoveryGate === undefined) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      return configuredTargetRecoveryGate.acquireForResume(input);
+    },
+  };
   let factoryTools: Tool[] = [];
   try {
     factoryTools = (options.toolFactories ?? []).flatMap((factory) => [...factory({
@@ -393,6 +416,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       events: v2EventDependencies,
       checkpoints,
       ...(durableState === undefined ? {} : { durableState }),
+      targetRecoveryGate,
       clock,
       ids,
     })]);
@@ -533,6 +557,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       : {}),
     ...((memory ?? options.memoryHarness) === undefined ? {} : { memory: memory ?? options.memoryHarness! }),
     ...(durableState === undefined ? {} : { durableState }),
+    targetRecoveryGate,
+    ...(options.targetSourceScopeId === undefined ? {} : { targetSourceScopeId: options.targetSourceScopeId }),
     hookRegistry,
     v2Events: v2EventDependencies,
   });
@@ -543,6 +569,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   });
   return {
     agent,
+    configureTargetRecoveryGate(gate: TargetRecoveryGate): void {
+      if (configuredTargetRecoveryGate !== undefined && configuredTargetRecoveryGate !== gate) {
+        throw new Error('Target Recovery Gate is already configured for this runtime.');
+      }
+      configuredTargetRecoveryGate = gate;
+    },
     toolkit,
     events,
     checkpoints,
@@ -563,6 +595,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       durableState,
       hookRegistry,
       toolkit,
+      targetRecoveryGate,
+      options.targetSourceScopeId,
     ),
     externalTools: new ExternalToolResultService(
       checkpoints,
@@ -575,6 +609,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       v2EventDependencies,
       durableState,
       hookRegistry,
+      targetRecoveryGate,
+      options.targetSourceScopeId,
     ),
     eventStoreV2,
     replayV2,

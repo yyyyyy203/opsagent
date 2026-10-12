@@ -1,5 +1,6 @@
 import type { ImpactPolicy } from '../contracts/governance.js';
 import type { ProfileDefinition } from './profile-types.js';
+import { WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST } from './scenarios/window-failure-rate-v1.js';
 
 const impactPolicy: ImpactPolicy = {
   unavailable: { S0: 'deny', S1: 'deny', S2: 'confirm', S3: 'confirm' },
@@ -26,6 +27,7 @@ export const multiProjectTargetCatalog = Object.freeze({
       scenario: {
         id: 'window_failure_rate.v1',
         version: '1.0.0',
+        implementationDigest: WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST,
         serviceId: 'checkout',
         serviceName: 'Checkout',
         metricSemantics: 'integer_window_snapshot',
@@ -68,6 +70,7 @@ export const multiProjectTargetCatalog = Object.freeze({
       scenario: {
         id: 'window_failure_rate.v1',
         version: '1.0.0',
+        implementationDigest: WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST,
         serviceId: 'checkout',
         serviceName: 'Checkout',
         metricSemantics: 'integer_window_snapshot',
@@ -97,17 +100,19 @@ export const multiProjectTargetCatalog = Object.freeze({
 
 /** Private connection metadata fixture; never use as a production credential source. */
 export const multiProjectConnectionRegistry = Object.freeze({
-  schemaVersion: 1,
+  schemaVersion: 2,
   connections: [
     {
       sourceId: 'market-a-metrics', version: 'connection/v1', kind: 'metrics', adapterId: 'prometheus-mcp.v1',
       enabled: true, endpoint: 'https://private-market-a.invalid/mcp', secretRef: 'secret.metrics.market-a',
-      allowedServiceIds: ['checkout'],
+      allowedServiceIds: ['checkout'], dataDomainId: 'market-a-metrics-domain', sourceGeneration: 1,
+      permissionScopeDigest: 'a'.repeat(64),
     },
     {
       sourceId: 'market-b-metrics', version: 'connection/v3', kind: 'metrics', adapterId: 'prometheus-mcp.v1',
       enabled: true, endpoint: 'https://private-market-b.invalid/mcp', secretRef: 'secret.metrics.market-b',
-      allowedServiceIds: ['checkout'],
+      allowedServiceIds: ['checkout'], dataDomainId: 'market-b-metrics-domain', sourceGeneration: 3,
+      permissionScopeDigest: 'b'.repeat(64),
     },
   ],
 });

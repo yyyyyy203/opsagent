@@ -3,7 +3,8 @@ import type { JsonValue } from './common.js';
 import type { GovernanceEffect } from './hooks.js';
 import type { PendingAgentEventV2 } from './event-store.js';
 import type { MemoryCaptureIntent } from './diagnostic-memory.js';
-import type { TargetBindingStore, TargetBindingTransition } from './target.js';
+import type { TargetBindingStore, TargetBindingTransition, TargetIdentityRegistry, TargetKnowledgePolicyStore,
+  TargetStartStore } from './target.js';
 import type { ToolCall, ToolExecutionResult, ToolKind } from './tool.js';
 
 export interface CheckpointStore {
@@ -117,6 +118,11 @@ export interface DurableRunState {
   transitions: DurableTransitionUnitOfWork;
   outbox: DurableEventOutbox;
   targetBindings: TargetBindingStore;
+  /** Optional Target catalog history stores, present when owned durable persistence is configured. */
+  targetIdentityRegistry?: TargetIdentityRegistry;
+  targetKnowledgePolicies?: TargetKnowledgePolicyStore;
+  /** Durable owner/epoch/lease claims for the first Target Run transition. */
+  targetStarts?: TargetStartStore;
 }
 
 export interface EvidenceRecord {
@@ -363,7 +369,7 @@ export interface EvidenceCaptureResult {
 export interface StreamingEvidenceRecorder {
   capture(
     request: StreamingEvidenceCaptureRequest,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; validateBeforeCommit?: () => Promise<void> },
   ): Promise<EvidenceCaptureResult>;
 }
 

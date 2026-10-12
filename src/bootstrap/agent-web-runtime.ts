@@ -2,7 +2,8 @@ import { mkdir } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { isAbsolute, join } from 'node:path';
 import type { ChatModel, Clock, DurableRunState, IdGenerator, InspectionQueryService, Observability, Tool } from '../contracts/index.js';
-import type { TargetResolver } from '../contracts/target.js';
+import type { TargetIdentityRegistry, TargetKnowledgePolicyStore, TargetOperationPolicy, TargetResolver,
+  TargetRuntimeProvider } from '../contracts/target.js';
 import type { ModelIdentity } from './model-identity.js';
 import type { RuntimeToolPorts } from '../application/create-runtime.js';
 import type { ReplyOptions } from '../agent/types.js';
@@ -20,6 +21,7 @@ import { startInspectionHttpServer, type InspectionHttpServer } from '../api/htt
 import { SourceInvocationLimiter } from '../tool/source-invocation-limiter.js';
 import type { DiagnosticMemoryConfig } from '../contracts/diagnostic-memory.js';
 import { parseDiagnosticMemoryConfig, resolveMemoryControl } from './memory-policy.js';
+import { TargetRecoveryService } from '../application/target-recovery-service.js';
 
 const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
   id: 'group-buy-market',
@@ -67,7 +69,10 @@ export interface AgentWebRuntimeOptions {
    * until the host explicitly supplies a Target-capable execution boundary.
    */
   targetRuntime?: {
-    resolver: TargetResolver;
+    createResolver: (ports: TargetResolverFactoryPorts) => TargetResolver | Promise<TargetResolver>;
+    /** Both factories are required before Target execution can be enabled. */
+    createOperationPolicy?: (ports: TargetRecoveryFactoryPorts) => TargetOperationPolicy;
+    createRuntimeProvider?: (ports: TargetRecoveryFactoryPorts) => TargetRuntimeProvider;
     createStarter?: (ports: TargetRunStarterFactoryPorts) => TargetRunStarter;
   };
   host?: string;
@@ -89,6 +94,17 @@ export interface TargetRunStarterFactoryPorts {
   durableState: DurableRunState;
   queries: InspectionQueryService;
   prepareStart: (options: ReplyOptions) => ReplyOptions;
+}
+
+/** Persistent Target identity ports are selected by this host bootstrap, never created by a Resolver. */
+export interface TargetResolverFactoryPorts {
+  identityRegistry: TargetIdentityRegistry;
+  knowledgePolicies: TargetKnowledgePolicyStore;
+}
+
+export interface TargetRecoveryFactoryPorts extends TargetResolverFactoryPorts {
+  resolver: TargetResolver;
+  durableState: DurableRunState;
 }
 
 export interface AgentWebRuntime {
@@ -203,24 +219,60 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     const execution = new RunExecutionCoordinator(
       runtime.agent,
       runtime.checkpoints,
-      { prepareStart, ...(runtime.memory === undefined ? {} : { afterTerminal: scheduleMemory }) },
+      { prepareStart, ...(runtime.durableState.targetStarts === undefined ? {} : { targetStarts: runtime.durableState.targetStarts }), clock, ids,
+        ...(runtime.memory === undefined ? {} : { afterTerminal: scheduleMemory }) },
     );
-    const targetRuns = options.targetRuntime === undefined ? undefined : new TargetRunService({
-      resolver: options.targetRuntime.resolver,
+    let targetResolver: TargetResolver | undefined;
+    let targetRecoveryGate: TargetRecoveryService | undefined;
+    if (options.targetRuntime !== undefined) {
+      const identityRegistry = runtime.durableState.targetIdentityRegistry;
+      const knowledgePolicies = runtime.durableState.targetKnowledgePolicies;
+      if (identityRegistry === undefined || knowledgePolicies === undefined || runtime.durableState.targetStarts === undefined) {
+        throw new Error('Target Resolver factory requires persistent identity, knowledge-policy, and start-claim stores.');
+      }
+      targetResolver = await options.targetRuntime.createResolver({ identityRegistry, knowledgePolicies });
+      const hasOperationPolicy = options.targetRuntime.createOperationPolicy !== undefined;
+      const hasRuntimeProvider = options.targetRuntime.createRuntimeProvider !== undefined;
+      if (hasOperationPolicy !== hasRuntimeProvider) {
+        throw new Error('Target execution requires both current-policy and runtime-provider factories.');
+      }
+      if (hasOperationPolicy && hasRuntimeProvider) {
+        const ports: TargetRecoveryFactoryPorts = { identityRegistry, knowledgePolicies, resolver: targetResolver,
+          durableState: runtime.durableState };
+        targetRecoveryGate = new TargetRecoveryService({
+          bindings: runtime.durableState.targetBindings,
+          identityRegistry,
+          resolver: targetResolver,
+          operationPolicy: options.targetRuntime.createOperationPolicy!(ports),
+          runtimeProvider: options.targetRuntime.createRuntimeProvider!(ports),
+          clock,
+        });
+        runtime.configureTargetRecoveryGate(targetRecoveryGate);
+      }
+    }
+    const targetStarter = options.targetRuntime?.createStarter === undefined || targetRecoveryGate === undefined
+      ? undefined
+      : options.targetRuntime.createStarter({
+        execution,
+        durableState: runtime.durableState,
+        queries: runtime.queries,
+        prepareStart,
+      });
+    const confirmation = new WebConfirmationService(runtime.hitl, runtime.durableState.checkpoints, clock);
+    const targetRuns = options.targetRuntime === undefined || targetResolver === undefined ? undefined : new TargetRunService({
+      resolver: targetResolver,
       bindings: runtime.durableState.targetBindings,
       queries: runtime.queries,
       clock,
       ids,
-      ...(options.targetRuntime.createStarter === undefined ? {} : {
-        start: options.targetRuntime.createStarter({
-          execution,
-          durableState: runtime.durableState,
-          queries: runtime.queries,
-          prepareStart,
-        }),
-      }),
+      execution: {
+        resume: runId => { void execution.resume(runId).catch(() => undefined); },
+        cancel: runId => execution.cancel(runId),
+      },
+      confirmation,
+      ...(targetRecoveryGate === undefined ? {} : { targetRecoveryGate }),
+      ...(targetStarter === undefined ? {} : { start: targetStarter }),
     });
-    const confirmation = new WebConfirmationService(runtime.hitl, runtime.durableState.checkpoints, clock);
     const server = await startInspectionHttpServer({
       agent: runtime.agent,
       events: runtime.eventStreamV2,
