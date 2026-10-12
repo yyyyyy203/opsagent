@@ -175,6 +175,40 @@ describe('SQLite governed knowledge storage', () => {
     } finally { database.close(); }
   });
 
+  it('replays a legacy SQLite transition receipt across timestamp changes without duplicating its audit', async () => {
+    const database = SqliteDatabase.open(':memory:');
+    try {
+      const store = makeStore(database);
+      const approved = await createApproved(store, makeRevision('sqlite-legacy-transition-replay'));
+      const command = { requestId: 'sqlite-legacy-transition-replay', actorId: 'operator-one',
+        knowledgeId: approved.id, kind: approved.kind, contentRevision: 1,
+        expectedGovernanceVersion: approved.governanceVersion, nextStatus: 'revoked' as const,
+        occurredAt: '2000-01-01T00:00:00.000Z' };
+      const revoked = await store.transitionKnowledge(command);
+      const legacyDigest = checkpointChecksum({ operation: 'knowledge_transition', command });
+      database.raw.prepare('UPDATE diagnostic_knowledge_reviews SET command_digest = ? WHERE request_id = ?')
+        .run(legacyDigest, command.requestId);
+      const beforeReplay = await store.list({ targetId: scope.targetId, limit: 20 });
+
+      await expect(store.transitionKnowledge({ ...command, occurredAt: '2026-10-12T00:00:05.000Z' }))
+        .resolves.toEqual(revoked);
+      expect(await store.list({ targetId: scope.targetId, limit: 20 })).toEqual(beforeReplay);
+      const conflictingCommands = [
+        { ...command, actorId: 'different-operator' },
+        { ...command, nextStatus: 'superseded' as const },
+        { ...command, knowledgeId: 'different-knowledge' },
+        { ...command, contentRevision: 2 },
+        { ...command, expectedGovernanceVersion: command.expectedGovernanceVersion + 1 },
+        { ...command, kind: 'procedural' as const },
+      ];
+      for (const conflicting of conflictingCommands) {
+        await expect(store.transitionKnowledge({ ...conflicting, occurredAt: '2026-10-12T00:00:05.000Z' }))
+          .rejects.toMatchObject({ code: 'KNOWLEDGE_GOVERNANCE_CONFLICT' });
+      }
+      expect(await store.list({ targetId: scope.targetId, limit: 20 })).toEqual(beforeReplay);
+    } finally { database.close(); }
+  });
+
   it('uses timezone-aware expiry and excludes stale or out-of-scope FTS rows from ranking statistics', async () => {
     const database = SqliteDatabase.open(':memory:');
     try {

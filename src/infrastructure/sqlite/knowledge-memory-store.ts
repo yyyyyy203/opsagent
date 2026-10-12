@@ -23,7 +23,10 @@ interface RevisionRow {
   content_digest: string; valid_until: string | null; governance_version: number;
   status: KnowledgeRevision['status']; source_epoch: number; review_json: string | null; updated_at: string;
 }
-interface ReceiptRow { request_id: string; command_digest: string; operation: string; knowledge_id: string | null; content_revision: number | null; result_json: string }
+interface ReceiptRow {
+  request_id: string; command_digest: string; operation: string; knowledge_id: string | null;
+  content_revision: number | null; result_json: string; actor_id: string; governance_version: number | null;
+}
 interface AuditRow { sequence: number; audit_json: string }
 
 export interface SqliteGovernedKnowledgeStoreOptions {
@@ -210,9 +213,9 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
   public transitionKnowledge(command: KnowledgeGovernanceTransitionCommand): Promise<KnowledgeRevision> {
     return Promise.resolve().then(() => this.database.raw.transaction(() => {
       const normalized = normalizeGovernanceTransition(command);
-      const digest = commandDigest('knowledge_transition', normalized);
+      const digest = knowledgeTransitionIntentDigest(normalized);
       const receiptOperation = governanceReceiptOperation(normalized.nextStatus);
-      const receipt = this.findReceipt(normalized.requestId, receiptOperation, digest);
+      const receipt = this.findKnowledgeTransitionReceipt(normalized, receiptOperation, digest);
       if (receipt) return this.readReceiptRevision(receipt);
       const stored = this.loadRevision(normalized.knowledgeId, normalized.contentRevision);
       if (!stored || stored.kind !== normalized.kind) throw failure('KNOWLEDGE_NOT_FOUND');
@@ -450,9 +453,32 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeDraftStore, Knowle
     return row ?? null;
   }
 
+  private findKnowledgeTransitionReceipt(command: KnowledgeGovernanceTransitionCommand, operation: string,
+    digest: string): ReceiptRow | null {
+    const row = this.database.raw.prepare(`
+      SELECT request_id, command_digest, operation, knowledge_id, content_revision, result_json, actor_id, governance_version
+      FROM diagnostic_knowledge_reviews WHERE request_id = ?
+    `).get(command.requestId) as ReceiptRow | undefined;
+    if (!row) return null;
+    if (row.operation !== operation) throw failure('KNOWLEDGE_GOVERNANCE_CONFLICT');
+    if (row.command_digest === digest) return row;
+
+    // Pre-fix receipts hashed occurredAt into command_digest. Accept their replay only
+    // when every durable semantic field matches; the new timestamp is host metadata.
+    const revision = row.knowledge_id !== null && row.content_revision !== null
+      ? this.loadRevision(row.knowledge_id, row.content_revision) : null;
+    if (row.actor_id !== command.actorId || row.knowledge_id !== command.knowledgeId
+      || row.content_revision !== command.contentRevision
+      || row.governance_version !== command.expectedGovernanceVersion + 1
+      || revision?.kind !== command.kind) {
+      throw failure('KNOWLEDGE_GOVERNANCE_CONFLICT');
+    }
+    return row;
+  }
+
   private peekReceipt(requestId: string, operation: string, digest: string): ReceiptRow | null {
     const row = this.database.raw.prepare(`
-      SELECT request_id, command_digest, operation, knowledge_id, content_revision, result_json
+      SELECT request_id, command_digest, operation, knowledge_id, content_revision, result_json, actor_id, governance_version
       FROM diagnostic_knowledge_reviews WHERE request_id = ?
     `).get(requestId) as ReceiptRow | undefined;
     if (!row) return null;
@@ -627,6 +653,20 @@ function governanceReceiptOperation(status: KnowledgeGovernanceTransitionCommand
 }
 
 function commandDigest(operation: string, command: unknown): string { return checkpointChecksum({ operation, command }); }
+function knowledgeTransitionIntentDigest(command: KnowledgeGovernanceTransitionCommand): string {
+  // The timestamp is host-generated execution metadata. A retry with the same requestId
+  // must replay the original receipt even when the retry happens at a later instant.
+  const intent = {
+    requestId: command.requestId,
+    actorId: command.actorId,
+    knowledgeId: command.knowledgeId,
+    kind: command.kind,
+    contentRevision: command.contentRevision,
+    expectedGovernanceVersion: command.expectedGovernanceVersion,
+    nextStatus: command.nextStatus,
+  };
+  return commandDigest('knowledge_transition', intent);
+}
 function draftReceiptDigest(command: KnowledgeDraftWriteCommand): string {
   return command.intentDigest === undefined ? commandDigest('draft', command)
     : commandDigest('draft_intent', { ...command, revision: {

@@ -14,3 +14,5 @@ export * from './in-memory-knowledge-store.js';
 export * from './knowledge-audit-dispatcher.js';
 export * from './semantic-source-registry.js';
 export * from './semantic-knowledge-service.js';
+export * from './procedural-template-service.js';
+export * from './procedural-applicability.js';

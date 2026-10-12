@@ -252,7 +252,7 @@ export class InMemoryGovernedKnowledgeStore implements KnowledgeDraftStore, Know
   public transitionKnowledge(command: KnowledgeGovernanceTransitionCommand): Promise<KnowledgeRevision> {
     return Promise.resolve().then(() => this.inTransaction(() => {
       const normalized = normalizeKnowledgeTransition(command);
-      const digest = commandDigest('knowledge_transition', normalized);
+      const digest = knowledgeTransitionIntentDigest(normalized);
       const replay = this.replayReceipt(normalized.requestId, 'knowledge_transition', digest);
       if (replay) return this.currentRevision(replay.knowledgeId, replay.contentRevision);
       const stored = this.revisions.get(revisionKey(normalized.knowledgeId, normalized.contentRevision));
@@ -652,6 +652,21 @@ function auditTargetId(event: KnowledgeGovernanceAuditV1): string | undefined {
 
 function commandDigest(operation: string, command: unknown): string {
   return checkpointChecksum({ operation, command });
+}
+
+function knowledgeTransitionIntentDigest(command: KnowledgeGovernanceTransitionCommand): string {
+  // Match SQLite semantics: occurredAt is generated host metadata, not the caller's
+  // transition intent, and must not make a retry conflict with its durable receipt.
+  const intent = {
+    requestId: command.requestId,
+    actorId: command.actorId,
+    knowledgeId: command.knowledgeId,
+    kind: command.kind,
+    contentRevision: command.contentRevision,
+    expectedGovernanceVersion: command.expectedGovernanceVersion,
+    nextStatus: command.nextStatus,
+  };
+  return commandDigest('knowledge_transition', intent);
 }
 
 function draftReceiptDigest(command: KnowledgeDraftWriteCommand): string {
