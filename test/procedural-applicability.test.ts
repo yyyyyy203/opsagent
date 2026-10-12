@@ -86,6 +86,48 @@ function capabilityRegistry(overrides: Partial<{
     : null };
 }
 
+async function suggestionsFor(
+  revision: ProceduralKnowledgeRevision,
+  options: {
+    references?: readonly { id: string; version: string; digest: string; approval: 'approved' }[];
+    currentState?: KnowledgeRevisionStateSnapshot;
+    registry?: ReturnType<typeof capabilityRegistry>;
+  } = {},
+) {
+  const { snapshot } = await targetFixture(options.references ?? [{ id: revision.id,
+    version: String(revision.contentRevision), digest: revision.contentDigest, approval: 'approved' }]);
+  return findApplicableProceduralTemplates({ targetSnapshot: snapshot, targetScope: scope,
+    candidates: [{ revision, state: options.currentState ?? state(revision) }],
+    capabilityRegistry: options.registry ?? capabilityRegistry(), now });
+}
+
+const scopeMismatchCases: readonly {
+  dimension: string;
+  candidateScope: KnowledgeScope;
+  procedure: ProceduralKnowledgeContent;
+}[] = [
+  {
+    dimension: 'Scenario version',
+    candidateScope: { ...scope, scenarioVersion: '2.0.0' },
+    procedure: content({ scenario: { id: scope.scenarioId, version: '2.0.0' } }),
+  },
+  {
+    dimension: 'service',
+    candidateScope: { ...scope, serviceIds: ['other-service'] },
+    procedure: content({ applicableTo: { ...content().applicableTo, serviceIds: ['other-service'] } }),
+  },
+  {
+    dimension: 'fault type',
+    candidateScope: { ...scope, faultTypes: ['other-fault'] },
+    procedure: content({ applicableTo: { ...content().applicableTo, faultTypes: ['other-fault'] } }),
+  },
+  {
+    dimension: 'environment',
+    candidateScope: { ...scope, environment: 'development' },
+    procedure: content({ applicableTo: { ...content().applicableTo, environments: ['development'] } }),
+  },
+];
+
 describe('ProceduralApplicability', () => {
   it('returns a fixed suggestion only for an exact approved snapshot ref and preserves evidence requirements', async () => {
     const revision = approvedRevision(scope);
@@ -179,5 +221,67 @@ describe('ProceduralApplicability', () => {
       ], capabilityRegistry: capabilityRegistry(), now });
 
     expect(suggestions.map(item => item.reference.id)).toEqual(['tie-a', 'tie-b']);
+  });
+
+  it('rejects a Target reference with the wrong content revision', async () => {
+    const revision = approvedRevision(scope);
+    const suggestions = await suggestionsFor(revision, { references: [{ id: revision.id, version: '2',
+      digest: revision.contentDigest, approval: 'approved' }] });
+
+    expect(suggestions).toEqual([]);
+  });
+
+  it('rejects a Target reference with the wrong content digest', async () => {
+    const revision = approvedRevision(scope);
+    const suggestions = await suggestionsFor(revision, { references: [{ id: revision.id,
+      version: String(revision.contentRevision), digest: 'b'.repeat(64), approval: 'approved' }] });
+
+    expect(suggestions).toEqual([]);
+  });
+
+  it('rejects a Target-approved reference when the current revision approval is revoked', async () => {
+    const approved = approvedRevision(scope);
+    const revoked = parseKnowledgeRecord({ ...approved, status: 'revoked', governanceVersion: 4 }) as ProceduralKnowledgeRevision;
+
+    expect(await suggestionsFor(revoked)).toEqual([]);
+  });
+
+  it.each(scopeMismatchCases)('rejects a candidate with a different $dimension from the Target', async ({
+    candidateScope, procedure,
+  }) => {
+    const revision = approvedRevision(candidateScope, procedure, `mismatched-${procedure.templateId}`);
+
+    expect(await suggestionsFor(revision)).toEqual([]);
+  });
+
+  it('rejects a candidate scoped to a different data class', async () => {
+    const simulatedScope = scope;
+    const { datasetId, ...liveScopeBase } = simulatedScope;
+    void datasetId;
+    const liveScope: KnowledgeScope = { ...liveScopeBase, environment: 'staging', dataClass: 'live' };
+    const procedure = content({ applicableTo: { ...content().applicableTo, environments: ['staging'] } });
+    const revision = approvedRevision(liveScope, procedure, 'live-procedure');
+
+    expect(await suggestionsFor(revision)).toEqual([]);
+  });
+
+  it('rejects a capability registered for a different data class', async () => {
+    const revision = approvedRevision(scope);
+
+    expect(await suggestionsFor(revision, { registry: capabilityRegistry({ dataClasses: ['live'] }) })).toEqual([]);
+  });
+
+  it('rejects a stale current source epoch', async () => {
+    const revision = approvedRevision(scope);
+
+    expect(await suggestionsFor(revision, { currentState: state(revision, {
+      currentSourceEpoch: revision.sourceEpoch + 1,
+    }) })).toEqual([]);
+  });
+
+  it('rejects a current source digest mismatch', async () => {
+    const revision = approvedRevision(scope);
+
+    expect(await suggestionsFor(revision, { currentState: state(revision, { sourceDigestMatches: false }) })).toEqual([]);
   });
 });

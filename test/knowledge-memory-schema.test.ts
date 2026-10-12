@@ -202,6 +202,95 @@ describe('governed Semantic and Procedural schemas', () => {
     }))).toMatchObject({ code: 'KNOWLEDGE_RECORD_INVALID' });
   });
 
+  it.each([
+    {
+      label: 'shell commands',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'kubectl rollout restart deployment checkout',
+        capabilityId: 'metrics.query', completionCriterion: 'The observation is recorded.' }] }),
+    },
+    {
+      label: 'SQL statements',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Read the configured value.',
+        capabilityId: 'metrics.query', completionCriterion: 'UPDATE service_config SET enabled = false;' }] }),
+    },
+    {
+      label: 'raw HTTP requests',
+      content: proceduralContent({ preconditions: ['POST /admin/restart HTTP/1.1'] }),
+    },
+    {
+      label: 'arbitrary Tool JSON',
+      content: proceduralContent({ steps: [{ step: 1,
+        goal: '{"tool":"metrics.query","arguments":{"query":"up"}}',
+        capabilityId: 'metrics.query', completionCriterion: 'The observation is recorded.' }] }),
+    },
+    {
+      label: 'executable code',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Read the failure window.',
+        capabilityId: 'metrics.query', completionCriterion: 'const result = await metrics.query();' }] }),
+    },
+  ])('rejects $label in Procedural prose', ({ content }) => {
+    expect(captureError(() => parseKnowledgeRecord({
+      ...validProceduralRecord(), content, contentDigest: checkpointChecksum(content),
+    }))).toMatchObject({ code: 'KNOWLEDGE_RECORD_INVALID' });
+  });
+
+  it.each([
+    {
+      label: 'a shell command prefixed by prose',
+      content: proceduralContent({ steps: [{ step: 1,
+        goal: 'For recovery run: kubectl rollout restart deployment checkout',
+        capabilityId: 'metrics.query', completionCriterion: 'Record the observation.' }] }),
+    },
+    {
+      label: 'a git command embedded in prose',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Read the failure window.',
+        capabilityId: 'metrics.query', completionCriterion: 'Check with git status --short before proceeding.' }] }),
+    },
+    {
+      label: 'lowercase SQL statements',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Review the setting.',
+        capabilityId: 'metrics.query', completionCriterion: 'update service_config set enabled = false;' }] }),
+    },
+    {
+      label: 'lowercase raw HTTP request syntax',
+      content: proceduralContent({ preconditions: ['post /admin/restart http/1.1'] }),
+    },
+    {
+      label: 'Tool JSON with arguments before name',
+      content: proceduralContent({ steps: [{ step: 1,
+        goal: '{"arguments":{"query":"up"},"name":"metrics.query"}',
+        capabilityId: 'metrics.query', completionCriterion: 'Record the observation.' }] }),
+    },
+    {
+      label: 'fetch call syntax',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Read the failure window.',
+        capabilityId: 'metrics.query', completionCriterion: "fetch('/health')" }] }),
+    },
+    {
+      label: 'an executable call embedded in prose',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Read the failure window.',
+        capabilityId: 'metrics.query', completionCriterion: 'Record this: await metrics.query({ query: "up" })' }] }),
+    },
+  ])('rejects $label in Procedural prose', ({ content }) => {
+    expect(captureError(() => parseKnowledgeRecord({
+      ...validProceduralRecord(), content, contentDigest: checkpointChecksum(content),
+    }))).toMatchObject({ code: 'KNOWLEDGE_RECORD_INVALID' });
+  });
+
+  it('accepts ordinary investigation prose in a Procedural template', () => {
+    const content = proceduralContent({
+      preconditions: ['Service metrics are available for the selected time window.'],
+      steps: [{ step: 1, goal: 'Compare the observed rate with the previous window.',
+        capabilityId: 'metrics.query', completionCriterion: 'Record the rate and sample count.' }],
+      stopConditions: ['Stop when the required evidence is unavailable.'],
+      limitations: ['This suggestion does not authorize actions.'],
+    });
+
+    expect(parseKnowledgeRecord({
+      ...validProceduralRecord(), content, contentDigest: checkpointChecksum(content),
+    }).kind).toBe('procedural');
+  });
+
   it('does not allow Semantic topology facts to name services outside their Target scope', () => {
     const content = {
       type: 'service_topology',

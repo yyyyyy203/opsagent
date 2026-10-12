@@ -30,6 +30,36 @@ function containsBasicAuthorizationCredential(value: string): boolean {
 const containsNetworkAddressOrCredential = (value: string): boolean =>
   networkAddressPattern.test(value) || credentialPattern.test(value)
   || containsBasicAuthorizationCredential(value);
+const shellPromptPattern = /(?:^|\n)\s*(?:\$\s+|PS\s+[A-Z]:\\)/iu;
+const shellCommandPatterns = [
+  /\bkubectl\s+(?:get|describe|logs|rollout|exec|delete|apply|scale|patch)\b/iu,
+  /\bdocker\s+(?:run|exec|build|compose|rm|stop|restart|inspect)\b/iu,
+  /\bgit\s+(?:status|diff|log|show|branch|checkout|switch|commit|push|pull|fetch|reset|rebase|merge)\b/iu,
+  /\b(?:pnpm|npm|yarn)\s+(?:install|run|test|build|start|exec|add|remove|publish)\b/iu,
+  /\b(?:node|python3?|rg|grep|find|cat|ls|head|tail|sed|awk|jq)\s+[-\w./]/iu,
+  /\b(?:curl|wget)\s+(?:-[A-Za-z]|--[a-z-]+)\b/iu,
+  /\b(?:rm\s+-[rf]+|chmod\s+(?:[0-7]{3,4}|[ugoa]*[+=-][rwxXst]+)|chown\s+\S+:\S+\s+\S+)\b/iu,
+  /\bsystemctl\s+(?:start|stop|restart|reload|enable|disable)\b/iu,
+  /\b(?:bash|sh)\s+-c\b|\b(?:powershell(?:\.exe)?|pwsh)\s+-Command\b/iu,
+  /\b(?:mysql\s+-e|psql\s+-c|sqlite3\s+\S+\s+['"])/iu,
+  /\bInvoke-(?:WebRequest|RestMethod|Expression|Command)\b/iu,
+] as const;
+const sqlStatementPattern = /\b(?:SELECT\s+.{1,256}?\s+FROM\s+\S+|INSERT\s+INTO\s+\S+|UPDATE\s+\S+\s+SET\b|DELETE\s+FROM\s+\S+|ALTER\s+TABLE\s+\S+|DROP\s+(?:TABLE|DATABASE)\s+\S+|CREATE\s+(?:TABLE|INDEX|DATABASE)\s+\S+|TRUNCATE\s+TABLE\s+\S+)/iu;
+const rawHttpRequestPattern = /\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\/[^\s]*\s+HTTP\/\d(?:\.\d)?(?:\s|$)/iu;
+const toolJsonPattern = (value: string): boolean => value.includes('{') && value.includes('}')
+  && /"(?:tool|toolName|tool_name|name)"\s*:/iu.test(value)
+  && /"(?:arguments|input)"\s*:/iu.test(value);
+const executableDeclarationPattern = /(?:^|\n)\s*(?:(?:const|let|var)\s+[$\w]+\s*=|(?:async\s+)?function\s+[$\w]+\s*\(|def\s+[$\w]+\s*\()/imu;
+const executableInvocationPattern = /\b(?:await\s+)?[$\w]+(?:\.[$\w]+)*\s*\([^()\n]*\)/iu;
+const containsExecutableOrRequestSyntax = (value: string): boolean => shellPromptPattern.test(value)
+  || shellCommandPatterns.some((pattern) => pattern.test(value))
+  || sqlStatementPattern.test(value) || rawHttpRequestPattern.test(value)
+  || toolJsonPattern(value) || executableDeclarationPattern.test(value)
+  || executableInvocationPattern.test(value) || /```|=>/u.test(value);
+const proceduralProse = (maxBytes: number) => boundedText(maxBytes).refine(
+  (value) => !containsExecutableOrRequestSyntax(value),
+  'Procedural prose cannot contain command, query, request, Tool JSON, or code syntax',
+);
 export const safeKnowledgeIdentifierSchema = z.string().min(1).max(256)
   .refine((value) => value.trim().length > 0)
   .refine((value) => !containsNetworkAddressOrCredential(value),
@@ -197,7 +227,7 @@ const proceduralContentSchema = z.object({
       ctx.addIssue({ code: 'custom', path: ['faultTypes'], message: 'Applicable fault types must be unique.' });
     }
   }),
-  preconditions: z.array(boundedText(512)).min(1).max(32),
+  preconditions: z.array(proceduralProse(512)).min(1).max(32),
   requiredEvidence: z.array(z.object({
     category: z.enum(['metric', 'log', 'trace', 'change']),
     minimumCount: z.number().int().positive().safe(),
@@ -205,16 +235,16 @@ const proceduralContentSchema = z.object({
     'Required evidence categories must be unique'),
   steps: z.array(z.object({
     step: positiveVersion,
-    goal: boundedText(512),
+    goal: proceduralProse(512),
     capabilityId: readOnlyCapabilityId,
-    completionCriterion: boundedText(512),
+    completionCriterion: proceduralProse(512),
   }).strict()).min(1).max(32).refine((values) => uniqueBy(values, (value) => String(value.step)),
     'Procedural step numbers must be unique').refine((values) => values.every((value, index) => value.step === index + 1),
     'Procedural steps must be sequential'),
-  stopConditions: z.array(boundedText(512)).min(1).max(32),
+  stopConditions: z.array(proceduralProse(512)).min(1).max(32),
   expectedReportFields: z.array(identifier).min(1).max(32)
     .refine((values) => new Set(values).size === values.length, 'Report fields must be unique'),
-  limitations: z.array(boundedText(512)).max(32),
+  limitations: z.array(proceduralProse(512)).max(32),
   sourceReferences: sourceReferencesSchema,
 }).strict();
 
