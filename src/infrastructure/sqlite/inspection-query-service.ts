@@ -12,7 +12,7 @@ import type {
   RunStatus,
   VersionedCheckpointStore,
 } from '../../contracts/index.js';
-import { publicEvidenceFromManifest, publicEvidenceFromRecord, publicRunMissingEvidence } from '../../contracts/read-model.js';
+import { publicEvidenceFromManifest, publicEvidenceFromRecord, publicRunMissingEvidence, publicRunKnowledgeQualification } from '../../contracts/read-model.js';
 import { readRunUsageSummary } from '../../contracts/run-usage.js';
 import type { EvidenceManifestStore, EvidenceRecord } from '../../contracts/storage.js';
 import type { SqliteDatabase } from './database.js';
@@ -93,6 +93,7 @@ export class SqliteInspectionQueryService implements InspectionQueryService {
       ...(relation.parentRunId === undefined ? {} : { parentRunId: relation.parentRunId }),
       evidenceIds: [...context.evidenceIds],
       missingEvidence: publicRunMissingEvidence(context),
+      ...publicRunKnowledgeQualification(context),
       childRunIds: relation.childRunIds,
       usage: await readRunUsageSummary(this.events, runId),
       ...(context.failure === undefined ? {} : { failure: { code: context.failure.code, message: context.failure.message.slice(0, 500), retryable: context.failure.retryable } }),

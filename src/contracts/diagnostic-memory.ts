@@ -5,6 +5,8 @@ import type { AgentContext } from './context.js';
 import type { AgentMessage } from './message.js';
 import type { PendingAgentEventV2 } from './event-store.js';
 import type { AgentEventPayloadMap, AgentEventTypeV2 } from './event-v2/index.js';
+import type { KnowledgeDiagnosisQualificationV1, KnowledgeKind } from './knowledge-memory.js';
+import type { ResolvedTargetSnapshotV2 } from './target.js';
 
 export interface MemoryScopeBase {
   profileId: string;
@@ -24,6 +26,8 @@ export type MemoryCaptureMode = 'manual' | 'automatic' | 'skip';
 export interface MemoryPreferences {
   capture?: 'profile' | MemoryCaptureMode;
   recall?: 'profile' | 'enabled' | 'disabled';
+  semantic?: 'profile' | 'enabled' | 'disabled';
+  procedural?: 'profile' | 'enabled' | 'disabled';
 }
 export interface RunMemoryControl {
   schemaVersion: 1;
@@ -41,6 +45,7 @@ export type DiagnosticMemoryConfig =
     }[]; requiredSources: readonly HistoricalEvidenceRef['source'][];
     modelWindowTokens: number; reservedOutputTokens: number };
 export interface MemoryCapabilities {
+  availableKinds?: readonly ('working' | 'episodic' | KnowledgeKind)[];
   enabled: boolean;
   kind: 'episodic';
   reviewMode: 'local_operator';
@@ -144,6 +149,42 @@ export interface MemoryQueryStore {
 export interface MemoryRecallPort {
   prepare(input: { runId: string; text: string; state: RunMemoryState },
     operation: MemoryOperation): Promise<RunMemoryState>;
+}
+/** Frozen identities/preferences only; content and governance authority are never persisted here. */
+export interface RunKnowledgeSelection {
+  schemaVersion: 1;
+  snapshotDigest: string;
+  references: readonly { id: string; version: string; digest: string; kind: KnowledgeKind;
+    requiredness: 'optional' | 'required' }[];
+  preferences?: Pick<MemoryPreferences, 'semantic' | 'procedural'>;
+}
+export interface CoordinatedMemoryView {
+  selection: RunKnowledgeSelection;
+  qualification: KnowledgeDiagnosisQualificationV1;
+  episodic?: PreparedEpisodicMemoryView;
+  messages: AgentMessage[];
+  retrievedIds: string[];
+  scopes: Array<'episodic' | KnowledgeKind>;
+  fallbackPolicy?: 'working_only';
+}
+export interface MemoryCoordinatorPort {
+  prepare(input: { context: AgentContext; snapshot: ResolvedTargetSnapshotV2; text: string;
+    preferences?: Pick<MemoryPreferences, 'semantic' | 'procedural'>; episodic?: PreparedEpisodicMemoryView },
+    operation: MemoryOperation): Promise<CoordinatedMemoryView>;
+  revalidate(input: { context: AgentContext; snapshot: ResolvedTargetSnapshotV2; view: CoordinatedMemoryView },
+    operation: MemoryOperation): Promise<CoordinatedMemoryView>;
+}
+/** Optional Episodic ports for coordinator-only callers; Harness callers pass their prepared state instead. */
+export interface EpisodicMemoryCoordinatorPorts {
+  policy: MemoryPolicyPort;
+  recall: MemoryRecallPort;
+  renderer: MemoryHintRenderer;
+}
+/** Per-iteration Episodic result prepared by the Harness; consumed without another recall. */
+export interface PreparedEpisodicMemoryView {
+  state: RunMemoryState;
+  attempted: boolean;
+  succeeded: boolean;
 }
 export interface MemoryHintRenderer {
   render(state: RunMemoryState, operation: MemoryOperation): AgentMessage | null;

@@ -9,6 +9,8 @@ import { createSqlitePersistence } from '../src/infrastructure/sqlite/persistenc
 import { RuleBasedContextCompressor } from '../src/context-compressor/rule-based-compressor.js';
 import type { CompressionOptions, CompressionResult, ContextCompressor } from '../src/context-compressor/types.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
+import { fixture } from './helpers/memory-coordinator-fixture.js';
+import { MemoryCoordinator } from '../src/memory/memory-coordinator.js';
 
 const timestamp = '2026-09-14T00:00:00.000Z';
 const roots: string[] = [];
@@ -73,11 +75,22 @@ describe('context compression restart recovery', () => {
     roots.push(root);
     const sqlitePath = join(root, 'runtime.sqlite');
     const runId = 'compression-recovery-run';
+    const knowledge = await fixture();
+    const knowledgeView = await new MemoryCoordinator(knowledge.options).prepare({
+      context: { ...seededContext(runId), profileId: knowledge.context.profileId },
+      snapshot: knowledge.snapshot,
+      text: '',
+    }, knowledge.operation);
+    const expectedSelection = structuredClone(knowledgeView.selection);
+    const expectedQualification = structuredClone(knowledgeView.qualification);
+    const knowledgeText = knowledge.record.content.type === 'domain_glossary'
+      ? knowledge.record.content.terms[0]?.definition ?? '' : '';
     const seed = createSqlitePersistence({
       path: sqlitePath,
       clock: { now: () => new Date(timestamp) },
     });
-    await seed.checkpoints.save(seededContext(runId), null);
+    await seed.checkpoints.save({ ...seededContext(runId), knowledgeSelection: expectedSelection,
+      knowledgeQualification: expectedQualification }, null);
     seed.close();
 
     const compressor = new CountingCompressor(new RuleBasedContextCompressor({
@@ -100,6 +113,10 @@ describe('context compression restart recovery', () => {
     expect(firstCheckpoint?.governance?.compression.lastLevel).toBe('L1');
     expect(firstCheckpoint?.governance?.compression.summaryVersion).toBe(1);
     expect(firstCheckpoint?.messages.filter((message) => message.blocks.some((block) => block.type === 'context_summary'))).toHaveLength(1);
+    expect(firstCheckpoint?.knowledgeSelection).toEqual(expectedSelection);
+    expect(firstCheckpoint?.knowledgeQualification).toEqual(expectedQualification);
+    expect(JSON.stringify(firstCheckpoint)).not.toContain(knowledgeText);
+    expect(JSON.stringify(firstCheckpoint?.knowledgeSelection)).not.toMatch(/approval|approved/i);
     expect(firstEvents.filter((event) => event.type === 'CONTEXT_COMPRESSED')).toHaveLength(1);
 
     const second = createAgentRuntime({
@@ -117,6 +134,9 @@ describe('context compression restart recovery', () => {
     expect(compressor.calls).toBe(2);
     expect(secondCheckpoint?.governance?.compression.summaryVersion).toBe(1);
     expect(secondCheckpoint?.messages.filter((message) => message.blocks.some((block) => block.type === 'context_summary'))).toHaveLength(1);
+    expect(secondCheckpoint?.knowledgeSelection).toEqual(expectedSelection);
+    expect(secondCheckpoint?.knowledgeQualification).toEqual(expectedQualification);
+    expect(JSON.stringify(secondCheckpoint)).not.toContain(knowledgeText);
     expect(secondEvents.filter((event) => event.type === 'CONTEXT_COMPRESSION_STARTED')).toHaveLength(1);
     expect(secondEvents.filter((event) => event.type === 'CONTEXT_COMPRESSED')).toHaveLength(1);
   });

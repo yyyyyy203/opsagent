@@ -9,6 +9,15 @@ const timestamp = z.string().max(64).datetime({ offset: true })
   .refine((value) => Number.isFinite(Date.parse(value)), 'Memory timestamp must represent a finite instant');
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/iu);
 const revision = z.number().int().positive().safe();
+export const runKnowledgeSelectionSchema = z.object({
+  schemaVersion: z.literal(1), snapshotDigest: z.string().regex(/^sha256:v2:[a-f0-9]{64}$/u),
+  references: z.array(z.object({ id: identifier, version: z.string().regex(/^[1-9]\d*$/u)
+    .refine(value => Number.isSafeInteger(Number(value))), digest: sha256,
+    kind: z.enum(['semantic', 'procedural']), requiredness: z.enum(['optional', 'required']) }).strict()).max(64)
+    .refine(refs => new Set(refs.map(ref => `${ref.id}\u0000${ref.version}`)).size === refs.length),
+  preferences: z.object({ semantic: z.enum(['profile', 'enabled', 'disabled']).optional(),
+    procedural: z.enum(['profile', 'enabled', 'disabled']).optional() }).strict().optional(),
+}).strict();
 const summary = z.string().min(1).refine((value) => Buffer.byteLength(value, 'utf8') <= 2 * 1024,
   'Memory summary exceeds its byte budget');
 const limitations = z.array(z.string().max(2048)).max(20);
@@ -133,6 +142,8 @@ export const runMemoryStateSchema = z.object({
 const memoryPreferencesSchema = z.object({
   capture: z.enum(['profile', 'manual', 'automatic', 'skip']).optional(),
   recall: z.enum(['profile', 'enabled', 'disabled']).optional(),
+  semantic: z.enum(['profile', 'enabled', 'disabled']).optional(),
+  procedural: z.enum(['profile', 'enabled', 'disabled']).optional(),
 }).strict();
 
 export function parseMemoryScope(value: unknown): MemoryScope {

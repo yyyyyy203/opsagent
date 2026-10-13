@@ -3,6 +3,8 @@ import type { RunUsageSummary } from './run-usage.js';
 import type { AgentContext, DiagnosisStage, RunStatus } from './context.js';
 import type { JsonObject, JsonValue } from './common.js';
 import type { EvidenceManifestSummary, EvidenceRecord } from './storage.js';
+import type { KnowledgeDiagnosisQualificationV1 } from './knowledge-memory.js';
+import { parseKnowledgeDiagnosisQualification } from './knowledge-memory-schema.js';
 import {
   normalizeSourceReportMissingEvidenceCodes,
   projectGeneralMissingEvidenceCodes,
@@ -21,6 +23,7 @@ export interface PublicRunSummary {
 }
 
 export interface PublicRunDetail extends PublicRunSummary {
+  knowledgeQualification?: KnowledgeDiagnosisQualificationV1;
   evidenceIds: readonly string[];
   missingEvidence: readonly string[];
   childRunIds: readonly string[];
@@ -30,6 +33,15 @@ export interface PublicRunDetail extends PublicRunSummary {
     message: string;
     retryable: boolean;
   };
+}
+
+/** Strict versioned parser followed by safe public ID projection; no knowledge content crosses this seam. */
+export function publicRunKnowledgeQualification(context: AgentContext): Pick<PublicRunDetail, 'knowledgeQualification'> {
+  if (context.knowledgeQualification === undefined) return {};
+  const qualification = parseKnowledgeDiagnosisQualification(context.knowledgeQualification);
+  return { knowledgeQualification: { ...qualification, missingKnowledge: qualification.missingKnowledge.map(item => ({
+    ...item, reference: { ...item.reference, id: safeText(item.reference.id) },
+  })) } };
 }
 
 export interface RunListOptions {

@@ -17,7 +17,84 @@ import type {
   RunMemoryState,
   Tool,
 } from '../src/contracts/index.js';
+import type { MemoryCoordinatorPort } from '../src/contracts/diagnostic-memory.js';
+import type { PreparedEpisodicMemoryView } from '../src/contracts/diagnostic-memory.js';
 import { toolInputJsonSchema } from '../src/tool/schema.js';
+import { fixture as knowledgeFixture, now as knowledgeNow } from './helpers/memory-coordinator-fixture.js';
+import { MemoryCoordinator } from '../src/memory/memory-coordinator.js';
+import { InMemoryDurableState } from '../src/storage/in-memory-durable-state.js';
+import type { TargetRecoveryGate } from '../src/contracts/target.js';
+
+describe('Harness governed knowledge qualification', () => {
+  it.each([
+    { requiredness: 'required' as const, timing: 'reasoning' }, { requiredness: 'optional' as const, timing: 'reasoning' },
+    { requiredness: 'required' as const, timing: 'authorize' },
+    { requiredness: 'optional' as const, timing: 'reasoning', episodic: true },
+  ])('qualifies $requiredness revocation during $timing without rewriting prose', async ({ requiredness, timing, episodic }) => {
+    const f = await knowledgeFixture(requiredness);
+    const modelRequests: AgentMessage[][] = [];
+    const model: ChatModel = { async *stream(messages): AsyncGenerator<ModelStreamEvent, ModelResponse> {
+      modelRequests.push(structuredClone(messages));
+      if (timing === 'authorize') expect(JSON.stringify(messages)).not.toContain('A completed settlement');
+      else if (!episodic) expect(JSON.stringify(messages)).toContain('A completed settlement');
+      yield { type: 'text_delta', delta: '健康结论已生成' };
+      f.setState({ ...f.getState(), status: 'revoked', governanceVersion: 4 });
+      return { text: '健康结论已生成', toolCalls: [] };
+    } };
+    const durable = new InMemoryDurableState({ now: () => new Date(knowledgeNow) }, { getPublicationVersion: () => 1 });
+    const binding = { bindingId: 'knowledge-binding', targetId: f.snapshot.targetId, runId: 'knowledge-run', rootRunId: 'knowledge-run',
+      snapshotDigest: f.snapshot.digest, createdAt: knowledgeNow, requestId: 'knowledge-request', requestDigest: `sha256:v1:${'a'.repeat(64)}` };
+    await durable.targetBindings.reserveRequest({ requestId: binding.requestId, targetId: binding.targetId,
+      requestDigest: binding.requestDigest, runId: binding.runId, createdAt: binding.createdAt });
+    const claim = await durable.targetStarts.claimStart({ ...binding, ownerId: 'test-owner', now: knowledgeNow,
+      leaseUntil: '2026-10-12T00:01:00.000Z' });
+    if (claim.status !== 'claimed') throw new Error('claim unavailable');
+    const lease = { model, tools: [], release: () => {}, operations: { authorize: async () => {
+      if (timing === 'authorize') f.setState({ ...f.getState(), status: 'revoked', governanceVersion: 4 });
+      return { ...binding, operation: 'model' as const, capability: 'reasoning', policyEpoch: 1, signal: new AbortController().signal };
+    }, validate: async () => {} } };
+    const gate: TargetRecoveryGate = { acquireForStart: async () => lease, acquireForResume: async () => lease, authorizeResume: async () => {} };
+    let coordinatorRecallCalls = 0;
+    let preparedEpisodic: PreparedEpisodicMemoryView | undefined;
+    const memory = memoryHarness();
+    const coordinatorOptions = { ...f.options, ...(episodic ? { episodic: {
+      policy: { allows: () => true }, renderer: memory.dependencies.renderer,
+      recall: { prepare: async () => { coordinatorRecallCalls += 1; throw new Error('duplicate Episodic recall'); } },
+    } } : {}) };
+    const implementation = new MemoryCoordinator(coordinatorOptions);
+    const coordinator: MemoryCoordinatorPort = {
+      prepare: (input, operation) => {
+        preparedEpisodic = input.episodic;
+        return implementation.prepare(input, operation);
+      },
+      revalidate: (input, operation) => implementation.revalidate(input, operation),
+    };
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], tools: [], includeExternalBash: false, durableState: durable,
+      targetRecoveryGate: gate, clock: { now: () => new Date(knowledgeNow) }, memoryHarness: {
+        ...memory.dependencies, modelWindowTokens: 32768, coordinator,
+      } });
+    try {
+      const result = await runtime.agent.reply({ runId: binding.runId, profileId: f.snapshot.profile.profileId, message: 'settlement',
+        ...(episodic ? { trustedMemoryControl: control } : {}),
+        trustedTargetBinding: { binding, snapshot: f.snapshot, startClaim: claim.claim } });
+      const saved = await durable.checkpoints.load(binding.runId);
+      expect(result.status, JSON.stringify(saved?.context.failure)).toBe('completed'); expect(result.finalText).toBe('健康结论已生成');
+      const events = await runtime.eventStoreV2.readRun(binding.runId, 0, 100);
+      const finished = events.find(event => event.type === 'RUN_FINISHED');
+      expect(finished?.payload).toMatchObject({ outcome: requiredness === 'required' ? 'partial' : 'complete', finalText: '健康结论已生成' });
+      expect(saved?.context.knowledgeQualification?.diagnosisReady).toBe(requiredness === 'optional');
+      expect(saved?.context.messages.some(message => message.id.startsWith('knowledge-hint:'))).toBe(false);
+      expect(saved?.context.evidenceIds).toEqual([]);
+      if (episodic) {
+        expect(preparedEpisodic?.state.hints).toEqual([hint]);
+        expect(preparedEpisodic).toMatchObject({ attempted: true, succeeded: true });
+        expect(coordinatorRecallCalls).toBe(0);
+        const request = JSON.stringify(modelRequests[0]);
+        expect(request.match(new RegExp(hint.summary, 'gu'))).toHaveLength(1);
+      }
+    } finally { await runtime.close(); }
+  });
+});
 
 const now = '2026-10-10T12:00:00.000Z';
 const scope: MemoryScope = {
@@ -238,12 +315,19 @@ describe('Agent Harness historical memory view', () => {
     const runtime = createAgentRuntime({ model, workspaceRoots: [], memoryHarness: memory.dependencies });
 
     try {
-      const result = await runtime.agent.reply({
+      const stream = runtime.agent.replyStream({
         runId: 'memory-harness-run',
         profileId: 'simulation',
         message: '检查结算失败率升高',
         trustedMemoryControl: control,
       });
+      const v1Types: string[] = [];
+      let result: Awaited<ReturnType<typeof runtime.agent.reply>> | undefined;
+      while (true) {
+        const item = await stream.next();
+        if (item.done) { result = item.value; break; }
+        v1Types.push(item.value.type);
+      }
       const checkpoint = await runtime.checkpoints.load(result.runId);
       const request = model.requests[0] ?? [];
       const storedMessages = checkpoint?.messages ?? [];
@@ -261,6 +345,17 @@ describe('Agent Harness historical memory view', () => {
       expect(lifecycle.map((event) => event.type)).toContain('MEMORY_RETRIEVAL_COMPLETED');
       expect(lifecycle.filter((event) => event.type.startsWith('MEMORY_RETRIEVAL_'))
         .every((event) => event.visibility === 'audit')).toBe(true);
+      expect(v1Types).toEqual(['RUN_STARTED', 'STEP_STARTED', 'REASONING_STARTED', 'TEXT_DELTA', 'RUN_FINISHED']);
+      const retrieval = lifecycle.filter((event) => event.type.startsWith('MEMORY_RETRIEVAL_'));
+      expect(retrieval.map((event) => event.type)).toEqual(['MEMORY_RETRIEVAL_STARTED', 'MEMORY_RETRIEVAL_COMPLETED']);
+      expect(Object.keys(retrieval[0]!.payload).sort()).toEqual(['filters', 'limit', 'scopes']);
+      expect(Object.keys(retrieval[1]!.payload).sort()).toEqual(['durationMs', 'hitCount', 'memoryIds']);
+      const runStarted = lifecycle.findIndex((event) => event.type === 'RUN_STARTED');
+      const stepStarted = lifecycle.findIndex((event) => event.type === 'STEP_STARTED');
+      const reasoningStarted = lifecycle.findIndex((event) => event.type === 'REASONING_STARTED');
+      expect(runStarted).toBeLessThan(lifecycle.indexOf(retrieval[0]!));
+      expect(lifecycle.indexOf(retrieval[1]!)).toBeLessThan(stepStarted);
+      expect(stepStarted).toBeLessThan(reasoningStarted);
       expect(JSON.stringify(lifecycle)).not.toContain(hint.summary);
       expect(result.status).toBe('completed');
     } finally {

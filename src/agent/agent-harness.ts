@@ -28,7 +28,7 @@ import type {
   ToolExecutionRecord,
   RiskSeverity,
 } from '../contracts/index.js';
-import type { TargetBindingTransition, TargetOperationPermit, TargetRecoveryGate, TargetRunRuntimeLease, TrustedTargetBinding } from '../contracts/target.js';
+import type { ResolvedTargetSnapshotV2, TargetBindingTransition, TargetOperationPermit, TargetRecoveryGate, TargetRunRuntimeLease, TrustedTargetBinding } from '../contracts/target.js';
 import { visibilityForV2Event } from '../event/v2/visibility.js';
 import { toolExecutionAttemptId } from '../event/v2/attempt-id.js';
 import { CheckpointConflictError, TargetConfigurationError, checkpointChecksum, createInitialRunGovernanceState,
@@ -40,7 +40,9 @@ import type { BatchExecutionCallbacks, ToolBatchExecutionScope, ToolBatchExecuto
 import { Toolkit } from '../tool/toolkit.js';
 import { ToolAdmission } from '../tool/admission.js';
 import type { AgentMemoryHarness } from './types.js';
-import type { MemoryCaptureIntent, MemoryEventFactory, MemoryOperation, RunMemoryControl, RunMemoryState } from '../contracts/diagnostic-memory.js';
+import type { CoordinatedMemoryView, MemoryCaptureIntent, MemoryEventFactory, MemoryOperation, PreparedEpisodicMemoryView,
+  RunMemoryControl, RunMemoryState } from '../contracts/diagnostic-memory.js';
+import { parseKnowledgeDiagnosisQualification } from '../contracts/knowledge-memory-schema.js';
 import { parseRunMemoryControl, parseRunMemoryState } from '../contracts/diagnostic-memory-schema.js';
 import { memoryScopeKey } from '../memory/memory-scope.js';
 import { toolInputJsonSchema } from '../tool/schema.js';
@@ -87,6 +89,9 @@ export interface AgentHarnessDependencies {
 type RunTerminalOutcome = 'completed' | 'paused' | 'failed' | 'cancelled';
 
 interface RunExecutionFrame {
+  knowledgeSnapshot?: ResolvedTargetSnapshotV2;
+  knowledgeView?: CoordinatedMemoryView;
+  episodicPrepared?: PreparedEpisodicMemoryView;
   context: AgentContext;
   /** Host-owned Target binding staged for the first durable RUN_STARTED transition. */
   targetBinding?: TargetBindingTransition;
@@ -137,6 +142,7 @@ export class AgentHarness implements DiagnosisAgent {
     };
     const frame: RunExecutionFrame = {
       context: this.createContext(normalizedOptions),
+      ...(trustedTargetBinding?.snapshot.schemaVersion === 2 ? { knowledgeSnapshot: trustedTargetBinding.snapshot } : {}),
       ...(trustedTargetBinding === undefined ? {} : { targetBinding: {
         binding: trustedTargetBinding.binding,
         snapshot: trustedTargetBinding.snapshot,
@@ -210,6 +216,9 @@ export class AgentHarness implements DiagnosisAgent {
     context.streamId = newStreamId;
     const frame: RunExecutionFrame = {
       context,
+      ...(context.knowledgeSelection === undefined || storedBinding === null ? {} : {
+        knowledgeSnapshot: parseExecutableTargetSnapshot(await this.dependencies.durableState!.targetBindings.getSnapshot(storedBinding.bindingId)),
+      }),
       ...(targetRuntime === undefined ? {} : { targetRuntime }),
       finalText: '',
       naturalExit: false,
@@ -456,7 +465,9 @@ export class AgentHarness implements DiagnosisAgent {
       }
       yield* this.publishCompressionOutcome(frame, compressed, before);
 
+      delete frame.episodicPrepared;
       const memoryMessage = await this.prepareMemoryView(frame, signal);
+      await this.prepareKnowledgeView(frame, signal, memoryMessage, frame.episodicPrepared);
 
       frame.context.budget.iteration += 1;
       const stepId = this.dependencies.ids.next('step');
@@ -487,6 +498,7 @@ export class AgentHarness implements DiagnosisAgent {
       }
       if (response.text !== undefined) frame.finalText += response.text;
       if (candidates.length === 0) {
+        await this.revalidateKnowledgeView(frame, signal);
         this.appendToolExchange(frame.context, response.text, candidates, []);
         frame.context.status = 'completed';
         const stepDuration = this.stepDuration(frame.activeStepStartedAt);
@@ -502,7 +514,7 @@ export class AgentHarness implements DiagnosisAgent {
           : await readRunUsageSummary(this.dependencies.eventStore, frame.context.runId);
         const usagePayload = runUsage === undefined ? undefined : toUsagePayload(runUsage);
         const finishPayload = {
-          outcome: 'complete' as const,
+          outcome: frame.context.knowledgeQualification?.diagnosisReady === false ? 'partial' as const : 'complete' as const,
           finalText: frame.finalText,
           ...(runUsage === undefined ? {} : {
             usageCompleteness: runUsage.completeness,
@@ -664,6 +676,36 @@ export class AgentHarness implements DiagnosisAgent {
     if (context.pendingInterrupt?.interruptType === 'external_tool_execution') return true;
     if (!context.confirmedToolCallIds.includes(pending.id)) return false;
 
+    if (context.knowledgeSelection !== undefined) {
+      const previousQualification = context.knowledgeQualification === undefined
+        ? undefined
+        : structuredClone(context.knowledgeQualification);
+      if (frame.knowledgeSnapshot === undefined) {
+        return yield* this.rejectPendingInterruptStream(frame, pending, 'knowledge_snapshot_unavailable');
+      }
+      const skipEpisodicRecall = context.memoryControl === undefined ? undefined : {
+        state: context.memory ?? emptyMemoryState(context.memoryControl), attempted: false, succeeded: false,
+      };
+      const publishKnowledgeOutcome = await this.prepareKnowledgeView(frame, signal, undefined, skipEpisodicRecall, true);
+      const currentQualification = frame.context.knowledgeQualification;
+      const qualificationChanged = previousQualification === undefined || currentQualification === undefined
+        || checkpointChecksum(previousQualification) !== checkpointChecksum(currentQualification);
+      if (qualificationChanged) {
+        // Keep the pre-resume qualification as the durable comparison baseline until
+        // the rejection transition commits. A crash between these transitions must
+        // not turn a stale pending call into an apparently-current one.
+        if (previousQualification === undefined) delete frame.context.knowledgeQualification;
+        else frame.context.knowledgeQualification = previousQualification;
+        await publishKnowledgeOutcome?.();
+        context = frame.context;
+        if (currentQualification === undefined) delete context.knowledgeQualification;
+        else context.knowledgeQualification = currentQualification;
+        return yield* this.rejectPendingInterruptStream(frame, pending, 'knowledge_qualification_changed');
+      }
+      await publishKnowledgeOutcome?.();
+      context = frame.context;
+    }
+
     const stepId = context.pendingToolBatch?.stepId ?? this.dependencies.ids.next('step');
     const batch = yield* this.dependencies.batchExecutor.executeStream(
       [pending],
@@ -784,6 +826,8 @@ export class AgentHarness implements DiagnosisAgent {
       }
     }
     context.pendingToolCalls = [];
+    context.confirmedToolCallIds = context.confirmedToolCallIds.filter(id => id !== pending.id);
+    if (!context.rejectedToolCallIds.includes(pending.id)) context.rejectedToolCallIds.push(pending.id);
     delete context.pendingInterrupt;
     delete context.pendingToolBatch;
     context.status = 'running';
@@ -1276,6 +1320,8 @@ export class AgentHarness implements DiagnosisAgent {
       ? undefined
       : await targetOperations.authorize({ operation: 'model', capability: 'model', signal });
     const operationSignal = operationPermit === undefined ? signal : AbortSignal.any([signal, operationPermit.signal]);
+    await this.revalidateKnowledgeView(frame, operationSignal);
+    if (frame.knowledgeView !== undefined) messages.push(...frame.knowledgeView.messages);
     const stream = this.modelFor(frame).stream(messages, this.toolkitFor(frame).list(), {
       signal: operationSignal,
       runId: context.runId,
@@ -1379,6 +1425,21 @@ export class AgentHarness implements DiagnosisAgent {
       toolCallBudget: options.toolCallBudget ?? { remaining: maxToolCalls },
       ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: options.networkAttemptBudget }),
       ...this.initialMemoryState(options.trustedMemoryControl),
+      ...(options.trustedTargetBinding?.snapshot.schemaVersion !== 2 || options.trustedTargetBinding.snapshot.knowledgeRefs.length === 0 ? {} : {
+        knowledgeSelection: {
+          schemaVersion: 1 as const, snapshotDigest: options.trustedTargetBinding.snapshot.digest,
+          references: options.trustedTargetBinding.snapshot.knowledgeRefs.map(ref => {
+            const requirement = options.trustedTargetBinding!.snapshot.schemaVersion === 2
+              ? options.trustedTargetBinding!.snapshot.knowledgePolicy.requirements.find(r => r.id === ref.id && r.version === ref.version && r.digest === ref.digest) : undefined;
+            return { id: ref.id, version: ref.version, digest: ref.digest,
+              kind: requirement?.knowledgeClass ?? 'semantic' as const, requiredness: requirement?.requiredness ?? 'optional' as const };
+          }),
+          ...(options.memoryPreferences === undefined ? {} : { preferences: {
+            ...(options.memoryPreferences.semantic === undefined ? {} : { semantic: options.memoryPreferences.semantic }),
+            ...(options.memoryPreferences.procedural === undefined ? {} : { procedural: options.memoryPreferences.procedural }),
+          } }),
+        },
+      }),
       governance: options.trustedTargetBinding === undefined
         ? createInitialRunGovernanceState({ profileId: options.profileId, capturedAt: now })
         : {
@@ -1405,6 +1466,50 @@ export class AgentHarness implements DiagnosisAgent {
     };
   }
 
+  private async prepareKnowledgeView(frame: RunExecutionFrame, signal: AbortSignal, episodicMessage?: AgentMessage,
+    episodic?: PreparedEpisodicMemoryView, deferOutcomeCommit = false): Promise<(() => Promise<void>) | undefined> {
+    delete frame.knowledgeView;
+    const snapshot = frame.knowledgeSnapshot;
+    const selection = frame.context.knowledgeSelection;
+    if (snapshot === undefined || selection === undefined) return undefined;
+    const coordinator = this.dependencies.memory?.coordinator;
+    if (coordinator === undefined) {
+      frame.context.knowledgeQualification = parseKnowledgeDiagnosisQualification({ schemaVersion: 1,
+        diagnosisReady: !selection.references.some(ref => ref.requiredness === 'required'),
+        missingKnowledge: selection.references.map(ref => ({ reference: { id: ref.id, version: ref.version, digest: ref.digest, approval: 'approved' },
+          kind: ref.kind, requiredness: ref.requiredness, reasonCode: 'KNOWLEDGE_STORAGE_UNAVAILABLE' })),
+        limitationReasons: selection.references.some(ref => ref.requiredness === 'required') ? ['KNOWLEDGE_STORAGE_UNAVAILABLE'] : ['OPTIONAL_KNOWLEDGE_OMITTED'] });
+      return undefined;
+    }
+    const started = this.dependencies.clock.now();
+    const operation = this.memoryOperation(frame, signal, started, frame.loopHint);
+    operation.availableMemoryTokens = Math.max(0, (operation.availableMemoryTokens ?? 0)
+      - (episodicMessage === undefined ? 0 : Buffer.byteLength(JSON.stringify(episodicMessage), 'utf8')));
+    await this.publishV2('MEMORY_RETRIEVAL_STARTED', frame.context, { scopes: [...new Set(selection.references.map(ref => ref.kind))],
+      filters: { profileId: snapshot.profile.profileId, serviceId: snapshot.scenario.serviceId, faultType: snapshot.scenario.id, environment: snapshot.environment }, limit: 64 });
+    frame.knowledgeView = await coordinator.prepare({ context: frame.context, snapshot, text: currentUserQuery(frame.context.messages),
+      ...(selection.preferences === undefined ? {} : { preferences: selection.preferences }),
+      ...(episodic === undefined ? {} : { episodic }) }, operation);
+    frame.context.knowledgeSelection = frame.knowledgeView.selection;
+    frame.context.knowledgeQualification = frame.knowledgeView.qualification;
+    const publishOutcome = frame.knowledgeView.fallbackPolicy !== undefined
+      ? () => this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_FAILED', {
+        error: memoryEventError('MEMORY_LOOKUP_FAILED'), fallbackPolicy: frame.knowledgeView!.fallbackPolicy! })
+      : () => this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_COMPLETED', { hitCount: frame.knowledgeView!.retrievedIds.length,
+        memoryIds: frame.knowledgeView!.retrievedIds,
+        durationMs: Math.max(0, this.dependencies.clock.now().getTime() - started.getTime()) });
+    if (deferOutcomeCommit) return publishOutcome;
+    await publishOutcome();
+    return undefined;
+  }
+
+  private async revalidateKnowledgeView(frame: RunExecutionFrame, signal: AbortSignal): Promise<void> {
+    if (frame.knowledgeView === undefined || frame.knowledgeSnapshot === undefined || this.dependencies.memory?.coordinator === undefined) return;
+    frame.knowledgeView = await this.dependencies.memory.coordinator.revalidate({ context: frame.context,
+      snapshot: frame.knowledgeSnapshot, view: frame.knowledgeView }, this.memoryOperation(frame, signal, this.dependencies.clock.now()));
+    frame.context.knowledgeQualification = frame.knowledgeView.qualification;
+  }
+
   private async prepareMemoryView(frame: RunExecutionFrame, signal: AbortSignal): Promise<AgentMessage | undefined> {
     const memory = this.dependencies.memory;
     const control = frame.context.memoryControl;
@@ -1426,9 +1531,14 @@ export class AgentHarness implements DiagnosisAgent {
       ...(reasonCode === undefined ? {} : { reasonCode }),
     });
     if (previous.availability === 'unavailable'
-      && previous.selectionState === 'selected' && previous.selections.length === 0) return undefined;
+      && previous.selectionState === 'selected' && previous.selections.length === 0) {
+      frame.episodicPrepared = { state: previous, attempted: true, succeeded: false };
+      return undefined;
+    }
     if (!memoryPolicyAllows(memory, control, 'recall')) {
-      frame.context.memory = failClosed('MEMORY_POLICY_DENIED');
+      const unavailable = failClosed('MEMORY_POLICY_DENIED');
+      frame.context.memory = unavailable;
+      frame.episodicPrepared = { state: unavailable, attempted: false, succeeded: false };
       await this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_FAILED', {
         error: memoryEventError('MEMORY_POLICY_DENIED'),
         fallbackPolicy: 'empty',
@@ -1439,7 +1549,9 @@ export class AgentHarness implements DiagnosisAgent {
     const operation = this.memoryOperation(frame, signal, nowDate, frame.loopHint);
     const scopeKey = memoryScopeKey(control.scope);
     if (memoryScopeKey(previous.scope) !== scopeKey) {
-      frame.context.memory = failClosed('MEMORY_SCOPE_INVALID');
+      const unavailable = failClosed('MEMORY_SCOPE_INVALID');
+      frame.context.memory = unavailable;
+      frame.episodicPrepared = { state: unavailable, attempted: false, succeeded: false };
       await this.publishTransitionV2(frame, 'MEMORY_RETRIEVAL_FAILED', {
         error: memoryEventError('MEMORY_SCOPE_INVALID'),
         fallbackPolicy: 'empty',
@@ -1475,9 +1587,12 @@ export class AgentHarness implements DiagnosisAgent {
           selectedAt: now,
         };
       }
+      frame.episodicPrepared = { state: next, attempted: true, succeeded: next.availability !== 'unavailable' };
     } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error;
       signal.throwIfAborted();
       next = failClosed(error instanceof TypeError ? 'MEMORY_DATA_INVALID' : 'MEMORY_LOOKUP_FAILED');
+      frame.episodicPrepared = { state: next, attempted: true, succeeded: false };
     }
     frame.context.memory = next;
     if (next.availability === 'unavailable') {
@@ -1496,7 +1611,9 @@ export class AgentHarness implements DiagnosisAgent {
     if (availableMemoryTokens <= 0 || next.availability !== 'ready' || next.hints.length === 0) return undefined;
     try {
       return memory.renderer.render(next, { ...operation, availableMemoryTokens }) ?? undefined;
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error;
+      signal.throwIfAborted();
       // Renderer failures are fail-closed; the selected snapshot remains available for audit/revalidation.
       return undefined;
     }

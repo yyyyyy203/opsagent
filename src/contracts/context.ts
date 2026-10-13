@@ -1,5 +1,6 @@
 import type { AgentError } from './errors.js';
-import type { RunMemoryControl, RunMemoryState } from './diagnostic-memory.js';
+import type { RunMemoryControl, RunMemoryState, RunKnowledgeSelection } from './diagnostic-memory.js';
+import type { KnowledgeDiagnosisQualificationV1 } from './knowledge-memory.js';
 import type { RunGovernanceState, ToolBatchGovernanceSnapshot } from './governance.js';
 import type { SerializableInterrupt } from './hitl.js';
 import type { AgentMessage } from './message.js';
@@ -63,5 +64,7 @@ export interface AgentContext {
   memoryControl?: RunMemoryControl;
   /** Frozen historical selections and active hints; never current-run evidence. */
   memory?: RunMemoryState;
+  knowledgeSelection?: RunKnowledgeSelection;
+  knowledgeQualification?: KnowledgeDiagnosisQualificationV1;
   failure?: AgentError;
 }

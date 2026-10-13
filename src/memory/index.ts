@@ -16,3 +16,4 @@ export * from './semantic-source-registry.js';
 export * from './semantic-knowledge-service.js';
 export * from './procedural-template-service.js';
 export * from './procedural-applicability.js';
+export * from './memory-coordinator.js';

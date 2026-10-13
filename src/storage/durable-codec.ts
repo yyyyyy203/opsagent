@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { canonicalJson, checkpointChecksum } from '../contracts/stable-json.js';
 import type { AgentContext, PendingToolBatch } from '../contracts/context.js';
-import { runMemoryControlSchema, runMemoryStateSchema } from '../contracts/diagnostic-memory-schema.js';
+import { runMemoryControlSchema, runMemoryStateSchema, runKnowledgeSelectionSchema } from '../contracts/diagnostic-memory-schema.js';
+import { knowledgeDiagnosisQualificationSchema } from '../contracts/knowledge-memory-schema.js';
 import { createInitialRunGovernanceState, type ToolBatchGovernanceSnapshot } from '../contracts/governance.js';
 import type { EvidenceRecord, ToolExecutionRecord } from '../contracts/storage.js';
 
@@ -179,6 +180,10 @@ const agentContext = legacyAgentContext.extend({
 const agentContextV4 = agentContext.extend({
   targetBindingId: z.string().min(1).max(256).optional(),
 }).strict();
+const agentContextV5 = agentContextV4.extend({
+  knowledgeSelection: runKnowledgeSelectionSchema.optional(),
+  knowledgeQualification: knowledgeDiagnosisQualificationSchema.optional(),
+}).strict();
 
 const toolExecutionRecord = z.object({
   toolCallId: z.string().min(1),
@@ -225,9 +230,9 @@ export function parsePendingToolBatch(value: unknown): PendingToolBatch {
   return structuredClone(parsed) as PendingToolBatch;
 }
 
-export function parseAgentContext(value: unknown, schemaVersion: 1 | 2 | 3 | 4 = 4): AgentContext {
+export function parseAgentContext(value: unknown, schemaVersion: 1 | 2 | 3 | 4 | 5 = 5): AgentContext {
   // Legacy codecs remain closed to later fields; migration must never infer memory or Target scope.
-  const parsed = schemaVersion === 4
+  const parsed = schemaVersion === 5 ? agentContextV5.parse(value) : schemaVersion === 4
     ? agentContextV4.parse(value)
     : schemaVersion === 3 ? agentContext.parse(value) : legacyAgentContext.parse(value);
   if (parsed.pendingToolBatch?.governance !== undefined) parseToolBatchGovernanceSnapshot(parsed.pendingToolBatch.governance);

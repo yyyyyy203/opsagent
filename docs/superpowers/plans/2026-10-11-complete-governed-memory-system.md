@@ -108,7 +108,7 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 
 **验收**：scope/ref/逐修订 status/sourceEpoch/有效期过滤在搜索前；每轮重建临时模型视图，不把知识全文/批准状态作为长期 Checkpoint 授权。模型请求前/最终资格提交前再次复核，revocation 从下一轮/恢复/缓存移除；预算不足的 required 显式限制，optional 失败不丢其他合法类型，全部长期检索失败才 working_only，Abort 传播。确定性 diagnosisReady/missingKnowledge 门不靠模型自行承认不足，知识不混入 evidenceIds/coverage；压缩不改写引用身份。
 
-- [ ] T5 验收：类型开关、用户偏好、required、预算、scope 撤销和压缩/重启矩阵；已有 Episodic 临时提示与 revalidate 保持，不假设已存在“撤销文本永久入历史”缺陷。
+- [x] T5 验收：类型开关、用户偏好、required、预算、scope 撤销和压缩/重启矩阵；已有 Episodic 临时提示与 revalidate 保持，不假设已存在“撤销文本永久入历史”缺陷。已通过 7 个定向文件 / 116 项测试、typecheck、build、T5 文件集 lint 与独立复审（2026-10-13）。
 
 ## T6 — Web 查询/治理 API 与同页 UI（RED → GREEN）
 
@@ -165,4 +165,5 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 - [x] R0.1–R0.4 运行时补强及验收完成；依据多项目计划 R0.4 的实现/独立审查记录，并在 2026-10-12 重新通过 Node 24 全仓 lint、typecheck、test、build。
 - [x] T1、T2 已完成并通过独立复核。
 - [x] T1–T4 已完成并通过对应任务复核；T3 与 T4 的 Minor 均须在 T6/最终复核中回看。
-- [ ] T4b、T5、T6、T7 尚未完成；按依赖顺序继续执行，文档修订不算实现完成。
+- [x] T4b、T5 已完成；T5 通过定向验收和独立复审，提交收口后按依赖顺序继续 T6、T7；文档修订不算实现完成。
+- [ ] T6、T7 尚未完成；T7 仍需运行全仓质量门和独立整分支审查。

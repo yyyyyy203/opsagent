@@ -7,6 +7,8 @@ import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { createSqlitePersistence } from '../src/infrastructure/sqlite/persistence-bundle.js';
 import { parseAgentContext } from '../src/storage/durable-codec.js';
 import type { AgentMemoryHarness } from '../src/agent/types.js';
+import { checkpointChecksum } from '../src/contracts/stable-json.js';
+import { parseResolvedTargetSnapshotV2 } from '../src/contracts/target-schema.js';
 import type {
   AgentMessage,
   ChatModel,
@@ -19,8 +21,11 @@ import type {
   RunMemoryState,
   Tool,
 } from '../src/contracts/index.js';
+import type { TargetRecoveryGate } from '../src/contracts/target.js';
 import { BoundedMemoryHintRenderer } from '../src/memory/hint-renderer.js';
+import { MemoryCoordinator } from '../src/memory/memory-coordinator.js';
 import { memoryCase, memoryNow, simulationMemoryScope } from './fixtures/diagnostic-memory.js';
+import { fixture as knowledgeFixture, now as knowledgeNow } from './helpers/memory-coordinator-fixture.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -99,6 +104,140 @@ async function drain(stream: AsyncGenerator<unknown, unknown>): Promise<void> {
 }
 
 describe('memory Harness checkpoint recovery', () => {
+  it('rejects a confirmed pending Target ToolCall when required knowledge is revoked before SQLite resume', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-knowledge-hitl-recovery-'));
+    roots.push(root);
+    const sqlitePath = join(root, 'runtime.sqlite');
+    const f = await knowledgeFixture();
+    const snapshotFields = { ...f.snapshot };
+    Reflect.deleteProperty(snapshotFields, 'digest');
+    const unsignedSnapshot = { ...snapshotFields, publicationVersion: 0 };
+    const snapshot = parseResolvedTargetSnapshotV2({ ...unsignedSnapshot,
+      digest: `sha256:v2:${checkpointChecksum({ algorithm: 'sha256', version: 2, target: unsignedSnapshot })}` });
+    const runId = 'knowledge-hitl-recovery-run';
+    const requestId = 'knowledge-hitl-recovery-request';
+    const requestDigest = `sha256:v1:${'c'.repeat(64)}`;
+    const binding = {
+      bindingId: 'knowledge-hitl-recovery-binding',
+      targetId: snapshot.targetId,
+      runId,
+      rootRunId: runId,
+      snapshotDigest: snapshot.digest,
+      createdAt: knowledgeNow,
+      requestId,
+      requestDigest,
+    };
+    const clock = { now: () => new Date(knowledgeNow) };
+    let persistence = createSqlitePersistence({ path: sqlitePath, clock });
+    await persistence.targetBindings.reserveRequest({ requestId, targetId: binding.targetId, requestDigest, runId, createdAt: knowledgeNow });
+    const start = await persistence.targetStarts.claimStart({ requestId, runId, targetId: binding.targetId, requestDigest,
+      ownerId: 'knowledge-hitl-recovery-owner', now: knowledgeNow, leaseUntil: '2026-10-12T00:01:00.000Z' });
+    if (start.status !== 'claimed') throw new Error('test Target start claim was not acquired');
+
+    const toolCallId = 'knowledge-revoked-confirmed-query';
+    const queryCalls = vi.fn(() => ({ blocks: [{ type: 'text' as const, text: 'query executed after confirmation' }] }));
+    const targetQueryTool: Tool = {
+      ...queryTool,
+      implementationVersion: 'metrics.query.v1',
+      call: queryCalls,
+    };
+    const initialModel = new RecordingModel({
+      toolCalls: [{ id: toolCallId, name: targetQueryTool.name, input: { service: 'checkout' } }],
+    });
+    const resumedModel = new RecordingModel({ text: '按最新资格重新推理后完成巡检。', toolCalls: [] });
+    const makeGate = (model: ChatModel): TargetRecoveryGate => {
+      const lease = {
+        model,
+        tools: [targetQueryTool],
+        release: () => {},
+        operations: {
+          authorize: async ({ operation, capability, signal }: { operation: 'model' | 'source'; capability: string; signal: AbortSignal }) => ({
+            bindingId: binding.bindingId,
+            runId,
+            rootRunId: runId,
+            snapshotDigest: snapshot.digest,
+            operation,
+            capability,
+            policyEpoch: 1,
+            signal,
+          }),
+          validate: async () => {},
+        },
+      };
+      return { acquireForStart: async () => lease, acquireForResume: async () => lease, authorizeResume: async () => {} };
+    };
+    const coordinatorMemory = makeMemory({ allows: () => true });
+    const firstRuntime = createAgentRuntime({
+      model: initialModel,
+      memoryHarness: { ...coordinatorMemory, coordinator: new MemoryCoordinator(f.options) },
+      workspaceRoots: [],
+      tools: [],
+      includeExternalBash: false,
+      durableState: persistence,
+      targetRecoveryGate: makeGate(initialModel),
+      clock,
+    });
+
+    try {
+      const paused = await firstRuntime.agent.reply({
+        runId,
+        profileId: snapshot.profile.profileId,
+        message: '检查 checkout 的结算失败率',
+        trustedTargetBinding: { binding, snapshot, startClaim: start.claim },
+      });
+      expect(paused.status).toBe('awaiting_confirmation');
+      expect(queryCalls).not.toHaveBeenCalled();
+      const pending = await persistence.checkpoints.load(runId);
+      expect(pending?.context.knowledgeQualification).toMatchObject({ diagnosisReady: true, missingKnowledge: [] });
+      expect(pending?.context.pendingInterrupt?.toolCallId).toBe(toolCallId);
+      if (pending === null) throw new Error('Expected durable pending confirmation.');
+
+      await firstRuntime.hitl.decide({ runId, toolCallId, confirmed: true, actor: 'memory-recovery-test',
+        decidedAt: knowledgeNow, expectedRevision: pending.revision });
+      const confirmed = await persistence.checkpoints.load(runId);
+      expect(confirmed?.context.confirmedToolCallIds).toContain(toolCallId);
+    } finally {
+      await firstRuntime.close();
+      persistence.close();
+    }
+
+    f.setState({ ...f.getState(), status: 'revoked', governanceVersion: 4 });
+    persistence = createSqlitePersistence({ path: sqlitePath, clock });
+    const resumedRuntime = createAgentRuntime({
+      model: resumedModel,
+      memoryHarness: { ...coordinatorMemory, coordinator: new MemoryCoordinator(f.options) },
+      workspaceRoots: [],
+      tools: [],
+      includeExternalBash: false,
+      durableState: persistence,
+      targetRecoveryGate: makeGate(resumedModel),
+      clock,
+    });
+    try {
+      await drain(resumedRuntime.agent.resumeStream(runId));
+
+      const resumed = await persistence.checkpoints.load(runId);
+      const resultBlock = resumed?.context.messages.flatMap(message => message.blocks)
+        .find(block => block.type === 'tool_result' && block.result.toolCallId === toolCallId);
+      expect(queryCalls).not.toHaveBeenCalled();
+      expect(resultBlock).toMatchObject({ type: 'tool_result', result: { status: 'aborted', error: { code: 'POLICY_DENIED' } } });
+      expect(resumed?.context.pendingToolCalls).toEqual([]);
+      expect(resumed?.context.pendingInterrupt).toBeUndefined();
+      expect(resumed?.context.pendingToolBatch).toBeUndefined();
+      expect(resumed?.context.confirmedToolCallIds).not.toContain(toolCallId);
+      expect(resumed?.context.rejectedToolCallIds).toContain(toolCallId);
+      expect(resumed?.context.knowledgeQualification?.diagnosisReady).toBe(false);
+      expect(resumedModel.requests).toHaveLength(1);
+      expect(JSON.stringify(resumedModel.requests[0])).toContain(toolCallId);
+      expect(JSON.stringify(resumedModel.requests[0])).toContain('POLICY_DENIED');
+      expect(JSON.stringify(resumedModel.requests[0])).not.toContain('A completed settlement');
+      expect(resumed?.context.status).toBe('completed');
+    } finally {
+      await resumedRuntime.close();
+      persistence.close();
+    }
+  });
+
   it('revalidates only the frozen selection and removes missing evidence after restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agentops-memory-harness-recovery-'));
     roots.push(root);

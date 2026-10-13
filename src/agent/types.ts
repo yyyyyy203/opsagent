@@ -5,12 +5,14 @@ import type {
   MemoryPolicyPort,
   MemoryPreferences,
   MemoryRecallPort,
+  MemoryCoordinatorPort,
   RunMemoryControl,
 } from '../contracts/diagnostic-memory.js';
 import type { TrustedTargetBinding } from '../contracts/target.js';
 
 /** Host-injected memory ports; concrete stores and policy assembly stay outside the Harness. */
 export interface AgentMemoryHarness {
+  coordinator?: MemoryCoordinatorPort;
   recall: MemoryRecallPort;
   renderer: MemoryHintRenderer;
   policy: MemoryPolicyPort;
