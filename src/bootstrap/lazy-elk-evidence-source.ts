@@ -41,6 +41,7 @@ export function createLazyElkEvidenceSource(options: LazyElkEvidenceSourceOption
   const pageClient = new ResilientElkPageClient(new McpElkPageClient(connection), {
     executor: options.executor,
     now: options.now,
+    sourceId: 'elk',
   });
   const paged = new PagedEvidenceSource(pageClient, { now: options.now });
 
@@ -129,6 +130,22 @@ function executionDeadline(
     signal: request.signal,
     deadline: request.deadline,
     now,
+    onEvent: (event) => {
+      if (event.type === 'retry' && event.code !== undefined) request.onResilienceEvent?.({
+        type: 'retry_scheduled', sourceId: 'elk', attempt: event.attempt,
+        reasonCode: event.code, delayMs: event.delayMs ?? 0,
+      });
+    },
+    onCircuitEvent: (event) => {
+      const sourceId = 'elk';
+      if (event.type === 'opened') request.onResilienceEvent?.({
+        type: 'circuit_opened', sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil,
+      });
+      else if (event.type === 'half_opened') request.onResilienceEvent?.({
+        type: 'circuit_half_opened', sourceId, probePolicy: 'single_probe',
+      });
+      else request.onResilienceEvent?.({ type: 'circuit_closed', sourceId, recoveryEvidence: [] });
+    },
   };
 }
 

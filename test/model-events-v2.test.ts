@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentMessage, Clock, IdGenerator, ModelResponse, Tool } from '../src/contracts/index.js';
+import { TargetConfigurationError } from '../src/contracts/index.js';
+import type { AgentMessage, Clock, IdGenerator, ModelResponse, TargetOperationGuard, TargetOperationPermit, Tool } from '../src/contracts/index.js';
 import { EventFactoryV2 } from '../src/event/v2/event-factory.js';
 import { EventedChatModel } from '../src/model/evented-model.js';
 import type { EventPublisherV2 } from '../src/event/v2/event-publisher.js';
@@ -40,5 +41,40 @@ describe('EventedChatModel', () => {
     expect(completed.finishReason).toBe('stop');
     expect(completed.cacheHit).toBe(true);
     expect(typeof completed.durationMs).toBe('number');
+  });
+
+  it('does not publish streamed model content after its Target permit is revoked', async () => {
+    const events: Array<{ type: string; payload: unknown }> = [];
+    const publisher = { publish: (event: { type: string; payload: unknown }) => { events.push(event); return Promise.resolve(event); } } as unknown as EventPublisherV2;
+    const permitController = new AbortController();
+    const permit: TargetOperationPermit = {
+      bindingId: 'binding-1', runId: 'run-1', rootRunId: 'run-1', snapshotDigest: 'snapshot-1',
+      operation: 'model', capability: 'model', policyEpoch: 1, signal: permitController.signal,
+    };
+    let validations = 0;
+    const targetOperations: TargetOperationGuard = {
+      authorize: async () => permit,
+      validate: async () => {
+        validations += 1;
+        if (validations > 3) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      },
+    };
+    const base = {
+      async *stream(): AsyncGenerator<{ type: 'text_delta'; delta: string }, ModelResponse> {
+        yield { type: 'text_delta', delta: 'private output' };
+        return { text: 'private output', toolCalls: [], finishReason: 'stop' };
+      },
+    };
+    const model = new EventedChatModel(base, publisher, new EventFactoryV2(clock, ids), {
+      provider: 'openai-compatible', model: 'deepseek-chat', purpose: 'diagnosis', correlationId: 'corr-1',
+    });
+    const stream = model.stream(messages, tools, {
+      signal: new AbortController().signal, runId: 'run-1', stepId: 'step-1', targetOperations,
+    });
+
+    await expect(stream.next()).rejects.toMatchObject({ code: 'TARGET_OPERATION_DENIED' });
+    expect(events.map(event => event.type)).not.toContain('CONTENT_BLOCK_DELTA');
+    expect(events.map(event => event.type)).not.toContain('MESSAGE_STARTED');
+    expect(events.map(event => event.type)).not.toContain('MODEL_CALL_COMPLETED');
   });
 });

@@ -99,6 +99,17 @@ describe('Target Harness recovery across runtime restart', () => {
     const root = await mkdtemp(join(tmpdir(), 'opsangent-target-recovery-'));
     const sqlitePath = join(root, 'target-runtime.sqlite');
     const clock = { now: () => new Date(capturedAt) };
+    let persistence = createSqlitePersistence({ path: sqlitePath, clock });
+    await createStaticTargetResolver({
+      catalog: multiProjectTargetCatalog,
+      connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles),
+      installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
+      installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+      identityRegistry: persistence.targetIdentityRegistry,
+      knowledgePolicies: persistence.targetKnowledgePolicies,
+      validationTime: capturedAt,
+    });
     const identityPorts = createTargetIdentityTestPorts();
     const resolver = await createStaticTargetResolver({
       ...identityPorts,
@@ -123,7 +134,6 @@ describe('Target Harness recovery across runtime restart', () => {
       requestId,
       requestDigest,
     };
-    let persistence = createSqlitePersistence({ path: sqlitePath, clock });
     await persistence.targetBindings.reserveRequest({ requestId, targetId: snapshot.targetId, requestDigest, runId, createdAt: capturedAt });
     const claim = await persistence.targetStarts.claimStart({
       requestId,
@@ -354,6 +364,17 @@ describe('Target Harness recovery across runtime restart', () => {
     const root = await mkdtemp(join(tmpdir(), 'opsangent-target-external-result-'));
     const sqlitePath = join(root, 'target-external-result.sqlite');
     const clock = { now: () => new Date(capturedAt) };
+    const persistence = createSqlitePersistence({ path: sqlitePath, clock });
+    await createStaticTargetResolver({
+      catalog: multiProjectTargetCatalog,
+      connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles),
+      installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
+      installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+      identityRegistry: persistence.targetIdentityRegistry,
+      knowledgePolicies: persistence.targetKnowledgePolicies,
+      validationTime: capturedAt,
+    });
     const identityPorts = createTargetIdentityTestPorts();
     const resolver = await createStaticTargetResolver({
       ...identityPorts,
@@ -378,7 +399,6 @@ describe('Target Harness recovery across runtime restart', () => {
       requestId,
       requestDigest,
     };
-    const persistence = createSqlitePersistence({ path: sqlitePath, clock });
     let targetImplementationVersion = 'target.external.v1';
     const makeExternalTool = (version: () => string): Tool => ({
       name: 'test.target-external-operation',
@@ -506,7 +526,9 @@ describe('Target Harness recovery across runtime restart', () => {
       validationTime: capturedAt,
     });
     const snapshot = await resolver.resolve({ targetId: 'market-a-sim', capturedAt, signal: new AbortController().signal });
-    const durable = new InMemoryDurableState(clock);
+    const registryVersion = snapshot.identityRegistryVersion;
+    if (registryVersion === undefined) throw new Error('Resolved snapshot is missing its identity registry version.');
+    const durable = new InMemoryDurableState(clock, undefined, () => registryVersion);
     const runId = 'target-recovery-restart-test';
     const requestId = 'request-target-recovery-restart-test';
     const requestDigest = `sha256:v1:${'a'.repeat(64)}`;

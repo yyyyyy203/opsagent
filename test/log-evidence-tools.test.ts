@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   EvidenceCaptureBudget,
   EvidenceCaptureResult,
@@ -11,7 +11,10 @@ import type {
   StreamingEvidenceRecorder,
   Tool,
   ToolResponse,
+  TargetOperationGuard,
+  TargetOperationPermit,
 } from '../src/contracts/index.js';
+import { TargetConfigurationError } from '../src/contracts/target.js';
 import {
   createLogEvidenceTools,
   type LogEvidenceAggregation,
@@ -157,7 +160,17 @@ function findTool(tools: readonly Tool[], name: string): Tool {
 async function callTool(
   tool: Tool,
   input: Record<string, unknown>,
-  overrides: { runId?: string; toolCallId?: string; omitToolCallId?: boolean; deadline?: number; networkAttemptBudget?: { remaining: number } } = {},
+  overrides: {
+    runId?: string;
+    toolCallId?: string;
+    omitToolCallId?: boolean;
+    deadline?: number;
+    networkAttemptBudget?: { remaining: number };
+    targetBindingId?: string;
+    targetSourceId?: string;
+    targetOperations?: TargetOperationGuard;
+    targetOperationPermit?: TargetOperationPermit;
+  } = {},
 ): Promise<ToolResponse> {
   const result = tool.call?.(input, {
     runId: overrides.runId ?? 'run-1',
@@ -167,6 +180,10 @@ async function callTool(
     mode: 'dry_run',
     ...(overrides.deadline === undefined ? {} : { deadline: overrides.deadline }),
     ...(overrides.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: overrides.networkAttemptBudget }),
+    ...(overrides.targetBindingId === undefined ? {} : { targetBindingId: overrides.targetBindingId }),
+    ...(overrides.targetSourceId === undefined ? {} : { targetSourceId: overrides.targetSourceId }),
+    ...(overrides.targetOperations === undefined ? {} : { targetOperations: overrides.targetOperations }),
+    ...(overrides.targetOperationPermit === undefined ? {} : { targetOperationPermit: overrides.targetOperationPermit }),
   });
   if (result === undefined) throw new Error('tool has no local call');
   if (typeof result === 'object' && result !== null && Symbol.asyncIterator in result) {
@@ -196,6 +213,58 @@ function options(captured: StreamingEvidenceCaptureRequest[]) {
 }
 
 describe('log evidence Tools', () => {
+  it('fences evidence commit when the Target permit is revoked after source capture', async () => {
+    const captured: StreamingEvidenceCaptureRequest[] = [];
+    let committed = false;
+    const permit: TargetOperationPermit = {
+      bindingId: 'binding-1', runId: 'run-1', rootRunId: 'run-1', snapshotDigest: 'snapshot-1',
+      operation: 'source', capability: 'market-a-logs', policyEpoch: 1, signal: new AbortController().signal,
+    };
+    const targetOperations: TargetOperationGuard = {
+      authorize: vi.fn(async () => permit),
+      validate: vi.fn(async () => { throw new TargetConfigurationError('TARGET_OPERATION_DENIED'); }),
+    };
+    const recorder: StreamingEvidenceRecorder = {
+      capture: async (request, captureOptions) => {
+        captured.push(request);
+        await captureOptions?.validateBeforeCommit?.();
+        committed = true;
+        return {
+          evidenceId: request.evidenceId,
+          summary: summary(),
+          manifest: {
+            ...visible,
+            evidenceId: request.evidenceId,
+            runId: request.runId,
+            stepId: request.stepId,
+            toolCallId: request.toolCallId,
+            captureKey: request.captureKey,
+            queryDigest: request.queryDigest,
+          },
+          coverage: 1,
+          truncated: false,
+          missingEvidence: [],
+        };
+      },
+    };
+    const tools = createLogEvidenceTools({ ...options(captured), recorder });
+
+    await expect(callTool(findTool(tools, 'logs.capture'), {
+      service: 'checkout',
+      start: '2026-09-13T00:00:00.000Z',
+      end: '2026-09-13T01:00:00.000Z',
+    }, {
+      targetBindingId: 'binding-1',
+      targetSourceId: 'market-a-logs',
+      targetOperations,
+      targetOperationPermit: permit,
+    })).rejects.toMatchObject({ code: 'TARGET_OPERATION_DENIED' });
+
+    expect(captured).toHaveLength(1);
+    expect(targetOperations.validate).toHaveBeenCalledWith(permit, expect.any(AbortSignal));
+    expect(committed).toBe(false);
+  });
+
   it('captures through the streaming recorder and returns only bounded evidence references', async () => {
     const captured: StreamingEvidenceCaptureRequest[] = [];
     const tools = createLogEvidenceTools(options(captured));

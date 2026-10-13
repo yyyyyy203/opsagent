@@ -122,6 +122,19 @@ export interface KnowledgeScopedSearchStore {
   search(input: KnowledgeScopedSearchRequest): Promise<readonly KnowledgeRevision[]>;
 }
 
+/** Read-only, host-scoped revision listing for governance UI; never accepts a caller-built scope. */
+export interface KnowledgeScopedListRequest {
+  readonly scope: KnowledgeScope;
+  readonly kind: KnowledgeKind;
+  readonly status?: KnowledgeStatus;
+  readonly after?: { readonly id: string; readonly contentRevision: number };
+  readonly limit: number;
+}
+
+export interface KnowledgeScopedListPort {
+  listScopedRevisions(input: KnowledgeScopedListRequest): Promise<readonly KnowledgeRevision[]>;
+}
+
 export type KnowledgeSourceEpochQueryPort = Pick<KnowledgeQueryPort, 'getSourceEpoch'>;
 
 export interface KnowledgePublicationActorPort {
@@ -165,7 +178,7 @@ export interface KnowledgePublicationVersionPort {
 
 /** Minimal public aggregate; implementations may expose each port independently. */
 export interface GovernedKnowledgeStorage extends KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
-  KnowledgeScopedSearchStore, KnowledgeGovernanceTransitionStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort,
+  KnowledgeScopedSearchStore, KnowledgeScopedListPort, KnowledgeGovernanceTransitionStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort,
   TargetKnowledgeBindingPublisher, KnowledgeGovernanceAuditOutboxPort, KnowledgeGovernanceAuditQueryPort {}
 
 export interface KnowledgeRevisionStateSnapshot {
@@ -203,6 +216,15 @@ export interface KnowledgePublicationInspectionPort {
     hostPolicy: TargetKnowledgePolicy | null;
   }>;
 }
+
+/** Formal host storage used by the Target knowledge-management application assembly. */
+export interface TargetKnowledgeRevisionStorage extends KnowledgeProceduralReplayCapability,
+  KnowledgeDraftStore, KnowledgeSourceGovernanceStore, KnowledgeScopedSearchStore, KnowledgeScopedListPort,
+  KnowledgeGovernanceTransitionStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort, KnowledgeRevisionStateQueryPort {}
+
+/** Publication storage is a separate adapter so review approval cannot mutate the active Target binding. */
+export interface TargetKnowledgePublicationStorage extends GovernedKnowledgePublicationPort,
+  TargetKnowledgeBindingPublisher, KnowledgePublicationInspectionPort {}
 
 export interface KnowledgeGovernanceAuditAttemptPort {
   /** Records delivery failure without removing the event from the pending outbox. */

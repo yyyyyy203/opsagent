@@ -5,6 +5,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { createSqlitePersistence } from '../src/infrastructure/sqlite/persistence-bundle.js';
+import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
+import { StaticProfileResolver } from '../src/profiles/profile-resolver.js';
+import { multiProjectConnectionRegistry, multiProjectProfiles, multiProjectTargetCatalog } from '../src/profiles/target-samples.js';
+import { WINDOW_FAILURE_RATE_INSTALLATION } from '../src/profiles/scenarios/window-failure-rate-v1.js';
 import { parseAgentContext } from '../src/storage/durable-codec.js';
 import type { AgentMemoryHarness } from '../src/agent/types.js';
 import { checkpointChecksum } from '../src/contracts/stable-json.js';
@@ -129,6 +133,17 @@ describe('memory Harness checkpoint recovery', () => {
     };
     const clock = { now: () => new Date(knowledgeNow) };
     let persistence = createSqlitePersistence({ path: sqlitePath, clock });
+    await createStaticTargetResolver({
+      catalog: multiProjectTargetCatalog,
+      connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles),
+      installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
+      installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+      identityRegistry: persistence.targetIdentityRegistry,
+      knowledgePolicies: persistence.targetKnowledgePolicies,
+      validationTime: knowledgeNow,
+    });
+    expect(snapshot.identityRegistryVersion).toBe((await persistence.targetIdentityRegistry.readSnapshot()).version);
     await persistence.targetBindings.reserveRequest({ requestId, targetId: binding.targetId, requestDigest, runId, createdAt: knowledgeNow });
     const start = await persistence.targetStarts.claimStart({ requestId, runId, targetId: binding.targetId, requestDigest,
       ownerId: 'knowledge-hitl-recovery-owner', now: knowledgeNow, leaseUntil: '2026-10-12T00:01:00.000Z' });

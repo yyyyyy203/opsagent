@@ -1,5 +1,6 @@
 import type { AgentMessage } from './message.js';
 import type { Tool, ToolCall, RawToolCall } from './tool.js';
+import type { TargetOperationGuard } from './target.js';
 
 export interface ModelUsage {
   inputTokens?: number;
@@ -30,6 +31,8 @@ export interface ModelCallOptions {
   deadline?: number;
   /** Optional provider hint used after a deterministic loop HARD intervention. */
   toolChoice?: 'none';
+  /** Transient Target operation gate; retry adapters authorize each actual request. */
+  targetOperations?: TargetOperationGuard;
 }
 
 export interface ChatModel {

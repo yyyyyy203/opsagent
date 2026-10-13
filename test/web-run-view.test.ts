@@ -350,6 +350,7 @@ describe('browser run view state', () => {
     };
     let emit: ((frame: PublicEventFrame) => void) | undefined;
     let fail: ((error: Error) => void) | undefined;
+    let sourceTimer: (() => void) | undefined;
     const client: RunViewClient = {
       listProfiles: () => Promise.resolve([]), listRuns: () => Promise.resolve({ items: [] }),
       getRun: () => Promise.resolve(detail), getMessages: () => Promise.resolve({ items: [] }),
@@ -360,7 +361,12 @@ describe('browser run view state', () => {
       decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
       openRunEvents: (_runId, _lastEventId, onEvent, onError) => { emit = onEvent; fail = onError; return { close: () => undefined }; },
     };
-    const controller = new RunViewController(client);
+    const controller = new RunViewController(client, {
+      setTimeout: (callback) => { sourceTimer = callback; return 1; },
+      clearTimeout: () => { sourceTimer = undefined; },
+      setInterval: () => 2,
+      clearInterval: () => undefined,
+    });
     await controller.openRun('run-tool');
     fail?.(new Error('temporary disconnect'));
     expect(controller.getState().connected).toBe(false);
@@ -371,6 +377,14 @@ describe('browser run view state', () => {
     emit?.({ event: 'TOOL_RESULT', data: { type: 'TOOL_RESULT', payload: { result: { toolName: 'fixture.metrics', status: 'success', response: { secret: 'private' } } } } });
     expect(controller.getState().toolActivity).toMatchObject({ toolName: 'fixture.metrics', status: 'success' });
     expect(JSON.stringify(controller.getState().toolActivity)).not.toContain('private');
+    emit?.({ event: 'DATASOURCE_RETRY_SCHEDULED', data: { type: 'DATASOURCE_RETRY_SCHEDULED', payload: { sourceId: 'prometheus', attempt: 2, reasonCode: 'MCP_TIMEOUT', delayMs: 400 } } });
+    expect(controller.getState().datasourceActivity).toMatchObject([{ sourceId: 'prometheus', status: 'retrying', attempt: 2 }]);
+    emit?.({ event: 'DATASOURCE_CIRCUIT_OPENED', data: { type: 'DATASOURCE_CIRCUIT_OPENED', payload: { sourceId: 'prometheus', failureWindow: { failures: 3, windowMs: 100 }, openUntil: new Date(Date.now() + 60_000).toISOString() } } });
+    expect(controller.getState().datasourceActivity.map((item) => item.status)).toEqual(['retrying', 'open']);
+    sourceTimer?.();
+    expect(controller.getState().datasourceActivity.map((item) => item.status)).toEqual(['retrying', 'open', 'probe_waiting']);
+    emit?.({ event: 'DATASOURCE_CIRCUIT_CLOSED', data: { type: 'DATASOURCE_CIRCUIT_CLOSED', payload: { sourceId: 'prometheus', recoveryEvidence: [] } } });
+    expect(controller.getState().datasourceActivity.map((item) => item.status)).toEqual(['retrying', 'open', 'probe_waiting', 'recovered']);
     controller.close();
   });
 });

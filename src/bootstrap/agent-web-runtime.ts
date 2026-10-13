@@ -23,6 +23,8 @@ import { SourceInvocationLimiter } from '../tool/source-invocation-limiter.js';
 import type { DiagnosticMemoryConfig } from '../contracts/diagnostic-memory.js';
 import { parseDiagnosticMemoryConfig, resolveMemoryControl } from './memory-policy.js';
 import { TargetRecoveryService } from '../application/target-recovery-service.js';
+import type { KnowledgeManagementApi } from '../api/knowledge-memory-routes.js';
+import { createTargetKnowledgeManagementService, type TargetKnowledgeManagementHostOptions } from './diagnostic-memory.js';
 
 const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
   id: 'group-buy-market',
@@ -76,6 +78,8 @@ export interface AgentWebRuntimeOptions {
     createResolver: (ports: TargetResolverFactoryPorts) => TargetResolver | Promise<TargetResolver>;
     /** Host-owned flags. Omitted means Semantic and Procedural remain disabled. */
     knowledgeCapabilities?: TargetKnowledgeCapabilityPort;
+    /** Optional host-owned authoring/review/source context. When present, formal durable replay is injected by bootstrap. */
+    knowledgeManagement?: TargetKnowledgeManagementHostOptions;
     /** Both factories are required before Target execution can be enabled. */
     createOperationPolicy?: (ports: TargetRecoveryFactoryPorts) => TargetOperationPolicy;
     createRuntimeProvider?: (ports: TargetRecoveryFactoryPorts) => TargetRuntimeProvider;
@@ -232,6 +236,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     );
     let targetResolver: TargetResolver | undefined;
     let targetRecoveryGate: TargetRecoveryService | undefined;
+    let knowledgeManagement: KnowledgeManagementApi | undefined;
     if (options.targetRuntime !== undefined) {
       const identityRegistry = runtime.durableState.targetIdentityRegistry;
       const knowledgePolicies = runtime.durableState.targetKnowledgePolicies;
@@ -243,6 +248,19 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       const knowledgeCapabilities = options.targetRuntime.knowledgeCapabilities ?? disabledTargetKnowledgeCapabilities;
       targetResolver = await options.targetRuntime.createResolver({ identityRegistry, knowledgePolicies,
         knowledgePublications, knowledgeCapabilities });
+      if (options.targetRuntime.knowledgeManagement !== undefined) {
+        const stores = runtime.knowledgeManagementStores;
+        if (stores === undefined) throw new Error('Target knowledge management requires durable governed knowledge storage.');
+        knowledgeManagement = createTargetKnowledgeManagementService({
+          ...options.targetRuntime.knowledgeManagement,
+          revisions: stores.revisions,
+          publications: stores.publications,
+          policies: knowledgePolicies,
+          capabilities: knowledgeCapabilities,
+          clock,
+          ids,
+        });
+      }
       const hasOperationPolicy = options.targetRuntime.createOperationPolicy !== undefined;
       const hasRuntimeProvider = options.targetRuntime.createRuntimeProvider !== undefined;
       if (hasOperationPolicy !== hasRuntimeProvider) {
@@ -308,6 +326,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       },
       memory: { ...(runtime.memory === undefined ? {} : { runtime: runtime.memory }),
         checkpoints: runtime.durableState.checkpoints, runQueries: runtime.queries, clock, schedule: scheduleMemory },
+      ...(knowledgeManagement === undefined ? {} : { knowledgeManagement }),
       targetBindings: runtime.durableState.targetBindings,
       ...(targetRuns === undefined ? {} : { targetRuns }),
     });

@@ -214,6 +214,26 @@ describe('governed Semantic and Procedural schemas', () => {
         capabilityId: 'metrics.query', completionCriterion: 'UPDATE service_config SET enabled = false;' }] }),
     },
     {
+      label: 'SQL privilege statements',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Review the permission change.',
+        capabilityId: 'metrics.query', completionCriterion: 'GRANT ALL PRIVILEGES ON TABLE service_config TO inspector;' }] }),
+    },
+    {
+      label: 'SQL role grant statements',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Review the permission change.',
+        capabilityId: 'metrics.query', completionCriterion: 'GRANT app_role TO inspector;' }] }),
+    },
+    {
+      label: 'quoted SQL role grant statements',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Review the permission change.',
+        capabilityId: 'metrics.query', completionCriterion: 'GRANT "app_role" TO inspector;' }] }),
+    },
+    {
+      label: 'SQL revoke admin option statements',
+      content: proceduralContent({ steps: [{ step: 1, goal: 'Review the permission change.',
+        capabilityId: 'metrics.query', completionCriterion: 'REVOKE ADMIN OPTION FOR app_role FROM inspector;' }] }),
+    },
+    {
       label: 'raw HTTP requests',
       content: proceduralContent({ preconditions: ['POST /admin/restart HTTP/1.1'] }),
     },
@@ -279,7 +299,7 @@ describe('governed Semantic and Procedural schemas', () => {
 
   it('accepts ordinary investigation prose in a Procedural template', () => {
     const content = proceduralContent({
-      preconditions: ['Service metrics are available for the selected time window.'],
+      preconditions: ['Service metrics are available for the selected time window. The operator may grant access to admin;'],
       steps: [{ step: 1, goal: 'Compare the observed rate with the previous window.',
         capabilityId: 'metrics.query', completionCriterion: 'Record the rate and sample count.' }],
       stopConditions: ['Stop when the required evidence is unavailable.'],

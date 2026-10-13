@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { RunViewController, type RunViewClient } from '../apps/agent-web/src/state/run-view.js';
-import { canApproveMemoryCase, canRejectMemoryCase, captureTicketLabel } from '../apps/agent-web/src/components/MemoryPanel.js';
+import { canApproveMemoryCase, canPublishKnowledgeRevision, canRejectMemoryCase, captureTicketLabel,
+  diagnosisQualificationLabel, isKnowledgePublishedInTarget } from '../apps/agent-web/src/components/MemoryPanel.js';
 import type { DiagnosticMemoryCase, MemoryCaptureTicket, MemoryPreferences } from '../src/contracts/diagnostic-memory.js';
+import type { PublicKnowledgeRevision, PublicTargetKnowledgeStatus } from '../apps/agent-web/src/api/types.js';
 
 describe('memory web view', () => {
   it('passes the selected per-Run capture and recall preferences to Run creation', async () => {
@@ -54,6 +56,28 @@ describe('memory web view', () => {
     expect(canRejectMemoryCase(memoryCase({ status: 'approved' }))).toBe(false);
     expect(canRejectMemoryCase(memoryCase({ status: 'rejected' }))).toBe(false);
   });
+
+  it('keeps approval separate from Target publication and refuses unqualified publication candidates', () => {
+    const approved = knowledgeRevision({ status: 'approved' });
+    const target = targetKnowledgeStatus({ references: [] });
+    expect(canPublishKnowledgeRevision(approved, true, '2026-10-13T00:00:00.000Z')).toBe(true);
+    expect(isKnowledgePublishedInTarget(approved, target)).toBe(false);
+    expect(isKnowledgePublishedInTarget(approved, targetKnowledgeStatus({ references: [
+      { id: approved.id, version: String(approved.contentRevision), digest: approved.contentDigest, approval: 'approved' },
+    ] }))).toBe(true);
+    expect(canPublishKnowledgeRevision(knowledgeRevision({ status: 'draft' }), true, '2026-10-13T00:00:00.000Z')).toBe(false);
+    expect(canPublishKnowledgeRevision(approved, false, '2026-10-13T00:00:00.000Z')).toBe(false);
+    expect(canPublishKnowledgeRevision(knowledgeRevision({ status: 'approved', validUntil: '2026-10-12T00:00:00.000Z' }),
+      true, '2026-10-13T00:00:00.000Z')).toBe(false);
+  });
+
+  it('labels structured knowledge qualification without rewriting diagnosis text', () => {
+    expect(diagnosisQualificationLabel(undefined)).toBe('未提供知识资格信息');
+    expect(diagnosisQualificationLabel({ schemaVersion: 1, diagnosisReady: true, missingKnowledge: [], limitationReasons: [] }))
+      .toBe('知识资格：满足');
+    expect(diagnosisQualificationLabel({ schemaVersion: 1, diagnosisReady: false, missingKnowledge: [],
+      limitationReasons: ['OPTIONAL_KNOWLEDGE_OMITTED'] })).toBe('知识资格：受限（部分知识不可用）');
+  });
 });
 
 function memoryCase(overrides: Partial<DiagnosticMemoryCase>): DiagnosticMemoryCase {
@@ -68,4 +92,22 @@ function memoryCase(overrides: Partial<DiagnosticMemoryCase>): DiagnosticMemoryC
       capturedAt: '2026-10-10T00:00:00.000Z', rawSha256: 'a'.repeat(64) }],
     diagnosisOnly: true, eligibleForPromotion: false, digest: 'b'.repeat(64), ...overrides,
   };
+}
+
+function knowledgeRevision(overrides: Partial<PublicKnowledgeRevision>): PublicKnowledgeRevision {
+  return { schemaVersion: 1, id: 'semantic-1', kind: 'semantic', contentRevision: 2, governanceVersion: 3,
+    sourceEpoch: 1, status: 'approved', createdAt: '2026-10-10T00:00:00.000Z', contentDigest: 'a'.repeat(64),
+    content: { type: 'metric_definition', metricName: 'checkout_failures_total', businessMeaning: '失败计数', unit: 'count',
+      labels: [], allowedAggregations: ['sum'], windowSemantics: ['fixed_window'],
+      sourceReferences: [{ sourceId: 'prometheus', sourceVersion: 'v1', digest: 'b'.repeat(64) }] },
+    applicability: { profileRevision: '1', scenarioId: 'settlement', scenarioVersion: '1', serviceIds: ['checkout'],
+      faultTypes: ['settlement_failure'], environment: 'simulation', dataClass: 'simulated', datasetId: 'dataset-a' },
+    source: { type: 'controlled_runbook', id: 'runbook-1', version: '1', digest: 'b'.repeat(64), importedAt: '2026-10-10T00:00:00.000Z' },
+    review: { reviewedAt: '2026-10-10T00:00:00.000Z', checks: { sourceVerified: true, scopeVerified: true, contentReviewed: true } },
+    ...overrides };
+}
+
+function targetKnowledgeStatus(overrides: Partial<PublicTargetKnowledgeStatus>): PublicTargetKnowledgeStatus {
+  return { targetId: 'target-a', capabilities: { semanticEnabled: true, proceduralEnabled: true }, requiredKnowledge: [],
+    publicationVersion: 0, publicationState: 'empty', references: [], ...overrides };
 }

@@ -384,6 +384,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
   ): StoredRunCheckpoint {
     const normalized = parseAgentContext(context);
     validateTargetBindingState(normalized, undefined, this.targetBindingReader());
+    const schemaVersion = normalized.knowledgeSelection !== undefined || normalized.knowledgeQualification !== undefined ? 5 : CHECKPOINT_SCHEMA_VERSION;
     const row = this.checkpointRow(normalized.runId);
     const current = row === undefined ? undefined : this.parseCheckpoint(row);
     const checksum = checkpointChecksum(normalized);
@@ -393,7 +394,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     if (!validCreate && !validUpdate) {
       throw new CheckpointConflictError(normalized.runId, expectedRevision, actualRevision);
     }
-    if (current !== undefined && row?.checkpoint_schema_version === CHECKPOINT_SCHEMA_VERSION
+    if (current !== undefined && row?.checkpoint_schema_version === schemaVersion
       && current.checksum === checksum && !forceRevisionAdvance) return current;
 
     const savedAt = this.clock.now().toISOString();
@@ -412,7 +413,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         normalized.runId, checkpoint.revision, normalized.contextVersion, normalized.status, normalized.stage, normalized.profileId,
-        CHECKPOINT_SCHEMA_VERSION, checkpointJson, checksum, savedAt, savedAt,
+        schemaVersion, checkpointJson, checksum, savedAt, savedAt,
       );
     } else {
       const update = this.database.raw.prepare(`
@@ -422,7 +423,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
         WHERE run_id = ? AND revision = ?
       `).run(
         checkpoint.revision, normalized.contextVersion, normalized.status, normalized.stage, normalized.profileId,
-        CHECKPOINT_SCHEMA_VERSION, checkpointJson, checksum, savedAt,
+        schemaVersion, checkpointJson, checksum, savedAt,
         normalized.runId, current.revision,
       );
       if (update.changes !== 1) {
@@ -490,8 +491,14 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     snapshotByBindingId: (bindingId: string) => VersionedResolvedTargetSnapshot | null;
     requestById: (requestId: string) => TargetRunRequestRecord | null;
     publicationVersionByTarget: (targetId: string) => number;
+    identityRegistryVersion: () => number;
   } {
     return {
+      identityRegistryVersion: () => {
+        const row = this.database.raw.prepare('SELECT registry_version FROM target_identity_registry_state WHERE singleton_id = 1')
+          .get() as { registry_version: number } | undefined;
+        return row?.registry_version ?? 0;
+      },
       publicationVersionByTarget: targetId => {
         const row = this.database.raw.prepare('SELECT publication_version FROM target_knowledge_bindings WHERE target_id = ?')
           .get(targetId) as { publication_version: number } | undefined;
@@ -655,6 +662,7 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
         case 2: context = parseAgentContext(decoded, 2); break;
         case 3: context = parseAgentContext(decoded, 3); break;
         case 4: context = parseAgentContext(decoded, 4); break;
+        case 5: context = parseAgentContext(decoded, 5); break;
         default: throw new Error('unsupported checkpoint schema version');
       }
       if (!Number.isSafeInteger(row.revision) || row.revision <= 0

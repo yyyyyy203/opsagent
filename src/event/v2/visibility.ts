@@ -17,7 +17,10 @@ export function visibilityForV2Event(type: AgentEventTypeV2): EventVisibilityV2 
     || type === 'TOOL_CALL_CREATED'
     || type === 'TOOL_STARTED'
     || type === 'TOOL_RESULT'
-    || type === 'TOOL_FAILED') {
+    || type === 'TOOL_FAILED'
+    || type === 'DATASOURCE_RETRY_SCHEDULED'
+    || type === 'DATASOURCE_CIRCUIT_OPENED'
+    || type === 'DATASOURCE_CIRCUIT_CLOSED') {
     return 'public';
   }
   return 'audit';

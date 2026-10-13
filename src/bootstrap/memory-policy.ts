@@ -15,7 +15,7 @@ const profile = z.object({
 }).strict();
 const configSchema = z.discriminatedUnion('enabled', [
   z.object({ enabled: z.literal(false) }).strict(),
-  z.object({ enabled: z.literal(true), profiles: z.array(profile).min(1).max(100),
+  z.object({ enabled: z.literal(true), profiles: z.array(profile).min(1).max(200),
     requiredSources: z.array(z.enum(['metric', 'log', 'trace', 'change'])).min(1).max(4),
     modelWindowTokens: z.number().int().positive().safe(),
     reservedOutputTokens: z.number().int().positive().safe(),

@@ -11,6 +11,7 @@ import { bindReadonlyMcpTools } from '../src/mcp/readonly-tools.js';
 import { ResilientExecutor, SourceCircuitBreaker } from '../src/mcp/resilience.js';
 import { createInspectionRuntime } from '../src/bootstrap/inspection-runtime.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
+import type { ToolResponse, ToolResponseChunk } from '../src/contracts/tool.js';
 
 const remoteSchema = { type: 'object', properties: { service: { type: 'string' } }, required: ['service'], additionalProperties: false };
 const manifest = { localName: 'metrics.query', remoteName: 'query', description: 'Read metrics', inputSchema: z.object({ service: z.string() }), expectedRemoteSchema: remoteSchema, readOnly: true as const, idempotent: true as const, concurrencySafe: true };
@@ -136,6 +137,58 @@ describe('official SDK HTTP integration', () => {
     } finally { await connection.close(); await server.close(); }
   });
 
+  it('streams per-call retries and default circuit transitions from the MCP Tool', async () => {
+    const server = await fixture(Number.POSITIVE_INFINITY, 503);
+    const connection = new HttpMcpConnection({ url: server.url });
+    const signal = new AbortController().signal;
+      const executor = new ResilientExecutor(new SourceCircuitBreaker(), {
+        maxRetries: 1,
+        random: () => 1,
+        sleep: () => Promise.resolve(),
+      });
+    try {
+      await connection.connect(signal);
+      const [tool] = await bindReadonlyMcpTools(connection, [manifest], {
+        signal, executor, sourceId: 'prometheus',
+      });
+      if (tool?.call === undefined) throw new Error('MCP tool was not bound');
+      const options = {
+        runId: 'run-resilience', stepId: 'step-resilience', toolCallId: 'call-resilience',
+        signal, mode: 'execute' as const,
+      };
+      const drain = async () => {
+        const chunks: Array<{ name: string; payload: Record<string, unknown> }> = [];
+        const stream = tool.call!({ service: 'checkout' }, options);
+        if (!isToolResponseStream(stream)) throw new Error('Expected a streaming MCP tool');
+        try {
+          for await (const chunk of stream) if (chunk.type === 'event') chunks.push({ name: chunk.name, payload: chunk.payload });
+        } catch {
+          // Failure is expected in this injected outage; lifecycle chunks remain observable.
+        }
+        return chunks;
+      };
+
+      const first = await drain();
+      const second = await drain();
+      const third = await drain();
+      expect(first).toHaveLength(1);
+      expect(first[0]?.payload.kind).toBe('retry_scheduled');
+      expect(first[0]?.payload.sourceId).toBe('prometheus');
+      expect(Number.isInteger(first[0]?.payload.delayMs)).toBe(true);
+      expect(second).toHaveLength(1);
+      expect(third.some((chunk) => chunk.payload.kind === 'retry_scheduled')).toBe(true);
+      const opened = third.find((chunk) => chunk.payload.kind === 'circuit_opened');
+      expect(opened?.payload.sourceId).toBe('prometheus');
+      const failureWindow = opened?.payload.failureWindow;
+      expect(typeof failureWindow).toBe('object');
+      if (typeof failureWindow !== 'object' || failureWindow === null) throw new Error('Circuit event omitted failure window');
+      expect(Reflect.get(failureWindow, 'failures')).toBe(3);
+      expect(Number.isInteger(Reflect.get(failureWindow, 'windowMs'))).toBe(true);
+      expect((await drain()).some((chunk) => chunk.payload.kind === 'retry_scheduled')).toBe(false);
+      expect(server.methods.filter((method) => method === 'tools/call')).toHaveLength(6);
+    } finally { await connection.close(); await server.close(); }
+  });
+
   it('rejects schema drift instead of registering a changed remote tool', async () => {
     const server = await fixture();
     const connection = new HttpMcpConnection({ url: server.url });
@@ -149,3 +202,9 @@ describe('official SDK HTTP integration', () => {
     } finally { await connection.close(); await server.close(); }
   });
 });
+
+function isToolResponseStream(value: unknown): value is AsyncGenerator<ToolResponseChunk, ToolResponse> {
+  return typeof value === 'object' && value !== null
+    && typeof Reflect.get(value, Symbol.asyncIterator) === 'function'
+    && typeof Reflect.get(value, 'next') === 'function';
+}

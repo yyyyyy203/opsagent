@@ -11,6 +11,7 @@ import type { WebConfirmationDecisionInput, WebConfirmationService } from '../ap
 import type { TargetRunService } from '../application/target-run-service.js';
 import type { TargetBindingStore } from '../contracts/target.js';
 import { handleMemoryRoute, type MemoryRoutePorts } from './memory-routes.js';
+import { handleKnowledgeMemoryRoute, type KnowledgeManagementApi } from './knowledge-memory-routes.js';
 import { parseMemoryPreferences } from '../contracts/diagnostic-memory-schema.js';
 import { systemClock } from '../contracts/common.js';
 
@@ -29,6 +30,8 @@ export interface InspectionHttpServerOptions {
   allowedHosts?: readonly string[];
   allowedProfileIds?: readonly string[];
   memory?: MemoryRoutePorts;
+  /** Optional Target-scoped governed knowledge application facade. */
+  knowledgeManagement?: KnowledgeManagementApi;
   /** Optional Target-scoped application facade; target routes never accept bindings from JSON. */
   targetRuns?: TargetRunService;
   /** Always pass the host-owned registry when available, even if Target start is not enabled. */
@@ -96,6 +99,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   if (await handleMemoryRoute(request, response, parsed, options.memory ?? {
     clock: systemClock, schedule: async () => {},
   }, () => readJson(request, maxBodyBytes))) return;
+  if (await handleKnowledgeMemoryRoute(request, response, parsed, options.knowledgeManagement,
+    () => readJson(request, maxBodyBytes))) return;
   if (method === 'GET' && parsed.pathname === '/profiles') {
     if (options.webQueries === undefined) throw unavailable();
     writeJson(response, 200, options.webQueries.listProfiles());
@@ -105,6 +110,15 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   if (method === 'GET' && parsed.pathname === '/targets') {
     if (options.targetRuns === undefined) throw unavailable();
     writeJson(response, 200, options.targetRuns.listCatalog());
+    return;
+  }
+
+  const targetReadinessMatch = method === 'GET' ? /^\/targets\/([^/]+)\/readiness$/u.exec(parsed.pathname) : null;
+  if (targetReadinessMatch?.[1] !== undefined) {
+    if (options.targetRuns === undefined) throw unavailable();
+    if (parsed.searchParams.size > 0) throw Object.assign(new Error('Readiness query parameters are not supported.'), { statusCode: 400 });
+    const readiness = await options.targetRuns.readiness(decodePath(targetReadinessMatch[1]));
+    writeJson(response, 200, readiness);
     return;
   }
 

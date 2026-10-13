@@ -15,16 +15,31 @@ const fixtureTool = {
   inputSchema: z.object({ service: z.string() }),
   requireUserConfirm: true,
   isConcurrencySafe: () => true,
-  call: async (input) => ({
-    blocks: [{ type: 'json', value: { service: input.service, failureRate: 0.02, source: 'fixture' } }],
-  }),
+  call: async function* (input) {
+    await Promise.resolve();
+    if (input.service === 'resilience') {
+      yield { type: 'event', name: 'source_resilience', payload: {
+        kind: 'retry_scheduled', sourceId: 'prometheus', attempt: 1, reasonCode: 'MCP_NETWORK_ERROR', delayMs: 200,
+      } };
+      yield { type: 'event', name: 'source_resilience', payload: {
+        kind: 'circuit_opened', sourceId: 'prometheus', failureWindow: { failures: 3, windowMs: 120 },
+        openUntil: Date.now() + 900,
+      } };
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      yield { type: 'event', name: 'source_resilience', payload: {
+        kind: 'circuit_closed', sourceId: 'prometheus', recoveryEvidence: [],
+      } };
+    }
+    return { blocks: [{ type: 'json', value: { service: input.service, failureRate: 0.02, source: 'fixture' } }] };
+  },
 };
 class FixtureModel {
   async *stream(messages, _tools, options) {
     const hasToolResult = messages.some((message) => message.role === 'tool'
       || (Array.isArray(message.blocks) && message.blocks.some((block) => block.type === 'tool_result')));
     if (!hasToolResult) {
-      const call = { id: `fixture-call-${options.runId}`, name: 'fixture.metrics', input: { service: 'settlement' } };
+      const resilienceRun = messages.some((message) => JSON.stringify(message).includes('熔断恢复演练'));
+      const call = { id: `fixture-call-${options.runId}`, name: 'fixture.metrics', input: { service: resilienceRun ? 'resilience' : 'settlement' } };
       yield { type: 'tool_call', call };
       return { toolCalls: [call] };
     }

@@ -7,11 +7,13 @@ import { applyTargetIdentityCatalog, defaultTargetKnowledgePolicy, emptyTargetId
 export function createTargetIdentityTestPorts(): {
   identityRegistry: TargetIdentityRegistry;
   knowledgePolicies: TargetKnowledgePolicyStore;
+  identityRegistryVersion: () => number;
 } {
   let snapshot = emptyTargetIdentitySnapshot();
   let audit: TargetIdentityAuditRecord[] = [];
   const policies = new Map<string, TargetKnowledgePolicy>();
   return {
+    identityRegistryVersion: () => snapshot.version,
     identityRegistry: {
       readSnapshot: async () => structuredClone(snapshot),
       publishCatalog: async input => {

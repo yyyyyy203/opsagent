@@ -24,9 +24,9 @@
 
 多项目适配的待审核草案见 [多项目巡检适配设计 Spec](./superpowers/specs/2026-10-11-multi-project-adaptation-design.md)。建议采用可信 Target 绑定、场景包与数据源映射、单宿主持久化所有者和严格归属校验；第一轮仅验证两个模拟项目。该草案不代表多项目运行、完整知识库或多人权限已经实现，也不改变既有 simulation 验收入口。
 
-受控诊断记忆一期见 [Spec R2](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)、[逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md) 和[本地验收指南](./guides/diagnostic-memory-local.md)。阶段 A 已实现 Episodic 保存、人工审核/撤销、同范围有界召回、SQLite 持久化与暂停恢复重新校验；部署默认关闭，保存与召回可独立设置。离线联合验收使用模拟数据，不代表真实业务诊断效果。Working 状态复用 Checkpoint；Semantic/Procedural 完整知识库、V3 影子检索与对照评测、自动晋级和自动动作仍未实现。
+受控诊断记忆一期见 [Spec R2](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)、[逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md) 和[本地验收指南](./guides/diagnostic-memory-local.md)。阶段 A 已实现 Episodic 保存、人工审核/撤销、同范围有界召回、SQLite 持久化与暂停恢复重新校验；部署默认关闭，保存与召回可独立设置。离线联合验收使用模拟数据，不代表真实业务诊断效果。Working 状态复用 Checkpoint；Semantic/Procedural 完整知识库、自动晋级和自动动作仍未实现；向量记忆 V3 影子检索与对照入口已实现，真实语义效果待真实包验收。
 
-向量存储可用性独立按 [向量实验 Spec](./superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 与 [向量实验计划](./superpowers/plans/2026-10-10-memory-vector-feasibility.md) 推进。V1 本地 Embedding 包解析、V2 SQLite Float32 索引/隔离/重启机制已实现；V3 影子检索、BM25 降级和 BM25/向量/混合对照尚待实现。实验默认关闭且不影响案例保存；无真实 Embedding 包不能宣称真实语义检索通过，也不修改生产召回默认。
+向量存储可用性独立按 [向量实验 Spec](./superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 与 [向量实验计划](./superpowers/plans/2026-10-10-memory-vector-feasibility.md) 推进。V1 本地 Embedding 包解析、V2 SQLite Float32 索引/隔离/重启机制已实现；V3 影子检索、BM25 故障降级和 BM25/向量/混合离线对照入口已实现。实验默认关闭且不影响案例保存；无真实 Embedding 包不能宣称真实语义检索通过，也不修改生产召回默认。
 
 下一持久化增量的已确认方案见 [Durable Run State & Evidence V1 设计](./superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)。该文档目前是设计决策，不代表代码已经实现。
 
@@ -43,9 +43,10 @@ V2 分支文档与代码的一致性审计见 [V2 文档审计记录](./document
 ## 文档状态
 
 - 决策状态：已由项目负责人确认，可用于拆分实施计划。
-- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、OpenAI-compatible 本地流式适配器、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复和 Node HTTP/SSE 入口已落地。本机 Prometheus → MCP → Metrics Subagent（1/1）及 Elasticsearch/Prometheus Logs Web 测试后端浏览器验收（3/3）已通过，但使用的是模拟/验收数据，不等于目标业务或生产观测栈验收。Task 7 的一次性真实模型 CLI 与本地人工复核 CLI 已提供；在线模型、LangSmith 远端查询、生产数据源、托管 CI 和真实动作仍未闭环，详见[实现进度](./implementation-status.md)及[本轮验收记录](./verification/2026-10-05-local-acceptance-closeout.md)。
+- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、OpenAI-compatible 本地流式适配器、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复、受控诊断记忆阶段 A 和 Node HTTP/SSE 入口已落地。本机 Prometheus → MCP → Metrics Subagent 与日志测试后端浏览器验收均使用模拟/验收数据，不等于目标业务或生产观测栈验收。记忆阶段 A 的复现命令为 `pnpm acceptance:memory`；在线模型、真实业务数据效果、完整 Semantic/Procedural 知识库、真实向量语义效果（待真实包验收）、托管 CI 和真实动作仍未闭环，详见[实现进度](./implementation-status.md)与[记忆本地验收指南](./guides/diagnostic-memory-local.md)。
 - 代码来源：本项目独立实现。Newton 仅用于机制参考；不得把未获授权的公司源码复制到本仓库。
 - 第一阶段：只读诊断和模拟验证，不接入真实写动作，也不读取业务仓库代码。
+- 向量记忆实验 V3 已提供独立影子检索、BM25 故障降级与离线对照入口 `pnpm acceptance:memory-vector`；默认关闭，不更改基础记忆召回。缺少经来源复核的真实 Embedding 包时只验证机制，不宣称语义效果通过。
 
 ## 变更规则
 

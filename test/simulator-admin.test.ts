@@ -15,6 +15,13 @@ describe('separate simulator administration surface', () => {
       expect(changed.status).toBe(200);
       expect(await changed.json()).toEqual({ active: 'settlement_failure' });
       expect(simulator.exposition()).toContain('outcome="failure"} 15');
+      const configuredFault = await fetch(`${root}/source-fault`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{"failures":9}',
+      });
+      expect(configuredFault.status).toBe(200);
+      expect(await configuredFault.json()).toEqual({ remainingFailures: 9 });
+      expect(simulator.consumeSourceFailure()).toBe(true);
+      expect(simulator.remainingSourceFailures()).toBe(8);
     } finally { await admin.close(); }
   });
   it('rejects invalid scenarios, methods and browser origins without mutating state', async () => {
@@ -26,6 +33,10 @@ describe('separate simulator administration surface', () => {
       expect((await fetch(`${root}/scenario`, { method: 'POST' })).status).toBe(405);
       expect((await fetch(`${root}/scenarios`, { headers: { Origin: 'https://untrusted.example' } })).status).toBe(403);
       expect(simulator.exposition()).toContain('outcome="failure"} 0');
+      expect((await fetch(`${root}/source-fault`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{"failures":-1}',
+      })).status).toBe(400);
+      expect(simulator.remainingSourceFailures()).toBe(0);
     } finally { await admin.close(); }
   });
 });

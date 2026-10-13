@@ -110,6 +110,42 @@ describe('browser API client', () => {
       expectedRevision: 2, decision: 'approved', claimCheck: 'supported' });
   });
 
+  it('uses safe Target catalog and knowledge endpoints without caller-owned scope or actor fields', async () => {
+    const requests: Request[] = [];
+    const client = new ApiClient({
+      baseUrl: 'http://127.0.0.1:4100',
+      fetchImpl: (input, init) => {
+        requests.push(new Request(input, init));
+        return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+      },
+      eventSourceFactory: () => ({ close: () => undefined }),
+    });
+
+    await client.listTargets();
+    await client.getTargetReadiness('target/a');
+    await client.getTargetKnowledgeStatus('target/a');
+    await client.listTargetKnowledge('target/a', 'semantic', { status: 'approved', limit: 10 });
+    await client.reviewTargetKnowledge('target/a', 'semantic', 'knowledge/a', {
+      requestId: 'review-1', contentRevision: 2, governanceVersion: 3, decision: 'approve',
+    });
+    await client.publishTargetKnowledge('target/a', {
+      requestId: 'publish-1', expectedPublicationVersion: 4,
+      references: [{ id: 'knowledge/a', version: '2', digest: 'a'.repeat(64), approval: 'approved' }],
+    });
+
+    expect(requests.map(({ url, method }) => [url, method])).toEqual([
+      ['http://127.0.0.1:4100/targets', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/readiness', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/knowledge/status', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/knowledge?kind=semantic&status=approved&limit=10', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/knowledge/semantic/knowledge%2Fa/review', 'POST'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/knowledge/publication', 'POST'],
+    ]);
+    expect(await requests[4]?.clone().json()).toEqual({ requestId: 'review-1', contentRevision: 2,
+      governanceVersion: 3, decision: 'approve' });
+    expect(JSON.stringify(await requests[5]?.clone().json())).not.toMatch(/scope|actor|reviewer|profile|threshold|endpoint/iu);
+  });
+
   it('surfaces memory revision conflicts without retrying a capture or review command', async () => {
     let calls = 0;
     const client = new ApiClient({

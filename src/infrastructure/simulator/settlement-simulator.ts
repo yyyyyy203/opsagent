@@ -4,6 +4,7 @@ export type SettlementScenario = 'normal' | 'settlement_failure' | 'low_sample';
 export class SettlementSimulator {
   private snapshot: { start: number; end: number; success: number; failure: number };
   private activeScenario: SettlementScenario = 'normal';
+  private injectedSourceFailures = 0;
 
   constructor(private readonly now: () => number = Date.now) {
     this.snapshot = this.createSnapshot('normal');
@@ -15,6 +16,20 @@ export class SettlementSimulator {
   }
 
   currentScenario(): SettlementScenario { return this.activeScenario; }
+
+  /** Configure deterministic failures at the simulated data-source query boundary. */
+  failNextSourceQueries(count: number): void {
+    if (!Number.isSafeInteger(count) || count < 0 || count > 100) throw new RangeError('INVALID_SIMULATOR_SOURCE_FAILURE_COUNT');
+    this.injectedSourceFailures = count;
+  }
+
+  consumeSourceFailure(): boolean {
+    if (this.injectedSourceFailures <= 0) return false;
+    this.injectedSourceFailures -= 1;
+    return true;
+  }
+
+  remainingSourceFailures(): number { return this.injectedSourceFailures; }
 
   currentSnapshot(): Readonly<{ start: number; end: number; success: number; failure: number }> {
     return Object.freeze({ ...this.snapshot });

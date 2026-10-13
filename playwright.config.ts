@@ -1,4 +1,9 @@
 import { defineConfig } from '@playwright/test';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const projectRoot = dirname(fileURLToPath(import.meta.url));
+const quote = (value: string) => `"${value}"`;
 
 const agentPort = process.env.AGENTOPS_E2E_AGENT_PORT ?? '45100';
 const webPort = process.env.AGENTOPS_E2E_WEB_PORT ?? '45173';
@@ -9,7 +14,8 @@ const fixtureEnv = {
 } as Record<string, string>;
 const realMetrics = process.env.AGENTOPS_REAL_PROMETHEUS_WEB === '1';
 const controlPort = process.env.AGENTOPS_E2E_CONTROL_PORT ?? '45101';
-const fixtureCommand = realMetrics ? 'node test/e2e/metrics-fixture-server.mjs' : 'node test/e2e/fixture-server.mjs';
+const fixtureEntry = realMetrics ? 'test/e2e/metrics-fixture-server.mjs' : 'test/e2e/fixture-server.mjs';
+const fixtureCommand = `${quote(process.execPath)} ${quote(resolve(projectRoot, fixtureEntry))}`;
 const realFixtureEnv = {
   ...fixtureEnv,
   AGENTOPS_E2E_CONTROL_PORT: controlPort,
@@ -47,7 +53,7 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: `pnpm --dir apps/agent-web dev --host 127.0.0.1 --port ${webPort}`,
+      command: `${quote(process.execPath)} ${quote(resolve(projectRoot, 'apps/agent-web/node_modules/vite/bin/vite.js'))} ${quote(resolve(projectRoot, 'apps/agent-web'))} --host 127.0.0.1 --port ${webPort}`,
       url: `http://127.0.0.1:${webPort}`,
       env: webEnv,
       timeout: 120_000,

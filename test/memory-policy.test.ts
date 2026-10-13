@@ -55,6 +55,24 @@ describe('host memory policy', () => {
     expect(policy.allows(control, 'recall')).toBe(false);
   });
 
+  it('retains all 200 host-configured Target scopes without truncating or aliasing them', () => {
+    const profiles = Array.from({ length: 200 }, (_, index) => ({
+      scope: { ...simulationMemoryScope(), profileId: `project-${index}.profile`,
+        targetFingerprint: `fingerprint-${index}`, datasetId: `dataset-${index}` },
+      profilePolicyRevision: 'policy-v1',
+    }));
+
+    const config = parseDiagnosticMemoryConfig({ ...deployment(), profiles });
+
+    expect(config.enabled).toBe(true);
+    if (config.enabled) {
+      expect(config.profiles).toHaveLength(200);
+      expect(resolveMemoryControl(config, 'project-199.profile')?.scope).toMatchObject({
+        profileId: 'project-199.profile', targetFingerprint: 'fingerprint-199', datasetId: 'dataset-199',
+      });
+    }
+  });
+
   it.each([
     { ...deployment(), endpoint: 'https://example.test' },
     { ...deployment(), profiles: [...deployment().profiles, ...deployment().profiles] },

@@ -13,6 +13,8 @@ import type {
   ToolResponseChunk,
   ToolResponse,
 } from '../src/contracts/index.js';
+import type { TargetOperationGuard, TargetOperationPermit } from '../src/contracts/target.js';
+import { TargetConfigurationError } from '../src/contracts/target.js';
 
 const inputSchema = z.object({
   profileId: z.string().min(1),
@@ -83,6 +85,49 @@ describe('source subagent Tool adapter', () => {
 
     await expect(drain(tool.call?.(request, options()))).rejects.toMatchObject({ code: 'MCP_TIMEOUT' });
     expect(attempts).toBe(1);
+  });
+
+  it('cancels an in-flight child operation and does not schedule a retry after Target revocation', async () => {
+    const permitController = new AbortController();
+    const events: AgentEventEnvelopeV2[] = [];
+    let attempts = 0;
+    let markStarted: () => void = () => {};
+    const childStarted = new Promise<void>(resolve => { markStarted = resolve; });
+    const targetOperations: TargetOperationGuard = {
+      authorize: async (input): Promise<TargetOperationPermit> => ({
+        bindingId: 'binding-parent-1', runId: 'parent-1', rootRunId: 'parent-1', snapshotDigest: 'snapshot-1',
+        operation: input.operation, capability: input.capability, policyEpoch: 1, signal: permitController.signal,
+      }),
+      validate: async permit => {
+        if (permit.signal.aborted) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      },
+    };
+    const tool = createSourceSubagentTool(descriptor(async function* () {
+      await Promise.resolve();
+      yield* [] as ToolResponseChunk[];
+      return completeResult();
+    }, {
+      lifecycle: lifecycle(events),
+      runner: {
+        run: (_request, execution) => (async function* () {
+          attempts += 1;
+          markStarted();
+          await new Promise<void>((_resolve, reject) => {
+            execution.signal.addEventListener('abort', () => reject(new TargetConfigurationError('TARGET_OPERATION_DENIED')), { once: true });
+          });
+          return completeResult();
+        })(),
+      },
+      retry: { maxAttempts: 3, shouldRetry: () => true, delayMs: () => 0, sleep: () => Promise.resolve() },
+    }));
+
+    const execution = drain(tool.call?.(request, options({ targetSourceId: 'market-a-metrics', targetOperations })));
+    await childStarted;
+    permitController.abort(new TargetConfigurationError('TARGET_OPERATION_DENIED'));
+
+    await expect(execution).rejects.toMatchObject({ code: 'TARGET_OPERATION_DENIED' });
+    expect(attempts).toBe(1);
+    expect(events.map(event => event.type)).not.toContain('SUBAGENT_RETRY_SCHEDULED');
   });
 
   it('returns partial evidence normally and marks unavailable as an error', async () => {
@@ -207,12 +252,14 @@ function completeResult(): SourceSubagentResult {
   };
 }
 
-function options(overrides: { profileId?: string } = {}) {
+function options(overrides: { profileId?: string; targetSourceId?: string; targetOperations?: TargetOperationGuard } = {}) {
   return {
     toolCallId: 'tool-1', runId: 'parent-1', stepId: 'step-1',
     profileId: overrides.profileId ?? 'group-buy-market',
     signal: new AbortController().signal, mode: 'execute' as const,
     remainingToolCalls: 8,
+    ...(overrides.targetSourceId === undefined ? {} : { targetSourceId: overrides.targetSourceId }),
+    ...(overrides.targetOperations === undefined ? {} : { targetOperations: overrides.targetOperations }),
   };
 }
 

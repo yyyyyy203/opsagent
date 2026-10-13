@@ -142,6 +142,8 @@ export interface AgentRuntimeOptions {
   checkpoints?: CheckpointStore;
   /** Inject one host-owned durable state into nested runtimes; the child never owns or closes it. */
   durableState?: DurableRunState;
+  /** Current Target identity registry version for the in-memory durable store; Target root starts fail closed without it. */
+  inMemoryTargetIdentityRegistryVersion?: () => number;
   evidence?: EvidenceStore;
   evidenceRecorder?: EvidenceRecorder;
   observability?: Observability;
@@ -230,7 +232,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   });
   const inMemoryDurable = options.sharedEvents === undefined
     && persistence === undefined && options.checkpoints === undefined
-    ? new InMemoryDurableState(clock)
+    ? new InMemoryDurableState(clock, undefined, options.inMemoryTargetIdentityRegistryVersion)
     : undefined;
   const durableState: DurableRunState | undefined = options.durableState ?? persistence ?? inMemoryDurable;
   if (options.memoryHarness !== undefined) {
@@ -579,6 +581,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     events,
     checkpoints,
     durableState,
+    ...(persistence === undefined ? {} : { knowledgeManagementStores: {
+      revisions: persistence.knowledge,
+      publications: persistence.targetKnowledgeBindings,
+    } }),
     evidence,
     evidenceBlobs,
     evidenceManifests,

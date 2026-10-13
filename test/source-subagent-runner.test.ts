@@ -11,10 +11,54 @@ import type {
   SourceSubagentRequest,
   Tool,
 } from '../src/application/source-subagent-runner.js';
+import type { TargetBindingStore, TargetRunBindingRecord, VersionedResolvedTargetSnapshot } from '../src/contracts/target.js';
 import { SourceSubagentFailure } from '../src/application/source-subagent-runner.js';
 import { DefaultSourceReportCollector, type SourceReportCollector } from '../src/application/source-report-collector.js';
 
 describe('source subagent Runner', () => {
+  it('binds Target child Tools to one inherited source capability', async () => {
+    let childInput: Parameters<SourceChildAgentFactory['create']>[0] | undefined;
+    const snapshot = {
+      schemaVersion: 2,
+      targetId: 'target-a',
+      digest: 'snapshot-digest',
+      profile: { profileId: 'group-buy-market' },
+    } as unknown as VersionedResolvedTargetSnapshot;
+    const parentBinding: TargetRunBindingRecord = {
+      bindingId: 'binding-a', targetId: 'target-a', runId: 'parent-1', rootRunId: 'parent-1',
+      snapshotDigest: snapshot.digest, createdAt: '2026-09-14T00:00:00.000Z',
+    };
+    const targetBindings = {
+      getBinding: async (runId: string) => runId === 'parent-1' ? parentBinding : null,
+      getSnapshot: async (bindingId: string) => bindingId === parentBinding.bindingId ? snapshot : null,
+    } as TargetBindingStore;
+    const child: SourceChildAgent = {
+      replyStream: async function* ({ runId }) { await Promise.resolve(); yield* [] as AgentEvent[]; return completedChildResult(runId); },
+      resumeStream: async function* (runId) { await Promise.resolve(); yield* [] as AgentEvent[]; return completedChildResult(runId); },
+    };
+    const runner = new DefaultSourceSubagentRunner({
+      source: 'metrics',
+      targetBindings,
+      childAgentFactory: { create: input => { childInput = input; return child; } },
+      childTools: { create: () => [
+        { name: 'metrics.settlement', description: 'read metrics', kind: 'evidence', source: 'mcp', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+        { name: 'source_report', description: 'report', kind: 'utility', source: 'builtin', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+      ] },
+      clock: { now: () => new Date('2026-09-14T00:00:00.000Z') },
+    });
+
+    const result = await drain(runner.run(request(), {
+      ...executionContext(), targetBindingId: parentBinding.bindingId, targetSourceId: 'market-a-metrics',
+    }));
+
+    expect(result).toMatchObject({ source: 'metrics' });
+    expect(childInput?.targetSourceId).toBe('market-a-metrics');
+    expect(childInput?.tools.map(tool => [tool.name, tool.targetSourceId])).toEqual([
+      ['metrics.settlement', 'market-a-metrics'],
+      ['source_report', undefined],
+    ]);
+  });
+
   it('uses a bounded child Harness, collects child evidence, and resumes an existing child checkpoint', async () => {
     const calls: string[] = [];
     let created: { maxToolCalls: number; maxDurationMs: number; tools: readonly Tool[] } | undefined;

@@ -217,7 +217,8 @@ export class RunExecutionCoordinator {
     }
     if (status === 'confirmed_absent') {
       this.accepted.delete(runId);
-      rejectAcceptance(new RunExecutionError('RUN_CONFLICT', 'Run did not commit its initial transition; retry with the same request ID.', 409));
+      rejectAcceptance(new RunExecutionError('RUN_CONFLICT',
+        'Run did not commit its initial transition. Retry with the same request ID only while the resolved Target snapshot is unchanged; if it changed, submit a new request ID.', 409));
       return;
     }
     rememberBounded(this.accepted, runId);

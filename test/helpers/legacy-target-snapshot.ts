@@ -7,6 +7,7 @@ export function legacySnapshotUnsigned(snapshot: ResolvedTargetSnapshotV2): Omit
   delete value.sourceIdentities;
   delete value.knowledgePolicy;
   delete value.publicationVersion;
+  delete value.identityRegistryVersion;
   delete value.digest;
   value.schemaVersion = 1;
   return value as unknown as Omit<ResolvedTargetSnapshot, 'digest'>;

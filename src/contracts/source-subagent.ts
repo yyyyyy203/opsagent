@@ -9,6 +9,7 @@ import type {
   Tool,
   ToolResponseChunk,
 } from './tool.js';
+import type { TargetOperationGuard } from './target.js';
 
 export type SourceSubagentStatus = 'complete' | 'partial' | 'unavailable';
 export type SourceFindingKind = 'observation' | 'inference';
@@ -61,6 +62,10 @@ export interface SourceSubagentExecution {
   profileId: string;
   profileRevision?: string;
   targetBindingId?: string;
+  /** Host-assigned source capability inherited from the parent Target Tool. */
+  targetSourceId?: string;
+  /** Same parent Target scope; child Harnesses independently authorize every model/source attempt. */
+  targetOperations?: TargetOperationGuard;
   sessionId?: string;
   replyId?: string;
   streamId?: string;

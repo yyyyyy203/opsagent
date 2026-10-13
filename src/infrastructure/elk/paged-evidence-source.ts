@@ -7,6 +7,7 @@ import {
   type JsonValue,
   type LogEvidenceQuery,
   type NormalizedLogRecord,
+  type SourceResilienceEvent,
   type ToolResponse,
 } from '../../contracts/index.js';
 
@@ -32,6 +33,7 @@ export interface ElkPageClient {
     deadline?: number;
     networkAttemptBudget?: { remaining: number };
     requestId?: string;
+    onResilienceEvent?: (event: SourceResilienceEvent) => void;
   }): Promise<ElkPageClientResponse>;
   closeSnapshot?(input: { sourceSnapshotId: string; signal: AbortSignal }): Promise<void>;
 }
@@ -41,6 +43,7 @@ export interface ElkPageRequestOptions {
   deadline?: number;
   networkAttemptBudget?: { remaining: number };
   requestId?: string;
+  onResilienceEvent?: (event: SourceResilienceEvent) => void;
 }
 
 export interface PagedEvidenceSourceOptions {
@@ -112,6 +115,7 @@ export class PagedEvidenceSource {
             deadline,
             ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: options.networkAttemptBudget }),
             ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
+            ...(options.onResilienceEvent === undefined ? {} : { onResilienceEvent: options.onResilienceEvent }),
           });
         } catch (error) {
           throw normalizeSourceError(error);
@@ -174,6 +178,7 @@ export interface ResilientElkPageClientOptions {
   now?: () => number;
   attemptBudget?: { remaining: number };
   onEvent?: (event: RetryEvent) => void;
+  sourceId?: string;
 }
 
 /** MCP boundary adapter. No MCP SDK types cross into the evidence source contract. */
@@ -196,6 +201,7 @@ export class McpElkPageClient implements ElkPageClient {
     deadline?: number;
     networkAttemptBudget?: { remaining: number };
     requestId?: string;
+    onResilienceEvent?: (event: SourceResilienceEvent) => void;
   }): Promise<ElkPageClientResponse> {
     throwIfAborted(input.signal);
     const query = validateQuery(input.query);
@@ -264,6 +270,7 @@ export class ResilientElkPageClient implements ElkPageClient {
     deadline?: number;
     networkAttemptBudget?: { remaining: number };
     requestId?: string;
+    onResilienceEvent?: (event: SourceResilienceEvent) => void;
   }): Promise<ElkPageClientResponse> {
     return this.options.executor.execute(
       (signal) => this.delegate.fetchPage({ ...input, signal }),
@@ -274,7 +281,25 @@ export class ResilientElkPageClient implements ElkPageClient {
         ...((input.networkAttemptBudget ?? this.options.attemptBudget) === undefined
           ? {}
           : { attemptBudget: input.networkAttemptBudget ?? this.options.attemptBudget }),
-        ...(this.options.onEvent === undefined ? {} : { onEvent: this.options.onEvent }),
+        onEvent: (event) => {
+          this.options.onEvent?.(event);
+          if (event.type === 'retry' && event.code !== undefined) {
+            input.onResilienceEvent?.({
+              type: 'retry_scheduled', sourceId: this.options.sourceId ?? 'elk', attempt: event.attempt,
+              reasonCode: event.code, delayMs: event.delayMs ?? 0,
+            });
+          }
+        },
+        onCircuitEvent: (event) => {
+          const sourceId = this.options.sourceId ?? 'elk';
+          if (event.type === 'opened') input.onResilienceEvent?.({
+            type: 'circuit_opened', sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil,
+          });
+          else if (event.type === 'half_opened') input.onResilienceEvent?.({
+            type: 'circuit_half_opened', sourceId, probePolicy: 'single_probe',
+          });
+          else input.onResilienceEvent?.({ type: 'circuit_closed', sourceId, recoveryEvidence: [] });
+        },
       },
     );
   }

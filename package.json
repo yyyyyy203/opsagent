@@ -29,7 +29,10 @@
     "web:build": "pnpm --dir apps/agent-web build",
     "web:typecheck": "pnpm --dir apps/agent-web typecheck",
     "e2e": "pnpm build && pnpm web:build && playwright test",
-    "logs:e2e": "pnpm build && pnpm web:build && playwright test --config=playwright.logs.config.ts"
+    "e2e:circuit": "node ./node_modules/typescript/bin/tsc -p ./tsconfig.build.json && node ./apps/agent-web/node_modules/vite/bin/vite.js build ./apps/agent-web && node ./node_modules/@playwright/test/cli.js test --config=./playwright.circuit.config.ts",
+    "e2e:circuit:prometheus": "node ./node_modules/typescript/bin/tsc -p ./tsconfig.build.json && node ./apps/agent-web/node_modules/vite/bin/vite.js build ./apps/agent-web && node ./node_modules/@playwright/test/cli.js test --config=./playwright.prometheus-circuit.config.ts",
+    "logs:e2e": "pnpm build && pnpm web:build && playwright test --config=playwright.logs.config.ts",
+    "acceptance:memory-vector": "pnpm build && node apps/acceptance/memory-vector.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

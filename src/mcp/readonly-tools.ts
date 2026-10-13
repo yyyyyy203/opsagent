@@ -1,4 +1,4 @@
-import type { Tool, ToolCallOptions, ToolResponse, ToolResponseChunk } from '../contracts/tool.js';
+import type { SourceResilienceEvent, Tool, ToolCallOptions, ToolResponse, ToolResponseChunk } from '../contracts/tool.js';
 import type { McpConnection } from './types.js';
 import { type ResilientExecutor, SourceFailure, type RetryEvent } from './resilience.js';
 import { validateToolInput } from '../tool/schema.js';
@@ -32,6 +32,9 @@ export async function bindReadonlyMcpTools(
     deadline?: number;
     attemptBudget?: { remaining: number };
     onEvent?: (sourceId: string, event: RetryEvent) => void;
+    sourceId?: string;
+    /** Host-mapped Target SourceBinding ID; never derived from model input. */
+    targetSourceId?: string;
   },
 ): Promise<Tool[]> {
   const now = options.now ?? Date.now;
@@ -53,22 +56,23 @@ export async function bindReadonlyMcpTools(
     const tool: Tool = {
       name: manifest.localName, description: manifest.description, kind: 'evidence', inputSchema: manifest.inputSchema,
       source: 'mcp',
+      ...(options.targetSourceId === undefined ? {} : { targetSourceId: options.targetSourceId }),
       isConcurrencySafe: () => manifest.concurrencySafe,
-      call: (input, callOptions) => invoke(connection, manifest.localName, manifest.remoteName, tool, input, callOptions, options.executor, now, options.onEvent),
+      call: (input, callOptions) => invoke(connection, manifest.localName, manifest.remoteName, options.sourceId ?? manifest.localName, tool, input, callOptions, options.executor, now, options.onEvent),
     };
     return Object.freeze(tool);
   });
 }
 
 async function* invoke(
-  connection: McpConnection, sourceId: string, remoteName: string, tool: Tool, input: Record<string, unknown>,
+  connection: McpConnection, toolName: string, remoteName: string, sourceId: string, tool: Tool, input: Record<string, unknown>,
   options: ToolCallOptions, executor: ResilientExecutor, now: () => number, onEvent?: (sourceId: string, event: RetryEvent) => void,
 ): AsyncGenerator<ToolResponseChunk, ToolResponse> {
   const validation = validateToolInput(tool, input);
   if (!validation.valid || !validation.value) throw new SourceFailure('TOOL_ARGUMENTS_SCHEMA_INVALID');
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, options.signal]);
-  const queue: RetryEvent[] = [];
+  const queue: SourceResilienceEvent[] = [];
   let wake: () => void = () => {};
   let complete = false;
   let response: ToolResponse | undefined;
@@ -77,12 +81,26 @@ async function* invoke(
     signal, deadline: Math.min(options.deadline ?? Infinity, now() + 30_000),
     now,
     ...(options.networkAttemptBudget ? { attemptBudget: options.networkAttemptBudget } : {}),
-    onEvent: (event) => { onEvent?.(sourceId, event); queue.push(event); wake(); },
+    ...(options.targetOperations === undefined ? {} : { targetOperations: options.targetOperations }),
+    ...(options.targetSourceId === undefined ? {} : { targetCapability: options.targetSourceId }),
+    onEvent: (event) => {
+      onEvent?.(toolName, event);
+      if (event.type === 'retry' && event.code !== undefined) {
+        queue.push({ type: 'retry_scheduled', sourceId, attempt: event.attempt, reasonCode: event.code, delayMs: event.delayMs ?? 0 });
+        wake();
+      }
+    },
+    onCircuitEvent: (event) => {
+      if (event.type === 'opened') queue.push({ type: 'circuit_opened', sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil });
+      else if (event.type === 'half_opened') queue.push({ type: 'circuit_half_opened', sourceId, probePolicy: 'single_probe' });
+      else queue.push({ type: 'circuit_closed', sourceId, recoveryEvidence: [] });
+      wake();
+    },
   }).then((value) => { response = value; }).catch((error: unknown) => { failure = error; }).finally(() => { complete = true; wake(); });
   try {
     while (!complete || queue.length > 0) {
       const event = queue.shift();
-      if (event) yield { type: 'event', name: 'mcp_attempt', payload: { ...event } };
+      if (event) yield { type: 'event', name: 'source_resilience', payload: sourceResilienceChunkPayload(event) };
       else await new Promise<void>((resolve) => { wake = resolve; });
     }
     await pending;
@@ -90,4 +108,13 @@ async function* invoke(
     if (!response) throw new SourceFailure('MCP_PROTOCOL_ERROR');
     return response;
   } finally { controller.abort(); }
+}
+
+function sourceResilienceChunkPayload(event: SourceResilienceEvent): Record<string, unknown> {
+  switch (event.type) {
+    case 'retry_scheduled': return { kind: event.type, sourceId: event.sourceId, attempt: event.attempt, reasonCode: event.reasonCode, delayMs: event.delayMs };
+    case 'circuit_opened': return { kind: event.type, sourceId: event.sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil };
+    case 'circuit_half_opened': return { kind: event.type, sourceId: event.sourceId, probePolicy: event.probePolicy };
+    case 'circuit_closed': return { kind: event.type, sourceId: event.sourceId, recoveryEvidence: event.recoveryEvidence };
+  }
 }

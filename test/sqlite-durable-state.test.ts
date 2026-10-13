@@ -317,7 +317,7 @@ describe('SQLite durable-state persistence', () => {
 
   it('rejects a future checkpoint version with a valid payload and checksum', async () => {
     const path = await databasePath();
-    insertCheckpoint(path, context('future'), 5);
+    insertCheckpoint(path, context('future'), 6);
     const persistence = createSqlitePersistence({ path, clock });
     try {
       await expect(persistence.checkpoints.load('future')).rejects.toMatchObject({ recordType: 'checkpoint' });

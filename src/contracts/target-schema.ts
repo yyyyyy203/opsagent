@@ -170,6 +170,7 @@ const snapshotV2Base = z.object({
   knowledgeRefs: z.array(knowledgeRef).max(20),
   knowledgePolicy,
   publicationVersion: z.number().int().nonnegative().safe().optional(),
+  identityRegistryVersion: z.number().int().nonnegative().safe().optional(),
   memoryScope: memoryScopeSchema,
   capturedAt: timestamp,
   digest: snapshotDigestV2,

@@ -40,7 +40,9 @@ describe('Target-bound source child Harness', () => {
     const runId = 'child-source-scope-test';
     const requestId = 'request-child-source-scope-test';
     const requestDigest = `sha256:v1:${'a'.repeat(64)}`;
-    const durable = new InMemoryDurableState(clock);
+    const registryVersion = snapshot.identityRegistryVersion;
+    if (registryVersion === undefined) throw new Error('Resolved snapshot is missing its identity registry version.');
+    const durable = new InMemoryDurableState(clock, undefined, () => registryVersion);
     await durable.targetBindings.reserveRequest({ requestId, targetId: snapshot.targetId, requestDigest, runId, createdAt: now });
     const claimResult = await durable.targetStarts.claimStart({
       requestId, runId, targetId: snapshot.targetId, requestDigest, ownerId: 'owner-1', now,

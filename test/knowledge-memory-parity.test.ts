@@ -189,6 +189,25 @@ describe.each(['sqlite', 'memory'] as const)('%s governed knowledge regressions'
     } finally { database.close(); }
   });
 
+  it('lists revisions only within the exact host scope, kind and status with stable keyset pagination', async () => {
+    const { store, database } = fixture(backend);
+    try {
+      const first = draft('list-a-draft');
+      const second = draft('list-b-approved');
+      const foreign = { ...draft('list-c-foreign'), scope: { ...scope, targetId: 'other-target' } };
+      await save(store, first);
+      await approve(store, second);
+      await save(store, foreign);
+
+      const listed = await store.listScopedRevisions({ scope, kind: 'semantic', limit: 10 });
+      expect(listed.map(item => `${item.id}:${item.contentRevision}`)).toEqual(['list-a-draft:1', 'list-b-approved:1']);
+      expect((await store.listScopedRevisions({ scope, kind: 'semantic', status: 'draft', limit: 10 }))
+        .map(item => item.id)).toEqual(['list-a-draft']);
+      expect((await store.listScopedRevisions({ scope, kind: 'semantic', after: { id: first.id, contentRevision: 1 }, limit: 10 }))
+        .map(item => item.id)).toEqual(['list-b-approved']);
+    } finally { database.close(); }
+  });
+
   it('ranks term frequency and document length before binary id ties like SQLite', async () => {
     const { store, database } = fixture(backend);
     try {

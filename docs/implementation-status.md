@@ -1,5 +1,37 @@
 # 实现进度与验证记录
 
+## 2026-10-10：Prometheus + 熔断前端联合验收
+
+新增独立 `pnpm e2e:circuit:prometheus` 验收入口，复用真实 Agent Web Runtime、MCP、熔断器、V2 SSE 和前端流程，但将 Metrics Lab 的恢复查询连接到本地 Docker Prometheus。模拟器在 MCP 来源边界注入 9 次失败；熔断期间 Prometheus 查询数保持 0。经过第一次失败的半开探测、重新熔断及第二轮冷却后，唯一成功探测实际调用 `PrometheusSettlementSource`，读回模拟窗口 100 笔/15 次失败。Public Evidence/UI 只保留摘要和引用，不暴露 Prometheus 原始指标名。
+
+验证：Prometheus 联合浏览器 E2E 1/1 通过；原确定性熔断浏览器 E2E 1/1 通过；聚焦 MCP/指标回归 4 个文件、51 项通过；opt-in Prometheus → MCP → Web 集成 2/2 通过；默认全仓 Vitest 158 个文件通过、3 个 opt-in 文件跳过，共 1,334 项通过、7 项跳过。Node 24 下根构建、Web 构建、根/Web 类型检查、全仓 lint 及 `git diff --check` 通过。首次 E2E 红灯确认原夹具返回 `sourceMode=deterministic`，修正接线后绿灯通过。
+
+该验收使用本地模拟遥测与 `ScriptedModel`，没有调用在线模型、LangSmith、ELK 或 `group-buy-market`；结论仅证明本地 Prometheus → MCP → Agent/Web 熔断与恢复闭环，不代表业务目标系统或生产数据验收。没有改动生产熔断策略、公共 Event/Message 契约或持久化 Schema；未 commit/push。
+
+## 2026-10-10：半开探测失败后重新熔断的浏览器验收
+
+扩展既有确定性熔断 E2E 为 7 个父 Run：保留初始 9 次物理失败、6 次重试、首次冷却边界及最终证据关联断言；在第一次冷却结束时额外注入一次来源故障，验证半开探测不追加重试、重新产生熔断打开事件。该故障消费后若错误地重试，确定性来源会立即成功，测试会通过成功查询计数及页面状态识别此问题。失败父/子 Run 的证据引用和证据列表均为空，页面不显示恢复。
+
+重新熔断后立即发起查询及第二轮冷却的第 29,999 毫秒发起查询，均收到 `CIRCUIT_OPEN` 且来源成功查询数仍为 0；最后 1 毫秒过后仅显示探测待触发，后续一次探测成功才显示恢复并生成父子关联证据。测试控制面只允许按顺序进行第二次故障注入和时钟推进，并拒绝重复注入。机制测试另让失败探测耗时 500 ms，精确验证新冷却截止为失败完成后 30 秒，而非首次打开或探测开始后 30 秒。
+
+验证：新 E2E 先在旧夹具处得到预期的第二次注入拒绝（409），补齐夹具后通过；最终浏览器复验 1/1 通过（场景 9.2 秒），机制测试 13/13 通过。全仓默认 Vitest 在 2 个 worker 下为 158 个文件通过、3 个 opt-in 文件跳过，1,334 项通过、7 项跳过；全仓 lint、根/Web 类型检查、根/Web 构建通过。Windows 沙箱内的 pnpm 依赖链接读取导致 Vitest `EPERM` 和 lint 类型解析异常，沙箱外使用已安装的 Node 24 工具完成上述质量门；未修改依赖或放宽 lint 规则。
+
+本轮增量限于测试夹具、验收断言和文档，生产熔断策略、事件契约及持久化 Schema 未修改。使用 `ScriptedModel` 和模拟快照，不消耗模型额度，不访问真实 LangSmith/Prometheus/ELK 或目标业务系统。复现入口仍为 `pnpm e2e:circuit`，详见[本地验收指南](./guides/agent-web-local.md)；未 commit/push。
+
+## 2026-10-09：来源重试/熔断恢复闭环与前端状态时间线
+
+完成 Prometheus 与 ELK 只读来源的韧性事件贯通：保留默认 3 次逻辑操作失败后打开熔断、冷却 30 秒、半开只放行一个探测的行为；重试、打开、探测等待和恢复状态通过结构化 V2 事件及脱敏 Public SSE 投影送达前端，半开内部状态仅留在审计流。修复抖动退避产生小数毫秒、被 V2 整数 Schema 拒绝并使工具执行结果失败的问题，重试延迟现在向上取整，不会早于 Retry-After 下限。
+
+模拟器新增仅限 loopback 管理面的来源故障注入，可确定性验证“物理查询失败 → 逻辑操作重试 → 熔断阻止查询 → 冷却后单探测恢复 → 证据重新可采集”；故障注入不是 Agent Tool。前端将最近 12 个韧性状态作为有界时间线展示，避免恢复事件覆盖此前的重试和熔断状态。`logs.capture` 改为流式结果以承载来源韧性事件，调用方和测试同步 drain AsyncGenerator。
+
+验证：ESLint、根 TypeScript typecheck/build、Web typecheck/Vite production build 通过；本轮定向测试 8 个文件、64 项通过；完整 Vitest 串行回归 158 个文件通过、3 个 opt-in 文件跳过，1333 项通过、7 项跳过；Agent Web Playwright E2E 5/5 通过，覆盖重试、熔断、探测等待及恢复的可见时间线。没有调用真实模型、LangSmith 或生产 Prometheus/ELK；浏览器验收使用本地确定性 fixture，不代表真实数据源验收。未 commit/push；保留了本轮开始前工作区已有改动。
+
+### 确定性熔断浏览器端到端验收（2026-10-10）
+
+新增隔离的 `pnpm e2e:circuit` 命令及专用 Playwright fixture，串接真实 Agent Web Runtime、Metrics Lab/MCP、熔断器、V2 SSE、前端 Run/证据视图；模型使用 `ScriptedModel`，来源使用确定性模拟快照，SQLite 使用临时目录，测试控制面仅监听 loopback。浏览器验收 1/1 通过：注入 9 次物理来源失败并确认 6 次重试事件、熔断打开；熔断期间及冷却还剩 1 毫秒时的新 Run 均观察到 `CIRCUIT_OPEN`，来源查询数仍为 0；推进最后 1 毫秒后 UI 才显示“恢复探测待触发”，后续单次查询成功，UI 恢复，子 Run 与父 Run 均关联同一证据引用，原始数据标记不出现在公开证据或页面中。测试控制面拒绝未注入故障前的时钟推进，并在 teardown 时独立关闭 Runtime/Metrics Lab。
+
+最终 `corepack pnpm@10 run e2e:circuit` 完整命令通过：根构建、Web 构建及浏览器 E2E 均成功；测试进程的 `node` 解析到 Node 24。Corepack/pnpm 启动器本身仍打印系统 Node 20 的 engine warning，因此 Windows 执行时必须确保 Node 24 在 PATH 前部，否则会因 better-sqlite3 ABI 不匹配而无法启动 Runtime。没有调用真实模型、LangSmith、Docker、Prometheus 服务或 `group-buy-market`。本验收证明模拟数据下的软件与 UI 集成路径，不代表生产数据源验收，也未覆盖多个并发请求竞争半开探测；后者仍由独立熔断器测试负责。未 commit/push。
+
 ## 2026-10-08：真实烟测跨层契约修复离线收口
 
 完成已批准的真实烟测跨层修复：指标摘要中的有效 Unix 秒被确定性投影为公开 metric evidence `timeRange`（不改 SQLite Schema、不猜测旧记录）；Logs 在同一 capture evidence ID 上完成成功 search/read-slice 后可进入 report token cap，证据充分性仍由 Collector/硬门禁决定；Trace verifier 按实际 child-owned Source lifecycle 校验父/子 Run、toolCallId 和来源类型，并核验失败模型尝试的已知 usage/finishReason，缺失用量继续标 unavailable。
@@ -232,3 +264,17 @@ Node v20.20.0，pnpm 11.19.0。执行结果：pnpm lint、pnpm typecheck、pnpm 
 Stage A 的 Episodic 保存/去重、审核/撤销、同 scope 有界召回、暂停恢复时对冻结选择重新验证、前端操作、关闭基线、事务回滚和 stale Worker fencing 已完成离线联合验收；新增 `pnpm acceptance:memory` 入口及安全固定错误码。Node 24.19.0 环境下 13/13 acceptance checks 通过，模型/外部请求计数均为 0。全仓 Vitest 179 文件通过、3 个 opt-in 文件跳过；1,613 项通过、7 项跳过。根 typecheck/build、Web typecheck/build、memory E2E（10/10 运行项通过，另 1 个关闭基线单测独立 1/1 通过）及确定性 circuit E2E 1/1 通过。
 
 全仓 ESLint 仍有 51 条测试/fixture 诊断（主要 `require-await` 与 `unbound-method`，另有两个 Playwright 文件未纳入 ESLint project）；Task 9 相关文件 scoped lint 通过。验收记录与 Node ABI 错误定位见[阶段 A 验收记录](./verification/2026-10-10-diagnostic-memory-plan-review.md)。该阶段使用 ScriptedModel、临时 SQLite 与模拟数据，没有请求在线模型、LangSmith、Prometheus/ELK 或目标业务系统；不能据此宣称完整记忆系统或生产巡检已完成。Semantic/Procedural 完整知识库、向量实验及真实数据源效果仍未实现/验收。
+
+## 2026-10-11：记忆向量 V3 影子检索与离线对照
+
+按 [向量记忆可用性实验 Spec](./superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 完成 V3 机制：独立临时 SQLite 索引、16 条上限的嵌入与 upsert 分批、BM25/向量/混合影子检索、RRF、每次召回前重新校验 scope/状态/证据、向量故障时有界 BM25 降级，以及固定 holdout 的离线对照 CLI。验收报告包含安全投影后的向量包身份、外部请求计数和 DB/WAL/SHM 总容量；临时资源清理失败或任何 fetch 出站尝试都会使验收失败。
+
+Node 24.19.0 验证：全仓 Vitest 181 个文件通过、3 个 opt-in 文件跳过，1,636 项通过、7 项跳过；`tsc --noEmit`、生产 build、V3 文件定向 ESLint 均通过。全仓 ESLint 仍有 51 条 V3 范围外既有测试/Playwright fixture 诊断。所有测试与检查均为本地离线执行，没有加载真实 Embedding 包，也没有发出模型、LangSmith 或数据源请求。
+
+本增量仍不改变默认 BM25/Harness 路径。真实语义质量需要后续审查真实 Embedding 生成器及本地向量包后再验收；Semantic/Procedural 完整知识库、向量接入生产召回和真实业务效果仍未完成。
+
+## 2026-10-13：完整治理记忆系统 T5–T7 收口
+
+Semantic 与 Procedural 记忆已按批准、独立发布、Target/Profile 精确作用域、资格校验、审计和只读 UI 闭环；Agent 可在受限上下文中检索获批知识，Episodic 原有路径保持兼容。T6 Target-scoped API/UI 与 T7 四类记忆/迁移/重启/HITL/隐私/降级回归通过。新增 Target identity-registry version fence，阻止旧解析快照创建新 root Run；失效知识不会因恢复或旧收据重新获得资格。向量检索仍只是 Episodic shadow experiment，不是 Semantic/Procedural 主召回后端。
+
+Node 24.19.0 / Vitest 3.2.7 最终验证：全仓 ESLint、typecheck、build 通过；Vitest 209 个文件通过、3 个 opt-in 文件跳过，2,102 项通过、7 项跳过；离线 `acceptance:memory` 13/13 通过，模型/外部请求均为 0；知识治理 UI E2E 1/1 通过。独立终审在约定的 Procedural 词法边界内未发现 blocker/P3。该规则不是完整 SQL parser；当前验收也不代表真实生产数据源或生产授权体系已接入。未调用付费模型、Embedding、LangSmith 或生产系统；本轮未提交或推送。详细记录见[治理记忆系统计划](./superpowers/plans/2026-10-11-complete-governed-memory-system.md)及工作树 SDD 报告。

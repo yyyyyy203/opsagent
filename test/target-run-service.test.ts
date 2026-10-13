@@ -84,7 +84,7 @@ function configureTestTargetGate(
 describe('TargetRunService', () => {
   it('starts new Runs on the published overlay and never upgrades an already persisted Run snapshot', async () => {
     const f = await publicationFixture('memory');
-    const state = new InMemoryDurableState(clock, f.memory);
+    const state = new InMemoryDurableState(clock, f.memory, () => 1);
     const model = new ScriptedModel([{ text: 'ok', toolCalls: [] }, { text: 'ok', toolCalls: [] }, { text: 'ok', toolCalls: [] }]);
     const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock, durableState: state });
     runtimes.push(runtime);
@@ -129,7 +129,8 @@ describe('TargetRunService', () => {
         return { text: 'ok', toolCalls: [] };
       },
     };
-    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock });
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock,
+      inMemoryTargetIdentityRegistryVersion: () => 1 });
     configureTestTargetGate(runtime, model);
     runtimeRef.current = runtime;
     runtimes.push(runtime);
@@ -188,9 +189,26 @@ describe('TargetRunService', () => {
       .rejects.toMatchObject({ code: 'TARGET_RUN_UNAVAILABLE' });
   });
 
+  it('reports current required-knowledge blockers through a safe additive readiness result', async () => {
+    const runtime = createAgentRuntime({ model: new ScriptedModel([{ text: 'unused', toolCalls: [] }]), workspaceRoots: [], clock });
+    runtimes.push(runtime);
+    if (runtime.durableState === undefined || runtime.queries === undefined) throw new Error('Durable query ports are unavailable.');
+    const base = await createResolver();
+    const resolver = {
+      listCatalog: () => base.listCatalog(),
+      resolve: async () => { throw new TargetConfigurationError('KNOWLEDGE_REQUIRED_DISABLED'); },
+    };
+    const service = new TargetRunService({ resolver, bindings: runtime.durableState.targetBindings,
+      queries: runtime.queries, clock, start: { startAccepted: async () => undefined } });
+
+    await expect(service.readiness('market-a-sim')).resolves.toEqual({ targetId: 'market-a-sim', status: 'blocked',
+      canStart: false, reasonCode: 'KNOWLEDGE_REQUIRED_DISABLED' });
+  });
+
   it('coalesces concurrent requests with the same idempotency key before the first binding commits', async () => {
     const runtime = createAgentRuntime({
       model: new ScriptedModel([{ text: 'ok', toolCalls: [] }]), workspaceRoots: [], clock,
+      inMemoryTargetIdentityRegistryVersion: () => 1,
     });
     const targetModel = new ScriptedModel([{ text: 'ok', toolCalls: [] }]);
     // Target model capabilities are isolated from the runtime-global model.
@@ -255,7 +273,8 @@ describe('TargetRunService', () => {
         return { text: 'unexpected', toolCalls: [] };
       },
     };
-    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock });
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock,
+      inMemoryTargetIdentityRegistryVersion: () => 1 });
     configureTestTargetGate(runtime, model);
     runtimes.push(runtime);
     if (runtime.durableState?.targetStarts === undefined || runtime.queries === undefined) {
@@ -305,7 +324,8 @@ describe('TargetRunService', () => {
         return { text: 'ok', toolCalls: [] };
       },
     };
-    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock });
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock,
+      inMemoryTargetIdentityRegistryVersion: () => 1 });
     configureTestTargetGate(runtime, model);
     runtimes.push(runtime);
     if (runtime.durableState?.targetStarts === undefined || runtime.queries === undefined) {
@@ -330,7 +350,10 @@ describe('TargetRunService', () => {
       start: { startAccepted: options => execution.startAccepted(options) } });
     const request = { targetId: 'market-a-sim', requestId: 'confirmed-absent-retry', message: 'inspect failures' };
 
-    await expect(service.start(request)).rejects.toMatchObject({ code: 'RUN_CONFLICT' });
+    await expect(service.start(request)).rejects.toMatchObject({
+      code: 'RUN_CONFLICT',
+      message: 'Run did not commit its initial transition. Retry with the same request ID only while the resolved Target snapshot is unchanged; if it changed, submit a new request ID.',
+    });
     const reserved = await runtime.durableState.targetBindings.getRequest(request.requestId);
     if (reserved === null) throw new Error('Expected the original request reservation to remain.');
     expect(await runtime.durableState.targetBindings.getBinding(reserved.runId)).toBeNull();
@@ -350,7 +373,8 @@ describe('TargetRunService', () => {
         return { text: 'unexpected', toolCalls: [] };
       },
     };
-    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock });
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false, clock,
+      inMemoryTargetIdentityRegistryVersion: () => 1 });
     configureTestTargetGate(runtime, model);
     runtimes.push(runtime);
     if (runtime.durableState?.targetStarts === undefined || runtime.queries === undefined) {

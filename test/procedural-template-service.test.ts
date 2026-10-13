@@ -9,6 +9,7 @@ import { ProceduralTemplateService, type ProceduralTemplateServiceOptions } from
 import { SemanticSourceRegistry } from '../src/memory/semantic-source-registry.js';
 import { SqliteDatabase } from '../src/infrastructure/sqlite/database.js';
 import { SqliteGovernedKnowledgeStore } from '../src/infrastructure/sqlite/knowledge-memory-store.js';
+import { createTargetKnowledgeManagementService } from '../src/bootstrap/diagnostic-memory.js';
 
 const digest = 'a'.repeat(64);
 const source = { sourceId: 'settlement-runbook', sourceVersion: 'runbook/v1', digest };
@@ -51,8 +52,10 @@ function setup(backend: 'memory' | 'sqlite' = 'memory') {
     clock: { now: () => new Date(now) },
     ids: { next: (prefix: string) => `${prefix}-${++nextId}` },
   };
-  const store = database === undefined ? new InMemoryGovernedKnowledgeStore(storeOptions)
-    : new SqliteGovernedKnowledgeStore(database, storeOptions);
+  const memoryStore = database === undefined ? new InMemoryGovernedKnowledgeStore(storeOptions) : null;
+  const sqliteStore = database === undefined ? null : new SqliteGovernedKnowledgeStore(database, storeOptions);
+  const store = memoryStore ?? sqliteStore;
+  if (store === null) throw new Error('Knowledge store fixture could not be created.');
   const sourceRegistry = new SemanticSourceRegistry({ schemaVersion: 1, sources: [{
     sourceType: 'controlled_runbook', sourceId: source.sourceId, sourceVersion: source.sourceVersion,
     sourceDigest: digest, dataDomainId: 'settlement-domain', allowedTargetIds: [scope.targetId],
@@ -111,6 +114,32 @@ function setup(backend: 'memory' | 'sqlite' = 'memory') {
       const restoredStore = database === undefined ? store : new SqliteGovernedKnowledgeStore(database, storeOptions);
       return new ProceduralTemplateService({ ...serviceOptions, drafts: restoredStore, sources: restoredStore,
         queries: restoredStore, reviews: restoredStore, transitions: restoredStore });
+    },
+    makeFormalManagementService() {
+      if (memoryStore === null) throw new Error('Formal replay assembly fixture uses the InMemory store.');
+      const procedures = {
+        resolve: ({ targetId, reference }: { targetId: string; reference: typeof source }) => {
+          const resolved = sourceRegistry.resolve({ targetId, reference });
+          return { sourceType: resolved.sourceType, sourceId: resolved.sourceId, sourceVersion: resolved.sourceVersion,
+            sourceDigest: resolved.sourceDigest, dataDomainId: resolved.dataDomainId };
+        },
+      };
+      const review = serviceOptions.reviewAttestations;
+      return createTargetKnowledgeManagementService({
+        targets: serviceOptions.targets,
+        semanticSources: sourceRegistry,
+        proceduralSources: procedures,
+        proceduralCapabilities: capabilityRegistry,
+        semanticReviewAttestations: review,
+        proceduralReviewAttestations: review,
+        publicationContexts: { resolvePublicationContext: async () => ({ registryVersion: 1, scope, hostPolicy: null }) },
+        revisions: store,
+        publications: memoryStore,
+        policies: { get: async () => null, compareAndSet: async () => { throw new Error('unused policy write'); } },
+        capabilities: { getForTarget: async () => ({ semanticEnabled: true, proceduralEnabled: true }) },
+        clock: serviceOptions.clock,
+        ids: serviceOptions.ids,
+      });
     },
     close() { database?.close(); },
   };
@@ -492,4 +521,38 @@ describe.each(['memory', 'sqlite'] as const)('%s ProceduralTemplateService', bac
         decision: 'approve' })).rejects.toMatchObject({ code: 'KNOWLEDGE_SOURCE_REVOKED' });
     } finally { fixture.close(); }
   });
+});
+
+it('formal Target knowledge assembly injects receipt-first replay after source epoch and attestations change', async () => {
+  const fixture = setup('memory');
+  try {
+    const management = fixture.makeFormalManagementService();
+    const draft = await management.createProceduralDraft(scope.targetId, { requestId: 'formal-replay-draft',
+      source, content: templateContent() });
+    const pending = await management.submitForReview(scope.targetId, 'procedural', { requestId: 'formal-replay-submit',
+      knowledgeId: draft.id, contentRevision: draft.contentRevision, governanceVersion: draft.governanceVersion });
+    const reviewCommand = { requestId: 'formal-replay-review', knowledgeId: draft.id,
+      contentRevision: pending.contentRevision, governanceVersion: pending.governanceVersion, decision: 'approve' as const };
+    const approved = await management.review(scope.targetId, 'procedural', reviewCommand);
+    const audits = await fixture.store.listPending(50);
+
+    fixture.changeAttestations();
+    await expect(management.review(scope.targetId, 'procedural', reviewCommand)).resolves.toEqual(approved);
+    expect(await fixture.store.listPending(50)).toEqual(audits);
+
+    await fixture.store.transitionSource({ requestId: 'formal-replay-source-revalidated', actorId: 'operator-admin',
+      sourceId: source.sourceId, dataDomainId: 'settlement-domain', expectedSourceEpoch: approved.sourceEpoch,
+      transition: 'revalidated', sourceDigest: digest, occurredAt: '2026-10-12T00:00:01.000Z' });
+
+    await expect(management.review(scope.targetId, 'procedural', reviewCommand)).rejects.toMatchObject({ code: 'KNOWLEDGE_SOURCE_REVOKED' });
+    expect(await fixture.store.listPending(50)).toEqual([...audits, expect.objectContaining({
+      requestId: 'formal-replay-source-revalidated', type: 'source_transition',
+    })]);
+    await expect(fixture.store.inspectExact({ id: draft.id, contentRevision: 1, scope,
+      now: '2026-10-12T00:00:02.000Z' })).resolves.toMatchObject({ status: 'approved', sourceEpoch: 0,
+        currentSourceEpoch: 1, sourceValidity: 'active' });
+    await expect(fixture.store.search({ kind: 'procedural', scope, references: [{ id: draft.id,
+      version: '1', digest: approved.contentDigest, approval: 'approved' }], query: 'settlement', limit: 10,
+      now: '2026-10-12T00:00:02.000Z' })).resolves.toEqual([]);
+  } finally { fixture.close(); }
 });

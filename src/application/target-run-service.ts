@@ -1,7 +1,8 @@
 import type { Clock, IdGenerator, InspectionQueryService, PublicRunDetail, PublicRunSummary } from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import type { ReplyOptions } from '../agent/types.js';
-import type { TargetResolver, TargetRunBindingPage, TargetBindingStore, TargetRunRequestRecord, TrustedTargetBinding } from '../contracts/target.js';
+import type { TargetResolver, TargetRunBindingPage, TargetBindingStore, TargetRunRequestRecord, TrustedTargetBinding,
+  TargetReadinessDto } from '../contracts/target.js';
 import type { TargetRecoveryGate } from '../contracts/target.js';
 import { TargetConfigurationError } from '../contracts/target.js';
 import { checkpointChecksum } from '../contracts/stable-json.js';
@@ -61,6 +62,26 @@ export class TargetRunService {
       ...target,
       canStart: target.enabled && this.options.start !== undefined,
     }));
+  }
+
+  /** Re-resolves one Target against current host knowledge policy/capabilities for UI readiness only. */
+  public async readiness(targetId: string): Promise<TargetReadinessDto> {
+    if (!isIdentifier(targetId)) throw new TargetConfigurationError('TARGET_NOT_FOUND');
+    const target = this.options.resolver.listCatalog().find(item => item.targetId === targetId);
+    if (target === undefined) throw new TargetConfigurationError('TARGET_NOT_FOUND');
+    if (!target.enabled) return { targetId, status: 'disabled', canStart: false, reasonCode: 'TARGET_DISABLED' };
+    if (this.options.start === undefined) {
+      return { targetId, status: 'unavailable', canStart: false, reasonCode: 'TARGET_RUN_UNAVAILABLE' };
+    }
+    try {
+      await this.options.resolver.resolve({ targetId, capturedAt: this.clock.now().toISOString(), signal: new AbortController().signal });
+      return { targetId, status: 'ready', canStart: true };
+    } catch (error) {
+      const reasonCode = typeof error === 'object' && error !== null && 'code' in error
+        && error.code === 'KNOWLEDGE_REQUIRED_DISABLED'
+        ? 'KNOWLEDGE_REQUIRED_DISABLED' as const : 'TARGET_CONFIGURATION_UNAVAILABLE' as const;
+      return { targetId, status: 'blocked', canStart: false, reasonCode };
+    }
   }
 
   public async start(input: TargetRunStartInput): Promise<TargetRunStartResult> {

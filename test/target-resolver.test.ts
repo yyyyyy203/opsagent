@@ -78,6 +78,51 @@ describe('StaticTargetResolver', () => {
     expect(await ports.identityRegistry.readSnapshot()).toEqual(afterNew);
   });
 
+  it('rejects a stale resolver after a newer Target catalog is published', async () => {
+    const ports = createTargetIdentityTestPorts();
+    const options = { ...ports, catalog: multiProjectTargetCatalog, connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles), installedScenarios, installedAdapters,
+      validationTime: capturedAt };
+    const stale = await createStaticTargetResolver(options);
+    const updatedProfiles = multiProjectProfiles.map(profile => ({ ...profile, revision: 'profile/v2' }));
+    const updatedCatalog = { ...multiProjectTargetCatalog,
+      targets: multiProjectTargetCatalog.targets.map(target => ({ ...target, profileRevision: 'profile/v2',
+        scenario: { ...target.scenario, version: '1.0.1' } })) };
+
+    await createStaticTargetResolver({ ...options, catalog: updatedCatalog,
+      installedScenarios: [...installedScenarios, { ...WINDOW_FAILURE_RATE_INSTALLATION, version: '1.0.1' }],
+      profileResolver: new StaticProfileResolver(updatedProfiles) });
+
+    await expect(stale.resolve({ targetId: 'market-a-sim', capturedAt,
+      signal: new AbortController().signal })).rejects.toMatchObject({ code: 'TARGET_BINDING_INVALID' });
+  });
+
+  it('rejects a resolver whose Target registry changes while knowledge resolution is in flight', async () => {
+    const ports = createTargetIdentityTestPorts();
+    let entered!: () => void;
+    let release!: () => void;
+    const preparing = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const options = { ...ports, catalog: multiProjectTargetCatalog, connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles), installedScenarios, installedAdapters,
+      validationTime: capturedAt };
+    const stale = await createStaticTargetResolver({ ...options, knowledgeCapabilities: {
+      getForTarget: async () => { entered(); await blocked; return { semanticEnabled: false, proceduralEnabled: false }; },
+    } });
+    const resolving = stale.resolve({ targetId: 'market-a-sim', capturedAt, signal: new AbortController().signal });
+    await preparing;
+    const updatedProfiles = multiProjectProfiles.map(profile => ({ ...profile, revision: 'profile/v2' }));
+    const updatedCatalog = { ...multiProjectTargetCatalog,
+      targets: multiProjectTargetCatalog.targets.map(target => ({ ...target, profileRevision: 'profile/v2',
+        scenario: { ...target.scenario, version: '1.0.1' } })) };
+    await createStaticTargetResolver({ ...options, catalog: updatedCatalog,
+      installedScenarios: [...installedScenarios, { ...WINDOW_FAILURE_RATE_INSTALLATION, version: '1.0.1' }],
+      profileResolver: new StaticProfileResolver(updatedProfiles) });
+    release();
+
+    await expect(resolving).rejects.toMatchObject({ code: 'TARGET_BINDING_INVALID' });
+  });
+
   it.each([
     { path: 'C:/private/runbook.md' },
     { url: 'https://private.invalid/source' },

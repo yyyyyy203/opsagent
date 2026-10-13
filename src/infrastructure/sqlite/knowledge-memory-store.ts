@@ -1,7 +1,7 @@
 import { systemClock, randomIdGenerator, type Clock, type IdGenerator } from '../../contracts/common.js';
 import { KnowledgeContractError, isKnowledgeTransitionAllowed, type KnowledgeGovernanceReviewPort,
   type KnowledgeQueryPort, type KnowledgeReviewAuthorityPort, type KnowledgeReviewCommand,
-  type KnowledgeRevision, type KnowledgeScope } from '../../contracts/knowledge-memory.js';
+  type KnowledgeRevision, type KnowledgeScope, type KnowledgeStatus } from '../../contracts/knowledge-memory.js';
 import { parseKnowledgeGovernanceAuditV1, type KnowledgeGovernanceAuditOutboxPort,
   type KnowledgeGovernanceAuditQueryPort, type KnowledgeGovernanceAuditV1 } from '../../contracts/knowledge-governance-audit.js';
 import { contentRevisionFromTargetReference, parseKnowledgeRecord, parseKnowledgeReviewCommand,
@@ -10,6 +10,7 @@ import { canonicalJson, checkpointChecksum } from '../../contracts/stable-json.j
 import type { KnowledgeCommandReplayIntent, KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgeGovernanceAuditAttemptPort,
   KnowledgeGovernanceTransitionCommand, KnowledgeGovernanceTransitionStore, KnowledgeRevisionStateQueryPort,
   KnowledgeRevisionStateSnapshot, KnowledgeScopedSearchRequest, KnowledgeScopedSearchStore,
+  KnowledgeScopedListPort, KnowledgeScopedListRequest,
   KnowledgeSourceGovernanceStore, KnowledgeSourceRegistration, KnowledgeSourceState,
   KnowledgeSourceTransition, KnowledgeSourceTransitionCommand, KnowledgeSubmissionCommand } from '../../contracts/knowledge-memory-storage.js';
 import type { TargetKnowledgeReference } from '../../contracts/target.js';
@@ -37,7 +38,7 @@ export interface SqliteGovernedKnowledgeStoreOptions {
 
 /** SQLite implementation for governed Semantic/Procedural revisions and their independent audit outbox. */
 export class SqliteGovernedKnowledgeStore implements KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
-  KnowledgeScopedSearchStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort, KnowledgeGovernanceTransitionStore,
+  KnowledgeScopedSearchStore, KnowledgeScopedListPort, KnowledgeQueryPort, KnowledgeGovernanceReviewPort, KnowledgeGovernanceTransitionStore,
   KnowledgeGovernanceAuditOutboxPort, KnowledgeGovernanceAuditQueryPort,
   KnowledgeRevisionStateQueryPort, KnowledgeGovernanceAuditAttemptPort {
   private readonly clock: Clock;
@@ -395,6 +396,36 @@ export class SqliteGovernedKnowledgeStore implements KnowledgeProceduralReplayCa
     });
   }
 
+  public listScopedRevisions(input: KnowledgeScopedListRequest): Promise<readonly KnowledgeRevision[]> {
+    return Promise.resolve().then(() => {
+      validateScopedList(input);
+      const scope = parseKnowledgeScope(input.scope);
+      const where = ['r.kind = ?', 'r.scope_key = ?'];
+      const parameters: Array<string | number> = [input.kind, scopeDigest(scope)];
+      if (input.status !== undefined) {
+        where.push('s.status = ?');
+        parameters.push(input.status);
+      }
+      if (input.after !== undefined) {
+        where.push('(r.knowledge_id COLLATE BINARY > ? COLLATE BINARY OR '
+          + '(r.knowledge_id = ? COLLATE BINARY AND r.content_revision > ?))');
+        parameters.push(input.after.id, input.after.id, input.after.contentRevision);
+      }
+      const rows = this.database.raw.prepare(`
+        SELECT r.knowledge_id, r.content_revision, r.kind, r.scope_key, r.source_id, r.source_domain_id,
+          r.source_digest, r.revision_json, r.content_digest, r.valid_until,
+          s.governance_version, s.status, s.source_epoch, s.review_json, s.updated_at
+        FROM diagnostic_knowledge_revisions r
+        JOIN diagnostic_knowledge_revision_states s
+          ON s.knowledge_id = r.knowledge_id AND s.content_revision = r.content_revision
+        WHERE ${where.join(' AND ')}
+        ORDER BY r.knowledge_id COLLATE BINARY ASC, r.content_revision ASC
+        LIMIT ?
+      `).all(...parameters, input.limit) as RevisionRow[];
+      return rows.map(materializeRevision).filter(revision => canonicalJson(revision.scope) === canonicalJson(scope));
+    });
+  }
+
   public inspectExact(input: { id: string; contentRevision: number; scope: KnowledgeScope; now: string }): Promise<KnowledgeRevisionStateSnapshot | null> {
     return Promise.resolve().then(() => {
       const revision = this.loadRevision(input.id, input.contentRevision);
@@ -675,6 +706,23 @@ function normalizeSourceTransition(command: KnowledgeSourceTransitionCommand): K
 function validateSearch(input: KnowledgeScopedSearchRequest): void {
   if (typeof input.query !== 'string' || Buffer.byteLength(input.query, 'utf8') > 512 || !validLimit(input.limit, 50)) throw failure('KNOWLEDGE_RECORD_INVALID');
   validateTime(input.now);
+}
+
+function validateScopedList(input: KnowledgeScopedListRequest): void {
+  if ((input.kind !== 'semantic' && input.kind !== 'procedural') || !validLimit(input.limit, 50)
+    || (input.status !== undefined && !isKnowledgeStatus(input.status))
+    || (input.after !== undefined && (!safeKnowledgeId(input.after.id) || !positive(input.after.contentRevision)))) {
+    throw failure('KNOWLEDGE_RECORD_INVALID');
+  }
+}
+
+function isKnowledgeStatus(value: KnowledgeStatus): boolean {
+  return value === 'draft' || value === 'review_pending' || value === 'approved' || value === 'rejected'
+    || value === 'revoked' || value === 'expired' || value === 'conflict' || value === 'superseded';
+}
+
+function safeKnowledgeId(value: string): boolean {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 256;
 }
 
 function normalizeReference(reference: TargetKnowledgeReference): TargetKnowledgeReference {

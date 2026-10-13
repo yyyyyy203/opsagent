@@ -35,7 +35,9 @@ async function targetSnapshot(): Promise<ResolvedTargetSnapshotV2> {
     installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
     validationTime: now,
   });
-  return resolver.resolve({ targetId: 'market-a-sim', capturedAt: now, signal: new AbortController().signal });
+  const snapshot = await resolver.resolve({ targetId: 'market-a-sim', capturedAt: now,
+    signal: new AbortController().signal });
+  return snapshot;
 }
 
 async function legacyTargetSnapshot(): Promise<ResolvedTargetSnapshot> {
@@ -108,12 +110,17 @@ async function acquireStartClaim(starts: TargetStartStore, binding: TargetRunBin
 describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', (kind: 'memory' | 'sqlite') => {
   async function openStore() {
     if (kind === 'memory') {
-      const state = new InMemoryDurableState(clock);
+      const state = new InMemoryDurableState(clock, undefined, () => 1);
       return { state, close: () => Promise.resolve() };
     }
     const root = await mkdtemp(join(tmpdir(), 'agentops-target-binding-'));
     roots.push(root);
     const bundle = createSqlitePersistence({ path: join(root, 'target.sqlite'), clock });
+    await createStaticTargetResolver({ ...createTargetIdentityTestPorts(),
+      catalog: multiProjectTargetCatalog, connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles),
+      installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION], installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+      identityRegistry: bundle.targetIdentityRegistry, knowledgePolicies: bundle.targetKnowledgePolicies, validationTime: now });
     return { state: bundle, close: () => { bundle.close(); return Promise.resolve(); } };
   }
 
@@ -133,6 +140,31 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', (k
       await expect(store.state.transitions.commit({ expectedRevision: null,
         context: context(rootBinding.runId, rootBinding.bindingId, snapshot), outboxEvents: [runStarted(rootBinding.runId)],
         targetBinding: { binding: rootBinding, snapshot, startClaim: await acquireStartClaim(store.state.targetStarts, rootBinding) },
+      })).rejects.toMatchObject({ code: 'TARGET_BINDING_INVALID' });
+      expect(await store.state.targetBindings.getBinding(rootBinding.runId)).toBeNull();
+      expect(await store.state.checkpoints.load(rootBinding.runId)).toBeNull();
+      expect(await store.state.outbox.listPending({ runId: rootBinding.runId, limit: 10 })).toEqual([]);
+    } finally { await store.close(); }
+  });
+
+  it('rejects an unfenced V2 snapshot when creating a new root Run', async () => {
+    const store = await openStore();
+    const resolved = await targetSnapshot();
+    const { identityRegistryVersion: _identityRegistryVersion, digest: _digest, ...unsigned } = resolved;
+    void _identityRegistryVersion;
+    void _digest;
+    const snapshot = parseResolvedTargetSnapshotV2({ ...unsigned,
+      digest: `sha256:v2:${checkpointChecksum({ algorithm: 'sha256', version: 2, target: unsigned })}` });
+    const rootBinding = binding({ bindingId: 'unfenced-registry-binding', targetId: snapshot.targetId,
+      runId: 'unfenced-registry-run', rootRunId: 'unfenced-registry-run', snapshotDigest: snapshot.digest,
+      requestId: 'unfenced-registry-request', requestDigest: `sha256:v1:${'7'.repeat(64)}` });
+    try {
+      await store.state.targetBindings.reserveRequest({ requestId: rootBinding.requestId!, targetId: snapshot.targetId,
+        requestDigest: rootBinding.requestDigest!, runId: rootBinding.runId, createdAt: now });
+      await expect(store.state.transitions.commit({ expectedRevision: null,
+        context: context(rootBinding.runId, rootBinding.bindingId, snapshot), outboxEvents: [runStarted(rootBinding.runId)],
+        targetBinding: { binding: rootBinding, snapshot,
+          startClaim: await acquireStartClaim(store.state.targetStarts, rootBinding) },
       })).rejects.toMatchObject({ code: 'TARGET_BINDING_INVALID' });
       expect(await store.state.targetBindings.getBinding(rootBinding.runId)).toBeNull();
       expect(await store.state.checkpoints.load(rootBinding.runId)).toBeNull();
@@ -377,14 +409,25 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', (k
     const root = await mkdtemp(join(tmpdir(), 'agentops-target-restart-'));
     roots.push(root);
     const path = join(root, 'target.sqlite');
-    const snapshot = await targetSnapshot();
+    const beforeRestart = createSqlitePersistence({ path, clock });
+    const resolver = await createStaticTargetResolver({
+      catalog: multiProjectTargetCatalog,
+      connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles),
+      installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
+      installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+      identityRegistry: beforeRestart.targetIdentityRegistry,
+      knowledgePolicies: beforeRestart.targetKnowledgePolicies,
+      validationTime: now,
+    });
+    const snapshot = await resolver.resolve({ targetId: 'market-a-sim', capturedAt: now,
+      signal: new AbortController().signal });
     const rootBinding = binding({ bindingId: 'binding-restart', targetId: snapshot.targetId,
       runId: 'target-run-restart', rootRunId: 'target-run-restart', snapshotDigest: snapshot.digest,
       requestId: 'request-restart', requestDigest: `sha256:v1:${'7'.repeat(64)}` });
     const request = { requestId: 'request-restart', targetId: snapshot.targetId,
       requestDigest: `sha256:v1:${'7'.repeat(64)}`, runId: rootBinding.runId, createdAt: now };
 
-    const beforeRestart = createSqlitePersistence({ path, clock });
     try {
       await beforeRestart.targetBindings.reserveRequest(request);
       await beforeRestart.transitions.commit({ expectedRevision: null,
@@ -408,6 +451,63 @@ describe.each(['memory', 'sqlite'] as const)('%s Target binding persistence', (k
         leaseUntil: '2026-10-11T10:01:00.000Z' })).toEqual({ status: 'already_started' });
     } finally {
       afterRestart.close();
+    }
+  });
+});
+
+describe('SQLite Target registry version commit fence', () => {
+  it('rejects a resolved Target snapshot if the registry advances before the initial Run commit', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-target-registry-fence-'));
+    roots.push(root);
+    const store = createSqlitePersistence({ path: join(root, 'target.sqlite'), clock });
+    try {
+      const resolver = await createStaticTargetResolver({
+        catalog: multiProjectTargetCatalog,
+        connections: multiProjectConnectionRegistry,
+        profileResolver: new StaticProfileResolver(multiProjectProfiles),
+        installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
+        installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+        identityRegistry: store.targetIdentityRegistry,
+        knowledgePolicies: store.targetKnowledgePolicies,
+        validationTime: now,
+      });
+      const snapshot = await resolver.resolve({ targetId: 'market-a-sim', capturedAt: now,
+        signal: new AbortController().signal });
+      const before = await store.targetIdentityRegistry.readSnapshot();
+      expect(snapshot).toMatchObject({ identityRegistryVersion: before.version });
+
+      const currentBinding = binding({ bindingId: 'current-registry-binding', targetId: snapshot.targetId,
+        runId: 'current-registry-run', rootRunId: 'current-registry-run', snapshotDigest: snapshot.digest,
+        requestId: 'current-registry-request', requestDigest: `sha256:v1:${'8'.repeat(64)}` });
+      await store.targetBindings.reserveRequest({ requestId: currentBinding.requestId!, targetId: snapshot.targetId,
+        requestDigest: currentBinding.requestDigest!, runId: currentBinding.runId, createdAt: now });
+      await store.transitions.commit({ expectedRevision: null,
+        context: context(currentBinding.runId, currentBinding.bindingId, snapshot), outboxEvents: [runStarted(currentBinding.runId)],
+        targetBinding: { binding: currentBinding, snapshot,
+          startClaim: await acquireStartClaim(store.targetStarts, currentBinding) },
+      });
+      expect(await store.targetBindings.getBinding(currentBinding.runId)).toEqual(currentBinding);
+
+      await store.targetIdentityRegistry.publishCatalog({ expectedVersion: before.version,
+        presentTargetIds: [], candidates: [], publishedAt: now });
+      expect((await store.targetIdentityRegistry.readSnapshot()).version).toBeGreaterThan(before.version);
+
+      const rootBinding = binding({ bindingId: 'stale-registry-binding', targetId: snapshot.targetId,
+        runId: 'stale-registry-run', rootRunId: 'stale-registry-run', snapshotDigest: snapshot.digest,
+        requestId: 'stale-registry-request', requestDigest: `sha256:v1:${'9'.repeat(64)}` });
+      await store.targetBindings.reserveRequest({ requestId: rootBinding.requestId!, targetId: snapshot.targetId,
+        requestDigest: rootBinding.requestDigest!, runId: rootBinding.runId, createdAt: now });
+
+      await expect(store.transitions.commit({ expectedRevision: null,
+        context: context(rootBinding.runId, rootBinding.bindingId, snapshot), outboxEvents: [runStarted(rootBinding.runId)],
+        targetBinding: { binding: rootBinding, snapshot,
+          startClaim: await acquireStartClaim(store.targetStarts, rootBinding) },
+      })).rejects.toMatchObject({ code: 'TARGET_BINDING_INVALID' });
+      expect(await store.targetBindings.getBinding(rootBinding.runId)).toBeNull();
+      expect(await store.checkpoints.load(rootBinding.runId)).toBeNull();
+      expect(await store.outbox.listPending({ runId: rootBinding.runId, limit: 10 })).toEqual([]);
+    } finally {
+      store.close();
     }
   });
 });

@@ -41,7 +41,10 @@ describe('Harness governed knowledge qualification', () => {
       f.setState({ ...f.getState(), status: 'revoked', governanceVersion: 4 });
       return { text: '健康结论已生成', toolCalls: [] };
     } };
-    const durable = new InMemoryDurableState({ now: () => new Date(knowledgeNow) }, { getPublicationVersion: () => 1 });
+    const registryVersion = f.snapshot.identityRegistryVersion;
+    if (registryVersion === undefined) throw new Error('Resolved snapshot is missing its identity registry version.');
+    const durable = new InMemoryDurableState({ now: () => new Date(knowledgeNow) },
+      { getPublicationVersion: () => 1 }, () => registryVersion);
     const binding = { bindingId: 'knowledge-binding', targetId: f.snapshot.targetId, runId: 'knowledge-run', rootRunId: 'knowledge-run',
       snapshotDigest: f.snapshot.digest, createdAt: knowledgeNow, requestId: 'knowledge-request', requestDigest: `sha256:v1:${'a'.repeat(64)}` };
     await durable.targetBindings.reserveRequest({ requestId: binding.requestId, targetId: binding.targetId,

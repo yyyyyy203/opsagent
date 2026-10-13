@@ -111,6 +111,7 @@ function decodeCheckpoint(row: CheckpointRow): StoredRunCheckpoint {
       case 1: context = parseAgentContext(decoded, 1); break;
       case 2: context = parseAgentContext(decoded, 2); break;
       case 3: context = parseAgentContext(decoded, 3); break;
+      case 4: context = parseAgentContext(decoded, 4); break;
       default: throw new Error('unsupported checkpoint schema');
     }
     if (context.runId !== row.run_id || context.contextVersion !== row.context_version

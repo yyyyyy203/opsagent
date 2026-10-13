@@ -211,7 +211,7 @@ describe('metrics_subagent runtime composition', () => {
     const result = await drain(tool, request);
     const block = result.blocks[0];
     if (block?.type !== 'json') throw new Error('missing result');
-    expect(block.value).toMatchObject({ status: 'unavailable', evidenceIds: [] });
+    expect(block.value).toMatchObject({ status: 'unavailable', evidenceIds: [], missingEvidence: ['metrics'], missingEvidenceCodes: ['metrics'] });
     expect(result.isError).toBe(true);
   });
 });

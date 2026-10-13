@@ -3,6 +3,7 @@ import type { EvidenceStore, Tool, ToolResponse } from '../contracts/index.js';
 import { DefaultEvidenceRecorder, type EvidenceRecorder } from '../application/evidence-recorder.js';
 import { attachSourceEvidenceObservation } from '../application/source-evidence-observation.js';
 import type { McpConnection } from '../mcp/types.js';
+import { TargetConfigurationError } from '../contracts/target.js';
 import { bindReadonlyMcpTools } from '../mcp/readonly-tools.js';
 import { type ResilientExecutor, SourceFailure } from '../mcp/resilience.js';
 import { settlementInput, settlementInputSchema, settlementRemoteName, settlementWireResult } from '../mcp/settlement-protocol.js';
@@ -49,6 +50,7 @@ export async function bindSettlementEvidenceTool(options: {
   }], {
     signal: options.signal,
     executor: options.executor,
+    sourceId: 'prometheus',
     now,
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
     ...(options.networkAttemptBudget === undefined ? {} : { attemptBudget: options.networkAttemptBudget }),
@@ -72,7 +74,14 @@ export async function bindSettlementEvidenceTool(options: {
     const evidenceId = options.id?.() ?? stableMetricEvidenceId(callOptions.runId, callOptions.toolCallId);
     const capturedAt = new Date(now()).toISOString();
     const failureRate = summary.failureRate === null ? 'unavailable' : `${(summary.failureRate * 100).toFixed(2)}%`;
-    try { await recorder.capture({
+    const validateBeforeCommit = async (): Promise<void> => {
+      if (callOptions.targetOperations === undefined) return;
+      if (callOptions.targetOperationPermit === undefined) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+      await callOptions.targetOperations.validate(callOptions.targetOperationPermit, callOptions.signal);
+    };
+    try {
+      await validateBeforeCommit();
+      await recorder.capture({
       record: {
         evidenceId,
         runId: callOptions.runId,
@@ -88,8 +97,11 @@ export async function bindSettlementEvidenceTool(options: {
       toolCallId: callOptions.toolCallId,
       coverage: 1,
       publicSummary: `结算指标状态为 ${summary.status}，失败率为 ${failureRate}。`,
-    }); }
-    catch { throw new SourceFailure('STORAGE_ERROR'); }
+      }, { validateBeforeCommit });
+    } catch (error) {
+      if (error instanceof TargetConfigurationError && error.code === 'TARGET_OPERATION_DENIED') throw error;
+      throw new SourceFailure('STORAGE_ERROR');
+    }
     callOptions.signal.throwIfAborted();
     return attachSourceEvidenceObservation({
       blocks: [{ type: 'json', value: summary }, { type: 'evidence_ref', evidenceId }],

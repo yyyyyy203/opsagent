@@ -8,7 +8,7 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: { allowDefaultProject: ['apps/agent-server/*.mjs', 'apps/acceptance/*.mjs', 'apps/agent-web/vite.config.ts', 'playwright.config.ts', 'playwright.logs.config.ts', 'test/e2e/logs-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'] },
+        projectService: { allowDefaultProject: ['apps/agent-server/*.mjs', 'apps/acceptance/*.mjs', 'apps/agent-web/vite.config.ts', 'playwright.config.ts', 'playwright.logs.config.ts', 'playwright.circuit.config.ts', 'playwright.prometheus-circuit.config.ts', 'playwright.memory.config.ts', 'test/e2e/logs-fixture-server.mjs', 'test/e2e/memory-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'] },
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -21,11 +21,22 @@ export default tseslint.config(
   {
     // These are JavaScript entry points; check basic rules without treating
     // unannotated JavaScript as typed TypeScript that requires generated `dist`.
-    files: ['apps/metrics-lab/*.mjs', 'apps/logs-lab/*.mjs', 'apps/acceptance/*.mjs', 'test/e2e/logs-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'],
+    files: ['apps/metrics-lab/*.mjs', 'apps/logs-lab/*.mjs', 'apps/acceptance/*.mjs', 'test/e2e/logs-fixture-server.mjs', 'test/e2e/metrics-circuit-fixture-server.mjs', 'test/e2e/memory-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'],
     languageOptions: {
       ...tseslint.configs.disableTypeChecked.languageOptions,
-      globals: { process: 'readonly', fetch: 'readonly', Buffer: 'readonly', AbortSignal: 'readonly', Request: 'readonly', URL: 'readonly' },
+      globals: { process: 'readonly', fetch: 'readonly', Buffer: 'readonly', AbortSignal: 'readonly', Request: 'readonly', URL: 'readonly', setTimeout: 'readonly' },
     },
     rules: tseslint.configs.disableTypeChecked.rules,
+  },
+  {
+    // Test doubles frequently implement async ports with immediately resolved
+    // values, and Vitest assertions inspect mock functions as values. Keep the
+    // production rules strict without flagging those test-only patterns.
+    files: ['test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/require-await': 'off',
+      '@typescript-eslint/unbound-method': 'off',
+      'require-yield': 'off',
+    },
   },
 );

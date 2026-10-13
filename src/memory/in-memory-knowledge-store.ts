@@ -1,7 +1,7 @@
 import { randomIdGenerator, systemClock, type Clock, type IdGenerator } from '../contracts/common.js';
 import { KnowledgeContractError, type KnowledgeGovernanceReviewPort, type KnowledgeQueryPort,
   type KnowledgeReviewAuthorityPort, type KnowledgeReviewCommand, type KnowledgeRevision, type KnowledgeScope,
-  type TargetKnowledgeBindingPublisher, type TargetKnowledgePublication,
+  type KnowledgeStatus, type TargetKnowledgeBindingPublisher, type TargetKnowledgePublication,
   type TargetKnowledgePublishCommand } from '../contracts/knowledge-memory.js';
 import { parseKnowledgeGovernanceAuditV1, type KnowledgeGovernanceAuditOutboxPort,
   type KnowledgeGovernanceAuditQueryPort, type KnowledgeGovernanceAuditV1 } from '../contracts/knowledge-governance-audit.js';
@@ -11,6 +11,7 @@ import { checkpointChecksum, canonicalJson } from '../contracts/stable-json.js';
 import type { GovernedKnowledgePublicationPort, GovernedKnowledgePublicationCommand, KnowledgePublicationFencePort, KnowledgeCommandReplayIntent, KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeDraftWriteCommand, KnowledgePublicationActorPort,
   KnowledgePublicationInspectionPort, KnowledgePublicationSnapshot, KnowledgeRevisionStateQueryPort,
   KnowledgeRevisionStateSnapshot, KnowledgeScopedSearchRequest, KnowledgeScopedSearchStore,
+  KnowledgeScopedListPort, KnowledgeScopedListRequest,
   KnowledgeSourceGovernanceStore, KnowledgeSourceRegistration, KnowledgeSourceState, KnowledgeSourceTransition,
   KnowledgeSourceTransitionCommand, KnowledgeGovernanceAuditAttemptPort, KnowledgeSubmissionCommand,
   KnowledgeGovernanceTransitionCommand, KnowledgeGovernanceTransitionStore } from '../contracts/knowledge-memory-storage.js';
@@ -72,7 +73,7 @@ interface StoredPublication {
 
 /** Test-only reference store. Production bootstraps must use the SQLite implementation. */
 export class InMemoryGovernedKnowledgeStore implements GovernedKnowledgePublicationPort, KnowledgeProceduralReplayCapability, KnowledgeDraftStore, KnowledgeSourceGovernanceStore,
-  KnowledgeScopedSearchStore, KnowledgeQueryPort, KnowledgeGovernanceReviewPort,
+  KnowledgeScopedSearchStore, KnowledgeScopedListPort, KnowledgeQueryPort, KnowledgeGovernanceReviewPort,
   KnowledgeGovernanceTransitionStore,
   TargetKnowledgeBindingPublisher, KnowledgeGovernanceAuditOutboxPort, KnowledgeGovernanceAuditQueryPort,
   KnowledgeRevisionStateQueryPort, KnowledgePublicationInspectionPort, KnowledgeGovernanceAuditAttemptPort {
@@ -397,6 +398,24 @@ export class InMemoryGovernedKnowledgeStore implements GovernedKnowledgePublicat
         candidates.push(revision);
       }
       return rankKnowledgeSearch(candidates, tokens, corpus).slice(0, input.limit).map((revision) => structuredClone(revision));
+    });
+  }
+
+  public listScopedRevisions(input: KnowledgeScopedListRequest): Promise<readonly KnowledgeRevision[]> {
+    return Promise.resolve().then(() => {
+      validateScopedList(input);
+      const scope = parseKnowledgeScope(input.scope);
+      const after = input.after;
+      return [...this.revisions.values()]
+        .filter(stored => stored.immutable.kind === input.kind
+          && canonicalJson(stored.immutable.scope) === canonicalJson(scope)
+          && (input.status === undefined || stored.status === input.status)
+          && (after === undefined || compareKnowledgeKey(stored.immutable.id, stored.immutable.contentRevision,
+            after.id, after.contentRevision) > 0))
+        .sort((left, right) => compareKnowledgeKey(left.immutable.id, left.immutable.contentRevision,
+          right.immutable.id, right.immutable.contentRevision))
+        .slice(0, input.limit)
+        .map(stored => this.materialize(stored));
     });
   }
 
@@ -728,6 +747,27 @@ function validateSearchInput(input: KnowledgeScopedSearchRequest): void {
   if (typeof input.query !== 'string' || Buffer.byteLength(input.query, 'utf8') > 512
     || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50) throw error('KNOWLEDGE_RECORD_INVALID');
   validateTime(input.now);
+}
+
+function validateScopedList(input: KnowledgeScopedListRequest): void {
+  if ((input.kind !== 'semantic' && input.kind !== 'procedural')
+    || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50
+    || (input.status !== undefined && !isKnowledgeStatus(input.status))
+    || (input.after !== undefined && (typeof input.after.id !== 'string'
+      || input.after.id.trim().length === 0 || input.after.id.length > 256
+      || !Number.isSafeInteger(input.after.contentRevision) || input.after.contentRevision < 1))) {
+    throw error('KNOWLEDGE_RECORD_INVALID');
+  }
+}
+
+function isKnowledgeStatus(value: KnowledgeStatus): boolean {
+  return value === 'draft' || value === 'review_pending' || value === 'approved' || value === 'rejected'
+    || value === 'revoked' || value === 'expired' || value === 'conflict' || value === 'superseded';
+}
+
+function compareKnowledgeKey(leftId: string, leftRevision: number, rightId: string, rightRevision: number): number {
+  const idOrder = Buffer.compare(Buffer.from(leftId, 'utf8'), Buffer.from(rightId, 'utf8'));
+  return idOrder === 0 ? leftRevision - rightRevision : idOrder;
 }
 
 function sourceReason(transition: KnowledgeSourceTransition): 'SOURCE_WITHDRAWN' | 'SOURCE_DIGEST_MISMATCH' | 'SOURCE_PERMISSION_REVOKED' | 'SOURCE_REVALIDATED' {

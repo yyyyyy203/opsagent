@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentMessage, ChatModel, ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../src/contracts/index.js';
+import { TargetConfigurationError } from '../src/contracts/index.js';
+import type { AgentMessage, ChatModel, ModelCallOptions, ModelResponse, ModelStreamEvent, TargetOperationGuard, TargetOperationPermit, Tool } from '../src/contracts/index.js';
 import { ModelFailure } from '../src/model/model-failure.js';
 import { RetryingChatModel } from '../src/model/retrying-model.js';
 import type { ModelAttemptEvent } from '../src/model/model-attempt-observer.js';
@@ -128,5 +129,47 @@ describe('RetryingChatModel', () => {
     await expect(stream.next()).rejects.toMatchObject({ details: { category: 'rate_limit' } });
     expect(calls).toBe(1);
     expect(delays).toEqual([]);
+  });
+
+  it('cancels a retry delay when the attempt-scoped Target permit is revoked', async () => {
+    const permitController = new AbortController();
+    const callerController = new AbortController();
+    const permit: TargetOperationPermit = {
+      bindingId: 'binding-1', runId: 'run-1', rootRunId: 'run-1', snapshotDigest: 'snapshot-1',
+      operation: 'model', capability: 'model', policyEpoch: 1, signal: permitController.signal,
+    };
+    const targetOperations: TargetOperationGuard = { authorize: async () => permit, validate: async () => {} };
+    let calls = 0;
+    let resolveSleepStarted: () => void = () => {};
+    const sleepStarted = new Promise<void>(resolve => { resolveSleepStarted = resolve; });
+    const primary: ChatModel = { async *stream() {
+      await Promise.resolve();
+      for (const item of [] as ModelStreamEvent[]) yield item;
+      calls += 1;
+      throw new ModelFailure('server', 'temporary', true);
+    } };
+    const retrying = new RetryingChatModel(primary, {
+      maxAttempts: 2,
+      retryDelayMs: 100,
+      sleep: (_delay, signal) => new Promise<void>((_resolve, reject) => {
+        const abort = () => reject(signal.reason instanceof Error ? signal.reason : new Error('retry cancelled'));
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
+        resolveSleepStarted();
+      }),
+    });
+    const execution = retrying.stream([], [], {
+      runId: 'run-1', stepId: 'step-1', signal: callerController.signal, targetOperations,
+    }).next();
+    await sleepStarted;
+    permitController.abort(new TargetConfigurationError('TARGET_OPERATION_DENIED'));
+    const outcome = await Promise.race([
+      execution.then(() => 'settled', () => 'rejected'),
+      new Promise<'pending'>(resolve => setTimeout(() => resolve('pending'), 50)),
+    ]);
+    if (outcome === 'pending') callerController.abort(new TargetConfigurationError('TARGET_OPERATION_DENIED'));
+    await expect(execution).rejects.toMatchObject({ code: 'TARGET_OPERATION_DENIED' });
+    expect(outcome).toBe('rejected');
+    expect(calls).toBe(1);
   });
 });

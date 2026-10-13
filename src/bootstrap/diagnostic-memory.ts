@@ -11,11 +11,60 @@ import { MemoryError } from '../memory/memory-error.js';
 import { sameMemoryScope } from '../memory/memory-scope.js';
 import { HostMemoryPolicy, parseDiagnosticMemoryConfig } from './memory-policy.js';
 import { MemoryQueryService } from '../application/memory-query-service.js';
+import { KnowledgeManagementService, type KnowledgeManagementTargetContextPort } from '../application/knowledge-management-service.js';
 import { TargetKnowledgePublicationService, type TargetKnowledgePublicationServiceOptions } from '../application/target-knowledge-publication-service.js';
+import { SemanticKnowledgeService, type SemanticReviewAttestationPort } from '../memory/semantic-knowledge-service.js';
+import { ProceduralTemplateService, type ProceduralReviewAttestationPort, type ProceduralReadonlyCapabilityRegistryPort,
+  type ProceduralSourceRegistryPort, type ProceduralTargetContextPort } from '../memory/procedural-template-service.js';
+import type { SemanticSourceRegistry } from '../memory/semantic-source-registry.js';
+import type { Clock, IdGenerator } from '../contracts/common.js';
+import type { TargetKnowledgeCapabilityPort, TargetKnowledgePolicyStore } from '../contracts/target.js';
+import type { TargetKnowledgePublicationContextPort, TargetKnowledgePublicationStorage,
+  TargetKnowledgeRevisionStorage } from '../contracts/knowledge-memory-storage.js';
 
-/** Host assembly seam. Formal API/replay runtime wiring remains a T6 task. */
+export interface TargetKnowledgeManagementHostOptions {
+  readonly targets: KnowledgeManagementTargetContextPort & ProceduralTargetContextPort;
+  readonly semanticSources: SemanticSourceRegistry;
+  readonly proceduralSources: ProceduralSourceRegistryPort;
+  readonly proceduralCapabilities: ProceduralReadonlyCapabilityRegistryPort;
+  readonly semanticReviewAttestations: SemanticReviewAttestationPort;
+  readonly proceduralReviewAttestations: ProceduralReviewAttestationPort;
+  readonly publicationContexts: TargetKnowledgePublicationContextPort;
+}
+
+export interface TargetKnowledgeManagementAssemblyOptions extends TargetKnowledgeManagementHostOptions {
+  readonly revisions: TargetKnowledgeRevisionStorage;
+  readonly publications: TargetKnowledgePublicationStorage;
+  readonly policies: TargetKnowledgePolicyStore;
+  readonly capabilities: TargetKnowledgeCapabilityPort;
+  readonly clock?: Clock;
+  readonly ids?: IdGenerator;
+}
+
+/** Compatibility helper for hosts that only need explicit governed publication. */
 export function createTargetKnowledgePublicationService(options: TargetKnowledgePublicationServiceOptions) {
   return new TargetKnowledgePublicationService(options);
+}
+
+/** Formal Target host composition. The durable replay receipt is mandatory for Procedural governance commands. */
+export function createTargetKnowledgeManagementService(options: TargetKnowledgeManagementAssemblyOptions) {
+  const semantic = new SemanticKnowledgeService({ sourceRegistry: options.semanticSources,
+    targets: options.targets, drafts: options.revisions, sources: options.revisions, queries: options.revisions,
+    reviews: options.revisions, reviewAttestations: options.semanticReviewAttestations,
+    ...(options.clock === undefined ? {} : { clock: options.clock }), ...(options.ids === undefined ? {} : { ids: options.ids }) });
+  const procedural = new ProceduralTemplateService({ sourceRegistry: options.proceduralSources,
+    capabilityRegistry: options.proceduralCapabilities, targets: options.targets, drafts: options.revisions,
+    sources: options.revisions, queries: options.revisions, reviews: options.revisions,
+    // Do not remove: this is the formal target-host receipt-first replay boundary.
+    replay: options.revisions, transitions: options.revisions, reviewAttestations: options.proceduralReviewAttestations,
+    ...(options.clock === undefined ? {} : { clock: options.clock }), ...(options.ids === undefined ? {} : { ids: options.ids }) });
+  const publicationService = new TargetKnowledgePublicationService({ contexts: options.publicationContexts,
+    queries: options.revisions, publications: options.publications,
+    ...(options.clock === undefined ? {} : { clock: options.clock }) });
+  return new KnowledgeManagementService({ targets: options.targets, revisions: options.revisions,
+    publications: options.publications, policies: options.policies, capabilities: options.capabilities,
+    semantic, procedural, publicationService, ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.ids === undefined ? {} : { ids: options.ids }) });
 }
 
 /** One-time deployment opt-in. File size and trust shape are checked before assembly. */

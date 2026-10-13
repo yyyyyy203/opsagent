@@ -9,6 +9,7 @@ export interface TargetBindingStateReader {
   snapshotByBindingId(bindingId: string): VersionedResolvedTargetSnapshot | null;
   requestById(requestId: string): TargetRunRequestRecord | null;
   publicationVersionByTarget?(targetId: string): number;
+  identityRegistryVersion?(): number;
 }
 
 export interface ValidatedTargetBindingTransition {
@@ -69,6 +70,14 @@ export function validateTargetBindingState(
     if (existing === null && snapshot.schemaVersion === 2 && snapshot.publicationVersion !== undefined
       && snapshot.publicationVersion !== (reader.publicationVersionByTarget?.(snapshot.targetId) ?? 0)) {
       throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
+    if (existing === null && snapshot.schemaVersion === 2) {
+      const currentRegistryVersion = reader.identityRegistryVersion?.();
+      if (snapshot.identityRegistryVersion === undefined || currentRegistryVersion === undefined
+        || !Number.isSafeInteger(currentRegistryVersion)
+        || snapshot.identityRegistryVersion !== currentRegistryVersion) {
+        throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+      }
     }
     if (suppliedSnapshot === null || binding.requestId === undefined || binding.requestDigest === undefined) {
       throw new TargetConfigurationError('TARGET_BINDING_INVALID');

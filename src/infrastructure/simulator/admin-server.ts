@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { SettlementSimulator } from './settlement-simulator.js';
 
 const selection = z.object({ scenario: z.enum(['normal', 'settlement_failure', 'low_sample']) }).strict();
+const sourceFault = z.object({ failures: z.number().int().min(0).max(100) }).strict();
 const scenarios = ['normal', 'settlement_failure', 'low_sample'] as const;
 
 /** Loopback administration API for the future Simulator Web; never register it as an Agent Tool. */
@@ -20,22 +21,23 @@ export async function startSimulatorAdminServer(simulator: SettlementSimulator, 
         if (req.method !== 'GET') return { status: 405, headers: { Allow: 'GET' } };
         return json(200, { active: simulator.currentScenario(), scenarios });
       }
+      if (req.url === '/source-fault') {
+        if (req.method === 'GET') return json(200, { remainingFailures: simulator.remainingSourceFailures() });
+        if (req.method !== 'PUT') return { status: 405, headers: { Allow: 'GET, PUT' } };
+        if (req.headers['content-type']?.split(';', 1)[0]?.trim() !== 'application/json') return { status: 415 };
+        const parsedBody = await readJson(req);
+        if (parsedBody.status !== 'ok') return { status: parsedBody.status };
+        const input = sourceFault.safeParse(parsedBody.value);
+        if (!input.success) return { status: 400 };
+        simulator.failNextSourceQueries(input.data.failures);
+        return json(200, { remainingFailures: simulator.remainingSourceFailures() });
+      }
       if (req.url !== '/scenario') return { status: 404 };
       if (req.method !== 'PUT') return { status: 405, headers: { Allow: 'PUT' } };
       if (req.headers['content-type']?.split(';', 1)[0]?.trim() !== 'application/json') return { status: 415 };
-      const length = Number(req.headers['content-length']);
-      if (!Number.isSafeInteger(length) || length < 1 || length > 1024) return { status: 413 };
-      const chunks: Buffer[] = [];
-      let bytes = 0;
-      for await (const chunk of req) {
-        if (!Buffer.isBuffer(chunk)) return { status: 400 };
-        bytes += chunk.length;
-        if (bytes > 1024) return { status: 413 };
-        chunks.push(chunk);
-      }
-      let parsed: unknown;
-      try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return { status: 400 }; }
-      const input = selection.safeParse(parsed);
+      const parsedBody = await readJson(req);
+      if (parsedBody.status !== 'ok') return { status: parsedBody.status };
+      const input = selection.safeParse(parsedBody.value);
       if (!input.success) return { status: 400 };
       simulator.select(input.data.scenario);
       return json(200, { active: simulator.currentScenario() });
@@ -54,6 +56,21 @@ export async function startSimulatorAdminServer(simulator: SettlementSimulator, 
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   } };
+}
+
+async function readJson(request: IncomingMessage): Promise<{ status: 'ok'; value: unknown } | { status: number }> {
+  const length = Number(request.headers['content-length']);
+  if (!Number.isSafeInteger(length) || length < 1 || length > 1024) return { status: 413 };
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    if (!Buffer.isBuffer(chunk)) return { status: 400 };
+    bytes += chunk.length;
+    if (bytes > 1024) return { status: 413 };
+    chunks.push(chunk);
+  }
+  try { return { status: 'ok', value: JSON.parse(Buffer.concat(chunks).toString('utf8')) }; }
+  catch { return { status: 400 }; }
 }
 
 function json(status: number, value: unknown) {

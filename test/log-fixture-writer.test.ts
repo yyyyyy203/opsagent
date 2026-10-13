@@ -4,7 +4,6 @@ import { writeLogFixture } from '../src/infrastructure/elk/log-fixture-writer.js
 
 const index = 'agentops-lab-logs-fixture-1';
 const signal = new AbortController().signal;
-// eslint-disable-next-line @typescript-eslint/require-await
 async function* records(count: number, message = 'ok'): AsyncIterable<NormalizedLogRecord> {
   for (let i = 0; i < count; i++) yield { timestamp: '2026-10-03T00:04:59Z', service: 'checkout', message: `${message}${i}` };
 }

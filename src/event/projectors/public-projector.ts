@@ -178,6 +178,12 @@ export class PublicEventProjectorV2 {
         return sanitizeRecord({ toolName: event.payload.toolName, source: event.payload.source, attempt: event.payload.attempt, ...(event.payload.deadline === undefined ? {} : { deadline: event.payload.deadline }) });
       case 'TOOL_PROGRESS':
         return sanitizeRecord({ progress: event.payload.progress, displaySummary: safeText(event.payload.displaySummary) });
+      case 'DATASOURCE_RETRY_SCHEDULED':
+        return sanitizeRecord({ sourceId: safeText(event.payload.sourceId), attempt: event.payload.attempt, reasonCode: event.payload.reasonCode, delayMs: event.payload.delayMs });
+      case 'DATASOURCE_CIRCUIT_OPENED':
+        return sanitizeRecord({ sourceId: safeText(event.payload.sourceId), failureWindow: event.payload.failureWindow, openUntil: event.payload.openUntil });
+      case 'DATASOURCE_CIRCUIT_CLOSED':
+        return sanitizeRecord({ sourceId: safeText(event.payload.sourceId), recoveryEvidence: event.payload.recoveryEvidence });
       case 'EVIDENCE_COLLECTED':
         return sanitizeRecord({ evidenceIds: event.payload.evidenceIds, coverage: event.payload.coverage, source: event.payload.source, summary: safeText(event.payload.summary) });
       case 'EVIDENCE_COLLECTION_STARTED':

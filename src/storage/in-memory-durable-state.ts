@@ -72,7 +72,8 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
   public readonly memory: InMemoryDiagnosticMemoryStore;
 
   public constructor(private readonly clock: Clock = systemClock,
-    private readonly publicationVersions?: KnowledgePublicationVersionPort) {
+    private readonly publicationVersions?: KnowledgePublicationVersionPort,
+    private readonly identityRegistryVersion?: () => number) {
     this.diagnosticState = { checkpointRecords: this.checkpointRecords, executionRecords: this.executionRecords,
       outboxRecords: this.outboxRecords, memory: createInMemoryDiagnosticRecords() };
     this.memory = new InMemoryDiagnosticMemoryStore({ clock, transaction: this.diagnosticState });
@@ -398,6 +399,7 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
       snapshotByBindingId: bindingId => snapshots.get(bindingId) ?? null,
       requestById: requestId => this.targetRequestRecords.get(requestId) ?? null,
       publicationVersionByTarget: targetId => this.publicationVersions?.getPublicationVersion(targetId) ?? 0,
+      ...(this.identityRegistryVersion === undefined ? {} : { identityRegistryVersion: this.identityRegistryVersion }),
     });
     if (transition === undefined || validated.binding === undefined) return;
     this.consumeStartClaim(context, transition, outboxEvents, startClaims);

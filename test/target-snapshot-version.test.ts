@@ -48,6 +48,7 @@ describe('versioned Target snapshots', () => {
         requirements: [],
       },
       publicationVersion: 0,
+      identityRegistryVersion: 1,
     });
 
     expect(snapshot.scenarioImplementationDigest).toMatch(/^sha256:v1:[a-f0-9]{64}$/u);

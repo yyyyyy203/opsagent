@@ -168,6 +168,8 @@ export interface ResolvedTargetSnapshotV2 {
   knowledgePolicy: TargetKnowledgePolicy;
   /** Host-published Target knowledge binding version; absent only in pre-T3 V2 snapshots. */
   publicationVersion?: number;
+  /** Target identity registry version used to resolve this snapshot; absent on historical V2 snapshots. */
+  identityRegistryVersion?: number;
   memoryScope: MemoryScope;
   capturedAt: string;
   digest: string;
@@ -291,6 +293,15 @@ export interface TargetCatalogDto {
   readOnly: true;
   enabled: boolean;
   canStart: boolean;
+}
+
+/** Per-Target, read-only readiness result. A catalog entry alone does not authorize a Run. */
+export interface TargetReadinessDto {
+  targetId: string;
+  status: 'ready' | 'blocked' | 'disabled' | 'unavailable';
+  canStart: boolean;
+  reasonCode?: 'TARGET_DISABLED' | 'TARGET_RUN_UNAVAILABLE' | 'KNOWLEDGE_REQUIRED_DISABLED'
+    | 'TARGET_CONFIGURATION_UNAVAILABLE';
 }
 
 export interface TargetCatalogRejection {

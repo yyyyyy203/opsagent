@@ -34,6 +34,7 @@ export interface MemoryVectorSearch {
   limit: number;
 }
 export interface VectorIndex {
+  /** Validates and commits the bounded input as one atomic batch; a failure must not leave a partial write. */
   upsert(entries: readonly MemoryVectorEntry[], operation: MemoryOperation): Promise<void>;
   search(input: MemoryVectorSearch, operation: MemoryOperation): Promise<readonly MemoryVectorHit[]>;
   remove(input: { scope: MemoryScope; space: EmbeddingSpace; memoryIds: readonly string[] }, operation: MemoryOperation): Promise<void>;

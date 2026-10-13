@@ -15,12 +15,15 @@ import {
   type LogEvidenceReader,
   type NormalizedLogRecord,
   type StreamingEvidenceRecorder,
+  type SourceResilienceEvent,
   type Tool,
   type ToolCallOptions,
+  type ToolResponseChunk,
   type ToolResponse,
 } from '../contracts/index.js';
 import { SourceFailure } from '../mcp/resilience.js';
 import type { ElkEvidenceQuery } from '../infrastructure/elk/paged-evidence-source.js';
+import { TargetConfigurationError } from '../contracts/target.js';
 
 const DEFAULT_MAX_MODEL_BYTES = 16 * 1024;
 const MAX_RECORD_FIELD_CHARS = 1_024;
@@ -46,6 +49,7 @@ export interface LogEvidencePageSource {
     deadline?: number;
     networkAttemptBudget?: { remaining: number };
     requestId?: string;
+    onResilienceEvent?: (event: SourceResilienceEvent) => void;
   }): AsyncIterable<EvidenceSourcePage>;
 }
 
@@ -108,7 +112,7 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
         return { valid: false, error: newAgentInputError() };
       }
     },
-    call: async (input, callOptions) => {
+    call: async function* (input, callOptions) {
       const query = toCaptureQuery(input);
       requireToolCallId(callOptions);
       throwIfAborted(callOptions.signal);
@@ -120,7 +124,21 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
       if (startedAt >= deadline) throw new SourceFailure('BUDGET_EXCEEDED');
       let result: EvidenceCaptureResult;
       try {
-        result = await options.recorder.capture({
+        const resilienceEvents: SourceResilienceEvent[] = [];
+        let wake: () => void = () => undefined;
+        let captureComplete = false;
+        let captured: EvidenceCaptureResult | undefined;
+        let captureFailure: Error | undefined;
+        const validateBeforeCommit = async (): Promise<void> => {
+          if (callOptions.targetBindingId === undefined
+            && callOptions.targetOperations === undefined
+            && callOptions.targetOperationPermit === undefined) return;
+          if (callOptions.targetOperations === undefined || callOptions.targetOperationPermit === undefined) {
+            throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+          }
+          await callOptions.targetOperations.validate(callOptions.targetOperationPermit, callOptions.signal);
+        };
+        const capture = options.recorder.capture({
           evidenceId,
           runId: callOptions.runId,
           stepId: callOptions.stepId,
@@ -134,9 +152,21 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
             deadline,
             requestId: captureKey,
             ...(callOptions.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: callOptions.networkAttemptBudget }),
+            onResilienceEvent: (event) => { resilienceEvents.push(event); wake(); },
           }),
           budget: options.budget,
-        }, { signal: callOptions.signal });
+        }, { signal: callOptions.signal, validateBeforeCommit }).then((value) => { captured = value; }).catch((error: unknown) => {
+          captureFailure = error instanceof Error ? error : new Error('EVIDENCE_CAPTURE_FAILED');
+        }).finally(() => { captureComplete = true; wake(); });
+        while (!captureComplete || resilienceEvents.length > 0) {
+          const event = resilienceEvents.shift();
+          if (event !== undefined) yield sourceResilienceChunk(event);
+          else await new Promise<void>((resolve) => { wake = resolve; });
+        }
+        await capture;
+        if (captureFailure !== undefined) throw captureFailure;
+        if (captured === undefined) throw new SourceFailure('MCP_PROTOCOL_ERROR');
+        result = captured;
       } catch (error) {
         throw normalizeCaptureError(error);
       }
@@ -230,6 +260,23 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
   });
 
   return Object.freeze([capture, search, aggregate, slice]);
+}
+
+function sourceResilienceChunk(event: SourceResilienceEvent): ToolResponseChunk {
+  switch (event.type) {
+    case 'retry_scheduled': return { type: 'event', name: 'source_resilience', payload: {
+      kind: event.type, sourceId: event.sourceId, attempt: event.attempt, reasonCode: event.reasonCode, delayMs: event.delayMs,
+    } };
+    case 'circuit_opened': return { type: 'event', name: 'source_resilience', payload: {
+      kind: event.type, sourceId: event.sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil,
+    } };
+    case 'circuit_half_opened': return { type: 'event', name: 'source_resilience', payload: {
+      kind: event.type, sourceId: event.sourceId, probePolicy: event.probePolicy,
+    } };
+    case 'circuit_closed': return { type: 'event', name: 'source_resilience', payload: {
+      kind: event.type, sourceId: event.sourceId, recoveryEvidence: event.recoveryEvidence,
+    } };
+  }
 }
 
 function createReadTool(input: {

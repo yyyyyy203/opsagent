@@ -14,6 +14,12 @@ import type {
   MemoryPreferences,
   MemoryStatus,
   RunMemoryState,
+  PublicKnowledgeRevision,
+  PublicTargetKnowledgeStatus,
+  TargetCatalogDto,
+  TargetKnowledgeDraftInput,
+  TargetKnowledgePublicationResult,
+  TargetReadinessDto,
 } from './types.js';
 
 export interface EventSourceLike {
@@ -66,6 +72,76 @@ export class ApiClient {
 
   public async listProfiles(): Promise<readonly PublicProfile[]> {
     return this.request<readonly PublicProfile[]>('/profiles');
+  }
+
+  public async listTargets(): Promise<readonly TargetCatalogDto[]> {
+    return this.request<readonly TargetCatalogDto[]>('/targets');
+  }
+
+  public async getTargetReadiness(targetId: string): Promise<TargetReadinessDto> {
+    return this.request<TargetReadinessDto>(`${this.targetPath(targetId)}/readiness`);
+  }
+
+  public async getTargetKnowledgeStatus(targetId: string): Promise<PublicTargetKnowledgeStatus> {
+    return this.request<PublicTargetKnowledgeStatus>(`${this.targetKnowledgePath(targetId)}/status`);
+  }
+
+  public async listTargetKnowledge(targetId: string, kind: 'semantic' | 'procedural', input: {
+    status?: string; afterId?: string; afterRevision?: number; limit?: number;
+  } = {}): Promise<{ items: readonly PublicKnowledgeRevision[] }> {
+    const query = new URLSearchParams({ kind });
+    if (input.status !== undefined) query.set('status', input.status);
+    if (input.afterId !== undefined) query.set('afterId', input.afterId);
+    if (input.afterRevision !== undefined) query.set('afterRevision', String(input.afterRevision));
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    return this.request(`${this.targetKnowledgePath(targetId)}?${query.toString()}`);
+  }
+
+  public async createTargetKnowledgeDraft(targetId: string, kind: 'semantic' | 'procedural', input: TargetKnowledgeDraftInput): Promise<PublicKnowledgeRevision> {
+    const body = knowledgeDraftBody(input);
+    return this.request(`${this.targetKnowledgePath(targetId)}/${kind}/drafts`, { method: 'POST', body });
+  }
+
+  public async reviseTargetKnowledge(targetId: string, kind: 'semantic' | 'procedural', knowledgeId: string, input: TargetKnowledgeDraftInput & {
+    expectedContentRevision: number; expectedGovernanceVersion: number;
+  }): Promise<PublicKnowledgeRevision> {
+    const body = { ...knowledgeDraftBody(input), expectedContentRevision: input.expectedContentRevision,
+      expectedGovernanceVersion: input.expectedGovernanceVersion };
+    return this.request(`${this.targetKnowledgePath(targetId)}/${kind}/${encodeURIComponent(knowledgeId)}/revisions`, { method: 'POST', body });
+  }
+
+  public async submitTargetKnowledgeForReview(targetId: string, kind: 'semantic' | 'procedural', knowledgeId: string, input: {
+    requestId: string; contentRevision: number; governanceVersion: number;
+  }): Promise<PublicKnowledgeRevision> {
+    return this.request(`${this.targetKnowledgePath(targetId)}/${kind}/${encodeURIComponent(knowledgeId)}/submit`, { method: 'POST',
+      body: { requestId: input.requestId, contentRevision: input.contentRevision, governanceVersion: input.governanceVersion } });
+  }
+
+  public async reviewTargetKnowledge(targetId: string, kind: 'semantic' | 'procedural', knowledgeId: string, input: {
+    requestId: string; contentRevision: number; governanceVersion: number; decision: 'approve' | 'reject'; reasonCode?: string;
+  }): Promise<PublicKnowledgeRevision> {
+    return this.request(`${this.targetKnowledgePath(targetId)}/${kind}/${encodeURIComponent(knowledgeId)}/review`, { method: 'POST',
+      body: { requestId: input.requestId, contentRevision: input.contentRevision, governanceVersion: input.governanceVersion,
+        decision: input.decision, ...(input.reasonCode === undefined ? {} : { reasonCode: input.reasonCode }) } });
+  }
+
+  public async revokeTargetKnowledge(targetId: string, kind: 'semantic' | 'procedural', knowledgeId: string, input: {
+    requestId: string; contentRevision: number; expectedGovernanceVersion: number;
+  }): Promise<PublicKnowledgeRevision> {
+    return this.request(`${this.targetKnowledgePath(targetId)}/${kind}/${encodeURIComponent(knowledgeId)}/revoke`, { method: 'POST',
+      body: { requestId: input.requestId, contentRevision: input.contentRevision,
+        expectedGovernanceVersion: input.expectedGovernanceVersion } });
+  }
+
+  public async publishTargetKnowledge(targetId: string, input: {
+    requestId: string; expectedPublicationVersion: number;
+    references: readonly { id: string; version: string; digest: string; approval: 'approved' }[];
+  }): Promise<TargetKnowledgePublicationResult> {
+    return this.request(`${this.targetKnowledgePath(targetId)}/publication`, { method: 'POST', body: {
+      requestId: input.requestId, expectedPublicationVersion: input.expectedPublicationVersion,
+      references: input.references.map(reference => ({ id: reference.id, version: reference.version,
+        digest: reference.digest, approval: reference.approval })),
+    } });
   }
 
   public async listRuns(options: { profileId?: string; status?: string; cursor?: string; limit?: number } = {}): Promise<PublicRunPage> {
@@ -178,6 +254,10 @@ export class ApiClient {
     return `/runs/${encodeURIComponent(runId)}`;
   }
 
+  private targetPath(targetId: string): string { return `/targets/${encodeURIComponent(targetId)}`; }
+
+  private targetKnowledgePath(targetId: string): string { return `${this.targetPath(targetId)}/knowledge`; }
+
   private async request<T>(path: string, options: { method?: 'GET' | 'POST'; body?: unknown } = {}): Promise<T> {
     const init: RequestInit = { method: options.method ?? 'GET' };
     if (options.body !== undefined) {
@@ -201,6 +281,12 @@ export class ApiClient {
   }
 }
 
+function knowledgeDraftBody(input: TargetKnowledgeDraftInput): Record<string, unknown> {
+  return { requestId: input.requestId,
+    source: { sourceId: input.source.sourceId, sourceVersion: input.source.sourceVersion, digest: input.source.digest },
+    ...(input.validUntil === undefined ? {} : { validUntil: input.validUntil }), content: input.content };
+}
+
 const SSE_EVENT_NAMES = [
   'RUN_STARTED', 'RUN_RESUMED', 'RUN_PAUSED', 'RUN_FINISHED', 'RUN_FAILED', 'RUN_CANCELLED', 'RUN_TIMED_OUT',
   'RUN_BUDGET_WARNING', 'RUN_BUDGET_EXHAUSTED', 'STEP_STARTED', 'STEP_COMPLETED', 'STEP_FAILED', 'STAGE_CHANGED',
@@ -208,7 +294,8 @@ const SSE_EVENT_NAMES = [
   'MESSAGE_COMPLETED', 'MESSAGE_FAILED', 'TOOL_CALL_CREATED', 'TOOL_STARTED', 'TOOL_PROGRESS', 'TOOL_OUTPUT_DELTA',
   'TOOL_RESULT', 'TOOL_FAILED', 'TOOL_CANCELLED', 'CONFIRMATION_REQUESTED', 'CONFIRMATION_RESOLVED', 'CONFIRMATION_EXPIRED',
   'EVIDENCE_COLLECTED', 'EVIDENCE_COLLECTION_FAILED', 'HYPOTHESIS_UPDATED', 'DIAGNOSIS_COMPLETED', 'ACTION_PROPOSED',
-  'ACTION_EXECUTED', 'ACTION_VERIFICATION_COMPLETED', 'ACTION_VERIFICATION_FAILED', 'stream_error', 'message_snapshot',
+  'ACTION_EXECUTED', 'ACTION_VERIFICATION_COMPLETED', 'ACTION_VERIFICATION_FAILED', 'DATASOURCE_RETRY_SCHEDULED',
+  'DATASOURCE_CIRCUIT_OPENED', 'DATASOURCE_CIRCUIT_CLOSED', 'stream_error', 'message_snapshot',
 ] as const;
 
 function asRecord(value: unknown): Record<string, unknown> | null {

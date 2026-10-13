@@ -17,7 +17,8 @@ describe('buildMemoryCase', () => {
     const candidate = buildMemoryCase(captureRequest(context), loaded(context), memoryNow);
     expect(candidate).toMatchObject({ status: 'observation', quality: 'sufficient', revision: 1,
       diagnosisOnly: true, eligibleForPromotion: false, sourceRunId: context.runId,
-      summary: expect.stringContaining('连接池等待时间增加'), symptomCodes: ['SETTLEMENT_FAILURE_HIGH'] });
+      symptomCodes: ['SETTLEMENT_FAILURE_HIGH'] });
+    expect(candidate.summary).toContain('连接池等待时间增加');
     expect(Date.parse(candidate.validUntil) - Date.parse(candidate.capturedAt)).toBe(30 * 86_400_000);
   });
 

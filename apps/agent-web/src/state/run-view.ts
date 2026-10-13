@@ -40,6 +40,7 @@ export interface RunViewState {
   subtreeUsage: RunUsageSummary | null;
   confirmation: PublicConfirmation | null;
   toolActivity: PublicToolActivity | null;
+  datasourceActivity: readonly PublicDatasourceActivity[];
   status: 'idle' | 'loading' | 'ready' | 'error';
   connected: boolean;
   /** A confirmation decision changes durable state but intentionally does not invoke resume. */
@@ -55,12 +56,26 @@ export interface PublicToolActivity {
   status: PublicToolActivityStatus;
 }
 
+export type PublicDatasourceStatus = 'retrying' | 'open' | 'probe_waiting' | 'half_open' | 'recovered';
+
+export interface PublicDatasourceActivity {
+  eventId: number;
+  sourceId: string;
+  status: PublicDatasourceStatus;
+  attempt?: number;
+  reasonCode?: string;
+  delayMs?: number;
+  openUntil?: string;
+}
+
 export interface TimerPort {
   setTimeout(callback: () => void, delayMs: number): unknown;
   clearTimeout(handle: unknown): void;
   setInterval(callback: () => void, delayMs: number): unknown;
   clearInterval(handle: unknown): void;
 }
+
+const MAX_DATASOURCE_ACTIVITY = 12;
 
 export function mergeMessagePage(current: readonly PublicMessageItem[], page: PublicMessagePage, runId: string): PublicMessageItem[] {
   const byId = new Map<string, PublicMessageItem>();
@@ -76,7 +91,7 @@ export function mergeMessagePage(current: readonly PublicMessageItem[], page: Pu
 export class RunViewController {
   private state: RunViewState = {
     profiles: [], runs: [], runId: null, detail: null, messages: [], evidence: [], evidenceIncomplete: false, descendantUsage: null, subtreeUsage: null, confirmation: null,
-    toolActivity: null,
+    toolActivity: null, datasourceActivity: [],
     status: 'idle', connected: false, resumeRequired: false, pendingCommand: null, notice: null,
   };
   private readonly listeners = new Set<() => void>();
@@ -89,6 +104,8 @@ export class RunViewController {
   private generation = 0;
   private snapshotRequest = 0;
   private appliedSnapshot = 0;
+  private readonly sourceCircuitTimers = new Map<string, unknown>();
+  private datasourceActivitySequence = 0;
 
   public constructor(private readonly client: RunViewClient, timers?: TimerPort) {
     this.timers = timers ?? defaultTimers;
@@ -114,7 +131,7 @@ export class RunViewController {
     this.closeRunResources();
     const generation = ++this.generation;
     const snapshotRequest = ++this.snapshotRequest;
-    this.patch({ runId, detail: null, messages: mergeMessagePage([], { items: initialMessages }, runId), evidence: [], evidenceIncomplete: false, descendantUsage: null, subtreeUsage: null, confirmation: null, toolActivity: null, status: 'loading', connected: false, resumeRequired: false, pendingCommand: null, notice: null });
+    this.patch({ runId, detail: null, messages: mergeMessagePage([], { items: initialMessages }, runId), evidence: [], evidenceIncomplete: false, descendantUsage: null, subtreeUsage: null, confirmation: null, toolActivity: null, datasourceActivity: [], status: 'loading', connected: false, resumeRequired: false, pendingCommand: null, notice: null });
     this.stream = this.client.openRunEvents(runId, undefined, (frame) => this.onEvent(generation, frame), (error) => this.onStreamError(generation, error));
     this.patch({ connected: true });
     this.calibrationTimer = this.timers.setInterval(() => { void this.refreshRun(generation); }, 2_000);
@@ -220,6 +237,15 @@ export class RunViewController {
     if (!this.state.connected) this.patch({ connected: true });
     const activity = toolActivityForEvent(frame, this.state.toolActivity);
     if (activity !== undefined) this.patch({ toolActivity: activity });
+    const datasource = datasourceActivityForEvent(frame, this.state.datasourceActivity, () => ++this.datasourceActivitySequence);
+    if (datasource !== undefined) {
+      this.patch({ datasourceActivity: datasource.items });
+      if (datasource.updated.status === 'open' && datasource.updated.openUntil !== undefined) {
+        this.scheduleProbeWaiting(datasource.updated.sourceId, datasource.updated.openUntil, generation);
+      } else if (datasource.updated.status === 'recovered' || datasource.updated.status === 'half_open') {
+        this.clearSourceCircuitTimer(datasource.updated.sourceId);
+      }
+    }
     if (frame.event === 'stream_error') {
       this.patch({ notice: '实时连接需要重新同步，正在刷新公开快照。' });
       this.closeStream();
@@ -300,6 +326,8 @@ export class RunViewController {
     this.closeStream();
     if (this.refreshTimer !== undefined) { this.timers.clearTimeout(this.refreshTimer); this.refreshTimer = undefined; }
     if (this.calibrationTimer !== undefined) { this.timers.clearInterval(this.calibrationTimer); this.calibrationTimer = undefined; }
+    for (const timer of this.sourceCircuitTimers.values()) this.timers.clearTimeout(timer);
+    this.sourceCircuitTimers.clear();
     this.refreshInFlight = false;
     this.refreshAgain = false;
   }
@@ -308,6 +336,29 @@ export class RunViewController {
     this.stream?.close();
     this.stream = null;
     this.patch({ connected: false });
+  }
+
+  private scheduleProbeWaiting(sourceId: string, openUntil: string, generation: number): void {
+    this.clearSourceCircuitTimer(sourceId);
+    const until = Date.parse(openUntil);
+    if (!Number.isFinite(until)) return;
+    const markWaiting = () => {
+      if (generation !== this.generation) return;
+      const current = [...this.state.datasourceActivity].reverse().find((item) => item.sourceId === sourceId);
+      if (current?.status !== 'open' || current.openUntil !== openUntil) return;
+      const waiting: PublicDatasourceActivity = { ...current, eventId: ++this.datasourceActivitySequence, status: 'probe_waiting' };
+      this.patch({ datasourceActivity: appendDatasourceActivity(this.state.datasourceActivity, waiting) });
+      this.sourceCircuitTimers.delete(sourceId);
+    };
+    const delayMs = Math.max(0, Math.min(2_147_000_000, until - Date.now()));
+    if (delayMs === 0) { markWaiting(); return; }
+    this.sourceCircuitTimers.set(sourceId, this.timers.setTimeout(markWaiting, delayMs));
+  }
+
+  private clearSourceCircuitTimer(sourceId: string): void {
+    const timer = this.sourceCircuitTimers.get(sourceId);
+    if (timer !== undefined) this.timers.clearTimeout(timer);
+    this.sourceCircuitTimers.delete(sourceId);
   }
 
   private patch(patch: Partial<RunViewState>): void {
@@ -495,6 +546,47 @@ function toolActivityForEvent(frame: PublicEventFrame, previous: PublicToolActiv
   return undefined;
 }
 
+function datasourceActivityForEvent(
+  frame: PublicEventFrame,
+  previous: readonly PublicDatasourceActivity[],
+  nextEventId: () => number,
+): { items: PublicDatasourceActivity[]; updated: PublicDatasourceActivity } | undefined {
+  if (frame.event !== 'DATASOURCE_RETRY_SCHEDULED' && frame.event !== 'DATASOURCE_CIRCUIT_OPENED'
+    && frame.event !== 'DATASOURCE_CIRCUIT_HALF_OPENED' && frame.event !== 'DATASOURCE_CIRCUIT_CLOSED') return undefined;
+  const envelope = record(frame.data);
+  const payload = record(envelope?.payload) ?? envelope;
+  const sourceId = stringValue(payload?.sourceId);
+  if (sourceId === undefined) return undefined;
+  const eventId = nextEventId();
+  let updated: PublicDatasourceActivity;
+  if (frame.event === 'DATASOURCE_RETRY_SCHEDULED') {
+    const attempt = numberValue(payload?.attempt);
+    const reasonCode = stringValue(payload?.reasonCode);
+    const delayMs = numberValue(payload?.delayMs);
+    updated = {
+      eventId, sourceId, status: 'retrying',
+      ...(attempt === undefined ? {} : { attempt }),
+      ...(reasonCode === undefined ? {} : { reasonCode }),
+      ...(delayMs === undefined ? {} : { delayMs }),
+    };
+  } else if (frame.event === 'DATASOURCE_CIRCUIT_OPENED') {
+    const openUntil = stringValue(payload?.openUntil);
+    updated = { eventId, sourceId, status: 'open', ...(openUntil === undefined ? {} : { openUntil }) };
+  } else if (frame.event === 'DATASOURCE_CIRCUIT_HALF_OPENED') {
+    updated = { eventId, sourceId, status: 'half_open' };
+  } else {
+    updated = { eventId, sourceId, status: 'recovered' };
+  }
+  return { items: appendDatasourceActivity(previous, updated), updated };
+}
+
+function appendDatasourceActivity(
+  previous: readonly PublicDatasourceActivity[],
+  next: PublicDatasourceActivity,
+): PublicDatasourceActivity[] {
+  return [...previous, next].slice(-MAX_DATASOURCE_ACTIVITY);
+}
+
 function toolStatus(value: string | undefined): PublicToolActivityStatus {
   return value === 'success' || value === 'failed' || value === 'aborted' || value === 'timeout'
     || value === 'skipped' || value === 'interrupted' || value === 'awaiting_external'
@@ -507,6 +599,10 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 const defaultTimers: TimerPort = {

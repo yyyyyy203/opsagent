@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { EvidenceCaptureBudget, EvidenceSourcePage, Tool, ToolResponse } from '../src/contracts/index.js';
+import type { EvidenceCaptureBudget, EvidenceSourcePage, Tool, ToolResponse, ToolResponseChunk } from '../src/contracts/index.js';
 import type { RuntimeToolPorts } from '../src/application/create-runtime.js';
 import { createInspectionRuntime } from '../src/bootstrap/inspection-runtime.js';
 import { createLogEvidenceTools } from '../src/bootstrap/log-evidence-tools.js';
@@ -87,10 +87,12 @@ describe('Logs Web durable evidence acceptance', () => {
         signal: new AbortController().signal,
         mode: 'dry_run',
       });
-      if (returned === undefined || (typeof returned === 'object' && returned !== null && Symbol.asyncIterator in returned)) {
-        throw new Error('logs.capture returned an unexpected streaming response');
+      if (returned === undefined) throw new Error('logs.capture returned no response');
+      if (!isToolResponseStream(returned)) return await returned;
+      while (true) {
+        const item = await returned.next();
+        if (item.done) return item.value;
       }
-      return returned;
     };
 
     const first = createInspectionRuntime({ ...runtimeOptions, model: new ScriptedModel([]) });
@@ -198,17 +200,11 @@ describe('Logs Web durable evidence acceptance', () => {
         const run = await runtime.agent.reply({ message: 'initialize the run for source failure acceptance', profileId: 'simulation' });
         const tool = runtime.toolkit.get('logs.capture');
         if (tool === undefined) throw new Error('logs.capture was not registered');
-        await expect(tool.call?.({
+        await expect(call(tool, {
           service: 'checkout',
           start: '2026-10-04T11:55:00.000Z',
           end: '2026-10-04T12:00:00.000Z',
-        }, {
-          runId: run.runId,
-          stepId: 'source-error-step',
-          toolCallId: `source-error-${code}`,
-          signal: new AbortController().signal,
-          mode: 'dry_run',
-        })).rejects.toMatchObject({ code });
+        }, run.runId, `source-error-${code}`)).rejects.toMatchObject({ code });
         expect((await runtime.queries?.listEvidence(run.runId, { limit: 10 }))?.items).toHaveLength(0);
       } finally {
         await runtime.close();
@@ -256,17 +252,11 @@ describe('Logs Web durable evidence acceptance', () => {
       const run = await runtime.agent.reply({ message: 'initialize the run for abort acceptance', profileId: 'simulation' });
       const tool = runtime.toolkit.get('logs.capture');
       if (tool === undefined || runtime.evidenceManifests === undefined) throw new Error('Logs capture data plane is unavailable');
-      await expect(tool.call?.({
+      await expect(call(tool, {
         service: 'checkout',
         start: '2026-10-04T11:55:00.000Z',
         end: '2026-10-04T12:00:00.000Z',
-      }, {
-        runId: run.runId,
-        stepId: 'abort-step',
-        toolCallId: 'abort-call',
-        signal: controller.signal,
-        mode: 'dry_run',
-      })).rejects.toMatchObject({ code: 'ABORTED' });
+      }, run.runId, 'abort-call', controller.signal)).rejects.toMatchObject({ code: 'ABORTED' });
       expect(await runtime.evidenceManifests.get(evidenceId)).toMatchObject({ state: 'failed', chunks: [expect.any(Object)] });
       expect(await runtime.evidenceManifests.getVisible(evidenceId)).toBeNull();
       expect((await runtime.queries?.listEvidence(run.runId, { limit: 10 }))?.items).toHaveLength(0);
@@ -282,4 +272,32 @@ function failedPages(code: 'MCP_AUTH_ERROR' | 'MCP_TIMEOUT' | 'INVALID_INPUT' | 
       next: (): Promise<IteratorResult<EvidenceSourcePage>> => Promise.reject(new SourceFailure(code)),
     }),
   };
+}
+
+async function call(
+  tool: Tool,
+  input: Record<string, unknown>,
+  runId: string,
+  toolCallId: string,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<ToolResponse> {
+  const returned = tool.call?.(input, {
+    runId,
+    stepId: `step-${toolCallId}`,
+    toolCallId,
+    signal,
+    mode: 'dry_run',
+  });
+  if (returned === undefined) throw new Error('Tool returned no response');
+  if (!isToolResponseStream(returned)) return await returned;
+  while (true) {
+    const item = await returned.next();
+    if (item.done) return item.value;
+  }
+}
+
+function isToolResponseStream(value: unknown): value is AsyncGenerator<ToolResponseChunk, ToolResponse> {
+  return typeof value === 'object' && value !== null
+    && typeof Reflect.get(value, Symbol.asyncIterator) === 'function'
+    && typeof Reflect.get(value, 'next') === 'function';
 }

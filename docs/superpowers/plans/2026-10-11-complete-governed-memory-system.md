@@ -123,7 +123,7 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 
 **验收**：body 不接受 scope/actor/状态/批准者/绝对路径/任意 URL；不存在和越界统一 404；审核 CAS/重放行为稳定；UI 标注来源、适用条件和 revision；模板没有执行按钮；无认证的本地操作员模式不得监听公网。
 
-- [ ] T6 验收：批准≠启用可从页面观察；publishing 不能修改业务规则或激活失效 revision，失效知识只能只读审计；能力关闭/必需限制明确可见。
+- [x] T6 验收：页面区分批准与发布/启用；发布仅接受当前有效批准引用、不修改业务规则；失效知识只读审计；关闭能力及 required 限制可见。API、UI 和 E2E 定向验收通过（2026-10-13）。
 
 ## T7 — 联合验收与安全回归
 
@@ -138,7 +138,7 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 
 **质量门**：运行 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`，并进行一次独立代码审查。清晰报告全量已有阻塞；不能以定向测试代替全仓通过。
 
-- [ ] T7 验收：R0 + T1–T6 的定向测试及全部质量门有新鲜输出；测试只用确定性桩，不调用付费模型/Embedding/LangSmith。
+- [x] T7 验收：Target Registry 版本栅栏、SQLite/InMemory parity、迁移/重启、四类记忆、HITL/压缩/隐私/治理和 Scope 隔离通过全仓确定性回归；`lint`、`typecheck`、`test`、`build` 及独立审查均有新鲜输出（2026-10-13）。没有调用付费模型、Embedding 或 LangSmith。
 
 ## 风险覆盖与执行清单
 
@@ -166,4 +166,4 @@ T3 与 T4 可在 T2 contracts/store 稳定后并行开发，但按 T3→T4→T4b
 - [x] T1、T2 已完成并通过独立复核。
 - [x] T1–T4 已完成并通过对应任务复核；T3 与 T4 的 Minor 均须在 T6/最终复核中回看。
 - [x] T4b、T5 已完成；T5 通过定向验收和独立复审，提交收口后按依赖顺序继续 T6、T7；文档修订不算实现完成。
-- [ ] T6、T7 尚未完成；T7 仍需运行全仓质量门和独立整分支审查。
+- [x] T6、T7 已完成实现与验证；具体差异、测试输出、独立审查结论和已知边界见 `.superpowers/sdd/2026-10-11-complete-governed-memory-system/task-6-report.md` 与 `task-7-report.md`。当前工作树仍有其他用户改动；本轮未提交或推送。

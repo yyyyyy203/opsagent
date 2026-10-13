@@ -63,7 +63,71 @@ pnpm web:dev
 - Run 状态为“运行中”时可请求取消当前 Agent Web 宿主进程内的活跃 Run；页面显示取消进行中，收到终态快照后显示“已取消”。暂停、等待确认和终态 Run 不提供取消按钮；取消通过 AbortSignal 协作停止，不会回滚已经完成的工具副作用。宿主重启后没有活跃执行器可供取消。
 - HIGH/CRITICAL 或工具声明需要确认时，批准/拒绝只作用于当前 `toolCallId + expectedRevision`。任何确认结果都不会自动恢复，必须点击“继续调查”；冲突不会自动重发。
 - 断线、SSE 背压或游标失效时页面提示重新同步，不伪造完整诊断。刷新页面不会自动 resume。
+- 数据源状态在当前 Run 的状态卡中展示：重试、熔断打开及冷却截止；冷却时间到后显示“恢复探测待触发”，仅表示后续请求可竞争单一探测，探测成功后才显示“数据源已恢复”。半开状态事件只供审计，不作为 Public SSE 推送。
 - 当前宿主为单进程本地 MVP；协调器和消息游标不是分布式锁/跨进程认证方案，不得直接公网暴露。
+
+## 数据源熔断故障演练
+
+熔断器状态属于 Agent Web 宿主进程；Metrics Lab 的独立 loopback 管理 API 只注入故障，不经过 Agent 工具调用。先按上文启动 Metrics Lab 和 Agent Web。在一个 PowerShell 窗口为后续来源查询注入故障并核对计数：
+
+### 零模型费用浏览器端到端验收
+
+需要验证页面到实际 Agent Web Runtime、Metrics Lab/MCP、熔断器、V2 SSE 和证据摘要的闭环时，运行：
+
+```powershell
+pnpm e2e:circuit
+```
+
+项目要求 Node.js 24。Windows 使用 Corepack 时，运行前确认 `node --version` 为 `v24.x`，且 Node 24 在 `PATH` 前部；否则子进程可能误用系统 Node 20，导致 SQLite 原生模块 ABI 不匹配。
+
+该命令使用专用 Playwright 配置和临时 SQLite，启动真实应用 Runtime/MCP 组装；模型由 `ScriptedModel` 固定响应，指标快照由测试专用确定性来源提供，不需要 API Key，不调用外部模型、LangSmith、Docker、Prometheus 或目标项目。测试先注入 9 次来源查询失败，验证 3 次逻辑操作各自完成重试后熔断打开；熔断期间及第 29,999 毫秒的新 Run 均收到 `CIRCUIT_OPEN`，不会访问来源。
+
+第一轮冷却结束后再注入一次失败，验证半开探测只请求一次、不追加重试、重新熔断；失败的父/子 Run 均没有证据，页面也不能显示“数据源已恢复”。第二轮冷却期间立即发起的查询和第 29,999 毫秒查询仍被阻止，最后 1 毫秒过后才显示“恢复探测待触发”。随后唯一一次成功探测生成证据引用并显示恢复，仍校验父子证据关联及原始数据不出现在公开证据或页面中。整个场景使用 7 个父 Run；两轮冷却均由测试时钟精确推进，无需实际等待一分钟。
+
+这验证的是模拟遥测下的软件集成路径与浏览器显示，不等同于真实 Prometheus、真实模型输出或 `group-buy-market` 生产验收。
+
+### Prometheus + 熔断联合验收
+
+需要把恢复探测也接到本地 Prometheus，而不只使用确定性假数据源时，先启动本地后端并确认健康：
+
+```powershell
+pnpm lab:backend:up
+Invoke-RestMethod 'http://127.0.0.1:19090/-/ready'
+```
+
+然后运行独立验收：
+
+```powershell
+pnpm e2e:circuit:prometheus
+```
+
+该命令仍使用 `ScriptedModel`，不需要任何模型或 LangSmith 密钥。故障由本地模拟器在 MCP 来源边界注入；熔断打开期间应为零 Prometheus 查询，第二轮冷却后只执行一次真实 `/api/v1/query`，并核验其返回模拟指标为 100 笔/15 次失败。证据页面仍只显示摘要与引用，不应出现 Prometheus 原始指标名。验收不访问 `group-buy-market` 或其他生产数据源。
+
+Prometheus Compose 通过 `host.docker.internal:19108` 抓取模拟器，因此验收期间指标抓取端会监听本机网络接口；Agent Web、MCP、管理端和浏览器控制端仍只绑定 loopback。测试完成后可用 `pnpm lab:backend:stop` 停止本地 Prometheus。
+
+### 手动运行时演练（使用已配置模型，可能产生费用）
+
+以下手动演练会通过当前 Agent Web 配置的模型生成查询数，可能产生模型费用；如只想零费用验证，请用上面的 `pnpm e2e:circuit`。
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:19109/source-fault'
+Invoke-RestMethod -Method Put `
+  -Uri 'http://127.0.0.1:19109/source-fault' `
+  -ContentType 'application/json' `
+  -Body '{"failures":9}'
+```
+
+默认一次逻辑请求最多发出 3 次来源查询（首次请求加 2 次重试）；熔断器按耗尽重试的逻辑请求计数，3 次后打开 30 秒。用 Agent Web 触发足够的指标查询，观察触发熔断的 Run 中先出现重试，再出现“数据源熔断已打开”和冷却截止；冷却结束后该 Run 的状态卡变为“恢复探测待触发”。随后从同一 Agent Web 宿主发起新的巡检，唯一半开探测成功后，新 Run 显示“数据源已恢复”。实际模型可能选择不同数量的查询，且会产生模型费用。
+
+也可以仅查看或清除未消费的注入次数：
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:19109/source-fault'
+Invoke-RestMethod -Method Put `
+  -Uri 'http://127.0.0.1:19109/source-fault' `
+  -ContentType 'application/json' `
+  -Body '{"failures":0}'
+```
 
 ## 停止与数据
 

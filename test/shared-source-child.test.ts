@@ -4,6 +4,13 @@ import { createInspectionRuntime } from '../src/bootstrap/inspection-runtime.js'
 import { createSharedSourceChildAgentFactory } from '../src/bootstrap/shared-source-child.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import type { ChatModel, ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../src/index.js';
+import type { TargetRecoveryGate } from '../src/contracts/target.js';
+
+const unusedTargetRecoveryGate: TargetRecoveryGate = {
+  acquireForStart: () => Promise.reject(new Error('unexpected Target start')),
+  authorizeResume: () => Promise.reject(new Error('unexpected Target resume')),
+  acquireForResume: () => Promise.reject(new Error('unexpected Target resume')),
+};
 
 class ToolRecordingModel implements ChatModel {
   public readonly toolNames: string[][] = [];
@@ -38,6 +45,7 @@ describe('shared source child factory', () => {
       evidence: parent.evidence,
       evidenceRecorder: parent.evidenceRecorder,
       sharedEvents: parent.sharedEvents,
+      targetRecoveryGate: unusedTargetRecoveryGate,
     });
     const childTools: Tool[] = [
       {

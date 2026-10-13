@@ -57,11 +57,10 @@ it('builds one deterministic observation and commits it before dispatching the o
     requiredEvidenceComplete: true, limitations: [] }));
   const result = await harness.worker.drain({ limit: 1 });
   expect(result).toEqual({ completed: 1, failed: 0, pending: true });
-  expect(harness.writes.completeCapture).toHaveBeenCalledWith(expect.objectContaining({
-    claim: expect.objectContaining({ ownerId: 'worker-1' }), candidate: expect.objectContaining({
-      status: 'observation', eligibleForPromotion: false,
-    }),
-  }));
+  expect(vi.mocked(harness.writes.completeCapture).mock.calls[0]?.[0]).toMatchObject({
+    claim: { ownerId: 'worker-1' },
+    candidate: { status: 'observation', eligibleForPromotion: false },
+  });
   expect(harness.dispatch).toHaveBeenCalledTimes(1);
 });
 

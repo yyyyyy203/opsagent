@@ -1,6 +1,10 @@
 export type RunStatus = 'running' | 'awaiting_confirmation' | 'paused' | 'completed' | 'failed' | 'cancelled';
 export type DiagnosisStage = 'triage' | 'evidence_collection' | 'hypothesis' | 'risk_gate' | 'action' | 'verification' | 'postmortem';
 
+import type { KnowledgeDiagnosisQualificationV1, KnowledgeKind, KnowledgeStatus, ProceduralKnowledgeContent,
+  SemanticKnowledgeContent } from '../../../../src/contracts/knowledge-memory.js';
+import type { TargetCatalogDto, TargetKnowledgePolicy, TargetKnowledgeReference, TargetReadinessDto } from '../../../../src/contracts/target.js';
+
 export type {
   DiagnosticMemoryCase,
   MemoryCaptureTicket,
@@ -9,6 +13,58 @@ export type {
   MemoryStatus,
   RunMemoryState,
 } from '../../../../src/contracts/diagnostic-memory.js';
+export type { KnowledgeDiagnosisQualificationV1, KnowledgeKind, KnowledgeStatus, ProceduralKnowledgeContent,
+  SemanticKnowledgeContent, TargetKnowledgeReference, TargetKnowledgePolicy, TargetCatalogDto, TargetReadinessDto };
+
+export interface PublicKnowledgeRevision {
+  schemaVersion: 1;
+  id: string;
+  kind: KnowledgeKind;
+  contentRevision: number;
+  governanceVersion: number;
+  sourceEpoch: number;
+  status: KnowledgeStatus;
+  createdAt: string;
+  validUntil?: string;
+  contentDigest: string;
+  content: SemanticKnowledgeContent | ProceduralKnowledgeContent;
+  applicability: {
+    profileRevision: string;
+    scenarioId: string;
+    scenarioVersion: string;
+    serviceIds: readonly string[];
+    faultTypes: readonly string[];
+    environment: string;
+    dataClass: 'simulated' | 'live';
+    datasetId?: string;
+  };
+  source: { type: string; id: string; version: string; digest: string; importedAt: string };
+  review?: { reviewedAt: string; checks: { sourceVerified: boolean; scopeVerified: boolean; contentReviewed: boolean } };
+}
+
+export interface PublicTargetKnowledgeStatus {
+  targetId: string;
+  capabilities: { semanticEnabled: boolean; proceduralEnabled: boolean };
+  requiredKnowledge: readonly { id: string; version: string; knowledgeClass?: KnowledgeKind }[];
+  publicationVersion: number;
+  publicationState: 'empty' | 'active' | 'scope_changed';
+  references: readonly TargetKnowledgeReference[];
+}
+
+export interface TargetKnowledgeDraftInput {
+  requestId: string;
+  source: { sourceId: string; sourceVersion: string; digest: string };
+  validUntil?: string;
+  content: SemanticKnowledgeContent | ProceduralKnowledgeContent;
+}
+
+export interface TargetKnowledgePublicationResult {
+  targetId: string;
+  publicationVersion: number;
+  references: readonly TargetKnowledgeReference[];
+  policy: TargetKnowledgePolicy;
+  publishedAt: string;
+}
 
 export interface PublicRunSummary {
   runId: string;
@@ -30,6 +86,7 @@ export interface RunUsageSummary {
 }
 
 export interface PublicRunDetail extends PublicRunSummary {
+  knowledgeQualification?: KnowledgeDiagnosisQualificationV1;
   evidenceIds: readonly string[];
   missingEvidence: readonly string[];
   childRunIds: readonly string[];

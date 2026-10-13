@@ -173,7 +173,8 @@ export async function createStaticTargetResolver(
   const acceptedCandidates = candidates.filter(definition => acceptedIds.has(definition.targetId));
 
   return new StaticTargetResolver(acceptedCandidates, profiles, unavailableOptionals, sourceIdentities, rejected,
-    options.profileResolver, scenarioRegistry, privateConnections, adapterRegistry, options.knowledgePolicies,
+    options.profileResolver, scenarioRegistry, privateConnections, adapterRegistry, options.identityRegistry,
+    options.knowledgePolicies,
     options.knowledgePublications ?? noKnowledgePublications,
     options.knowledgeCapabilities ?? disabledKnowledgeCapabilities, publication.version);
 }
@@ -193,6 +194,7 @@ export class StaticTargetResolver implements TargetResolver, TargetKnowledgePubl
     private readonly scenarios: ReadonlyMap<string, string>,
     private readonly connections: ReadonlyMap<string, PrivateConnectionDefinition>,
     private readonly adapters: ReadonlyMap<string, TargetSourceKind>,
+    private readonly identityRegistry: TargetIdentityRegistry,
     private readonly knowledgePolicies: TargetKnowledgePolicyStore,
     private readonly knowledgePublications: KnowledgePublicationInspectionPort,
     private readonly knowledgeCapabilities: TargetKnowledgeCapabilityPort,
@@ -237,6 +239,7 @@ export class StaticTargetResolver implements TargetResolver, TargetKnowledgePubl
 
   public async resolvePublicationContext(input: { targetId: string; capturedAt: string; signal: AbortSignal }) {
     throwIfAborted(input.signal);
+    await this.assertRegistryCurrent();
     const entry = this.entries.get(input.targetId);
     if (entry === undefined || !entry.definition.enabled || this.registryVersion === undefined) {
       throw new TargetConfigurationError('TARGET_BINDING_INVALID');
@@ -251,12 +254,14 @@ export class StaticTargetResolver implements TargetResolver, TargetKnowledgePubl
     const hostPolicy = await this.knowledgePolicies.get(input.targetId);
     validateHostKnowledgePolicy(hostPolicy, input.targetId);
     throwIfAborted(input.signal);
+    await this.assertRegistryCurrent();
     return { registryVersion: this.registryVersion, scope: deriveKnowledgeScope(entry.definition), hostPolicy };
   }
 
   public resolve(input: { targetId: string; capturedAt: string; signal: AbortSignal }): Promise<ResolvedTargetSnapshotV2> {
     return Promise.resolve().then(async () => {
       throwIfAborted(input.signal);
+      await this.assertRegistryCurrent();
       if (!isIdentifier(input.targetId) || !isTimestamp(input.capturedAt)) {
         throw new TargetConfigurationError('TARGET_BINDING_INVALID');
       }
@@ -306,6 +311,10 @@ export class StaticTargetResolver implements TargetResolver, TargetKnowledgePubl
         knowledgeBinding.references,
       );
       assertRequiredKnowledgeEnabled(knowledgePolicy, capabilities);
+      throwIfAborted(input.signal);
+      await this.assertRegistryCurrent();
+      const identityRegistryVersion = this.registryVersion;
+      if (identityRegistryVersion === undefined) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
       const unsigned = {
         schemaVersion: 2 as const,
         targetId: entry.definition.targetId,
@@ -326,12 +335,20 @@ export class StaticTargetResolver implements TargetResolver, TargetKnowledgePubl
           digest: reference.digest, approval: reference.approval })),
         knowledgePolicy,
         publicationVersion: knowledgeBinding.publication?.publicationVersion ?? 0,
+        identityRegistryVersion,
         memoryScope,
         capturedAt: input.capturedAt,
       };
       const digest = `sha256:v2:${checkpointChecksum({ algorithm: 'sha256', version: 2, target: unsigned })}`;
       return parseResolvedTargetSnapshotV2({ ...unsigned, digest });
     });
+  }
+
+  private async assertRegistryCurrent(): Promise<void> {
+    if (this.registryVersion === undefined
+      || (await this.identityRegistry.readSnapshot()).version !== this.registryVersion) {
+      throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+    }
   }
 }
 

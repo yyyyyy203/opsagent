@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript、Node.js 24、pnpm 11.19.0、Zod 3、better-sqlite3、Float32/DataView、Vitest；不增加 native extension、Embedding SDK 或模型下载。
 
-**Spec:** [向量记忆可用性实验设计](../specs/2026-10-10-memory-vector-feasibility-design.md)。状态：V1/V2 已在当前分支实现并纳入全量测试；V3 影子检索与对照验收待实施。与 [阶段 A 基础计划](./2026-10-10-governed-diagnostic-memory.md) 分开验收。
+**Spec:** [向量记忆可用性实验设计](../specs/2026-10-10-memory-vector-feasibility-design.md)。状态：V1/V2/V3 机制已在当前分支实现并纳入回归；真实 Embedding 语义质量仍待来源复核的真实向量包验收。与 [阶段 A 基础计划](./2026-10-10-governed-diagnostic-memory.md) 分开验收。
 
 ## Global Constraints
 
@@ -174,7 +174,7 @@ eligible 限1000且去重，绑定 JSON，不拼接 SQL。先验证候选总字�
 - Produces: createMemoryVectorExperiment(input: { packPath: string; databasePath: string; scope: MemoryScope; space: EmbeddingSpace; corpusDigest: string; querySetDigest: string; corpus: MemoryExperimentCorpus; queries: MemoryQueryStore; evidence: MemoryEvidenceValidator; clock: Clock }): Promise<{ indexer: MemoryVectorIndexer; retriever: ShadowMemoryRetriever; close(): Promise<void> }>，仅 bootstrap 组装具体类；expectedSpace/语料/查询 digest 传给 V1 provider。
 - Consumes: Spec 的 MemoryVectorMeasurements；验收 runner 从 CLI 注入 nowMs/rssBytes/indexBytes 的 host 实现，单测用固定计数器，不在检索器直接读取进程资源。
 
-- [ ] Step 1：红测试 vector返回无序/交叉ID、RRF重复/版本错、撤销/过期/错scope、缺包/错space/坏索引→BM25、Abort立即传播。Fake index 抛固定错误，不调用任何HTTP：
+- [x] Step 1：红测试 vector返回无序/交叉ID、RRF重复/版本错、撤销/过期/错scope、缺包/错space/坏索引→BM25、Abort立即传播。Fake index 抛固定错误，不调用任何HTTP：
 
 ```ts
 const result = await retriever.retrieve({
@@ -189,9 +189,9 @@ expect(externalRequestsSent).toBe(0);
 
 setup 注入 queries/corpus/evidence 的已批准同scope fixture 与拒绝HTTP的 spy；base memoryCase 的固定digest仅供接口测试，实际建索引和报告验收必须使用真实canonical case/text digest。
 
-- [ ] Step 2：运行 pnpm exec vitest run test/memory-vector-retrieval.test.ts test/memory-vector-acceptance.test.ts --maxWorkers=2 看红。
-- [ ] Step 3：indexer 只取 bounded approved corpus，最多16条一批，索引写本scope/space；retriever每次重新取 eligibility，vector/hybrid 先过滤再搜索，RRF保序后 queries.revalidate+evidence复核，全部限制同一剩余deadline。普通实验故障返回明确BM25降级，Abort传播；如果BM25也失败，不输出恢复成功。
-- [ ] Step 4：实现 CLI 显式配置预检与两层报告，build后运行。添加脚本：
+- [x] Step 2：运行 pnpm exec vitest run test/memory-vector-retrieval.test.ts test/memory-vector-acceptance.test.ts --maxWorkers=2 看红。已观察到预期行为断言失败后再实现。
+- [x] Step 3：indexer 只取 bounded approved corpus，最多16条一批，索引写本scope/space；retriever每次重新取 eligibility，vector/hybrid 先过滤再搜索，RRF保序后 queries.revalidate+evidence复核，全部限制同一剩余deadline。普通实验故障返回明确BM25降级，Abort传播；如果BM25也失败，不输出恢复成功。
+- [x] Step 4：实现 CLI 显式配置预检与两层报告，build后运行。添加脚本：
 
 ```json
 "acceptance:memory-vector": "pnpm build && node apps/acceptance/memory-vector.mjs"
@@ -199,8 +199,8 @@ setup 注入 queries/corpus/evidence 的已批准同scope fixture 与拒绝HTTP�
 
 预检未开启退出1；缺包输出 VECTOR_EMBEDDING_PACK_REQUIRED、realEmbedding=not_provided，退出2。合法synthetic包机制检查通过，输出 status=mechanism_verified、realEmbedding=not_provided/退出2；不自动造随机包补输入。来源可复核的real包且全部机制/对照执行成功才 status=verified；效果指标是观测值，不因向量没优于BM25就伪造结论。报告含 semanticEvaluation=measured、不含根因准确或生产效果承诺。
 
-- [ ] Step 5：建立固定 holdout 查询集，标签与索引文本分离；至少12个中文/英文/同义/近词/错范围/无匹配查询，逐模式输出排名、hit@5/MRR@5/nDCG@5与空召回。timer/RSS测量注入，验收记录p50/p95/峰值RSS/索引字节；手动来源检查真实包的生成器信息和文件hash，不把标记本身当证明。报告不含全文/向量/内部路径；外部请求spy计数为0。
-- [ ] Step 6：运行 V1/V2/V3全部测试、基础 memory 联验与无记忆烟测本地契约，再 pnpm lint/typecheck/test -- --maxWorkers=2/build。操作指南给出固定包schema、正规化、空间变化/重建、opt-in、退出码、缺包不算语义通过、关闭不影响保存的说明。提交 test(memory): verify vector shadow retrieval isolation restart and fallback。
+- [x] Step 5：建立固定 holdout 查询集，标签与索引文本分离；至少12个中文/英文/同义/近词/错范围/无匹配查询，逐模式输出排名、hit@5/MRR@5/nDCG@5与空召回。timer/RSS测量注入，验收记录p50/p95/峰值RSS/索引字节；手动来源检查真实包的生成器信息和文件hash，不把标记本身当证明。报告不含全文/向量/内部路径；外部请求spy计数为0。
+- [x] Step 6：V1/V2/V3 向量测试、基础 memory 联验、全量 Vitest/typecheck/build 和 V3 文件定向 lint 已通过；全仓 lint 已执行但未通过，当前 51 个诊断均位于 V3 范围以外的既有测试/临时 Playwright 文件。操作指南已覆盖固定包 schema、正规化、空间变化/重建、opt-in、退出码、缺包不算语义通过及关闭不影响保存。真实 Embedding 包尚未提供，语义质量验收待后续进行。
 
 ## 完成定义与自检
 
@@ -215,4 +215,4 @@ setup 注入 queries/corpus/evidence 的已批准同scope fixture 与拒绝HTTP�
 
 完成必须有实际向量写入/重开/查询/删除/故障测试，不仅有接口。没有真实包可以交付机制验证，但真实Embedding质量项保持未验证；不得掩盖这个差别。生产在线接入、实时Embedding Provider和Semantic/Procedural的完整库仍不在本计划中；不因实验通过自动修改基础配置。
 
-V1/V2 已实现并验证存储、范围、空间版本和重启机制；V3 尚未实现，包含影子检索、RRF、BM25 降级、离线对照评测与验收 CLI。当前不生成向量包、不下载模型、不联网调用或推送；缺少真实 Embedding 包时，真实语义质量仍明确保持未验证。
+V1/V2/V3 的本地包、独立 SQLite 索引、影子检索、RRF、BM25 降级、离线 holdout 对照与验收 CLI 已实现。当前不生成真实向量包、不下载模型、不调用外部服务或推送；缺少来源复核的真实 Embedding 包时，真实语义质量明确保持未验证，向量也未接入 Harness 默认召回。

@@ -25,14 +25,16 @@ afterEach(async () => {
 describe('Target-scoped HTTP routes', () => {
   it('starts only through a Target route and denies Target Runs through legacy or cross-Target reads', async () => {
     const model = new ScriptedModel([{ text: 'Completed', toolCalls: [] }]);
+    const identityPorts = createTargetIdentityTestPorts();
     const runtime = createAgentRuntime({
       model,
       workspaceRoots: [], includeExternalBash: false, clock,
+      inMemoryTargetIdentityRegistryVersion: identityPorts.identityRegistryVersion,
     });
     runtimes.push(runtime);
     if (runtime.durableState === undefined || runtime.queries === undefined) throw new Error('Durable runtime ports are missing.');
     const resolver = await createStaticTargetResolver({
-      ...createTargetIdentityTestPorts(),
+      ...identityPorts,
       catalog: multiProjectTargetCatalog,
       connections: multiProjectConnectionRegistry,
       profileResolver: new StaticProfileResolver(multiProjectProfiles),

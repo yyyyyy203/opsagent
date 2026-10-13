@@ -1,5 +1,5 @@
 import type { Clock } from '../contracts/common.js';
-import { toolInputDigest } from '../tool/schema.js';
+import { toolDefinitionDigest, toolInputDigest } from '../tool/schema.js';
 import type { ControlHook, HookContext, HookResult } from './types.js';
 
 export class RiskActionHook implements ControlHook {
@@ -35,6 +35,7 @@ export class RiskActionHook implements ControlHook {
           toolName: context.tool.name,
           input: context.input,
           inputDigest: toolInputDigest(context.tool, context.toolCall),
+          toolDefinitionDigest: toolDefinitionDigest(context.tool),
           severity: context.risk.severity,
           findings: context.risk.findings,
         },

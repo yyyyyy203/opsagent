@@ -13,6 +13,8 @@ import type {
   ToolResponseChunk,
 } from '../../contracts/index.js';
 import { canonicalSourceToolName } from '../../contracts/index.js';
+import { TargetConfigurationError } from '../../contracts/target.js';
+import type { TargetOperationPermit } from '../../contracts/target.js';
 import {
   projectSourceMissingEvidenceCodes,
   sourceMissingEvidenceCodesAreConsistent,
@@ -114,19 +116,32 @@ async function* invokeSourceSubagent(
   let lastPartialResult: SourceSubagentResult | undefined;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     let exposedOutput = false;
+    let operationPermit: TargetOperationPermit | undefined;
+    let operationSignal = options.signal;
+    let attemptExecution = execution;
     try {
-      const stream = descriptor.runner.run(request, execution);
+      if (options.targetOperations !== undefined) {
+        if (options.targetSourceId === undefined) throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+        operationPermit = await options.targetOperations.authorize({
+          operation: 'source', capability: options.targetSourceId, signal: options.signal,
+        });
+        operationSignal = AbortSignal.any([options.signal, operationPermit.signal]);
+      }
+      attemptExecution = { ...executionBase, childRunId, signal: operationSignal };
+      const stream = descriptor.runner.run(request, attemptExecution);
       let result: SourceSubagentResult;
       let completed = false;
       try {
         while (true) {
-          throwIfAborted(options.signal);
+          throwIfAborted(operationSignal);
           const item = await stream.next();
           if (item.done) {
+            if (operationPermit !== undefined) await options.targetOperations!.validate(operationPermit, options.signal);
             result = validateResult(item.value, descriptor.subagentType);
             completed = true;
             break;
           }
+          if (operationPermit !== undefined) await options.targetOperations!.validate(operationPermit, options.signal);
           exposedOutput = true;
           yield sanitizeChunk(item.value);
         }
@@ -162,30 +177,33 @@ async function* invokeSourceSubagent(
       }, attempt);
       return response;
     } catch (error) {
+      if (operationPermit?.signal.aborted === true || isTargetOperationDenied(error)) {
+        throw targetOperationDenied(error);
+      }
       lastError = error;
       const code = errorCode(error);
       const partialResult = partialResultFrom(error, descriptor.subagentType);
       if (partialResult !== undefined) lastPartialResult = partialResult;
-      const retryable = shouldRetry(descriptor, error, code, exposedOutput, options.signal, attempt, attempts);
+      const retryable = shouldRetry(descriptor, error, code, exposedOutput, operationSignal, attempt, attempts);
       if (retryable) {
         const delayMs = resolveDelay(retry?.delayMs, attempt);
-        await publishLifecycle(lifecycle, 'SUBAGENT_RETRY_SCHEDULED', execution, {
+        await publishLifecycle(lifecycle, 'SUBAGENT_RETRY_SCHEDULED', attemptExecution, {
           childRunId,
           attempt,
           reasonCode: code,
         }, attempt);
-        if (delayMs > 0) await (retry?.sleep ?? sleep)(delayMs, options.signal);
+        if (delayMs > 0) await (retry?.sleep ?? sleep)(delayMs, operationSignal);
         continue;
       }
       const reducedScopeResult = partialResult ?? lastPartialResult;
       if (reducedScopeResult !== undefined) {
         const response = flattenResult(reducedScopeResult);
-        await publishLifecycle(lifecycle, 'SUBAGENT_FALLBACK_ACTIVATED', execution, {
+        await publishLifecycle(lifecycle, 'SUBAGENT_FALLBACK_ACTIVATED', attemptExecution, {
           childRunId,
           fallbackMode: 'reduced_scope',
           reasonCode: 'RETRY_EXHAUSTED',
         }, attempt);
-        await publishLifecycle(lifecycle, 'SUBAGENT_COMPLETED', execution, {
+        await publishLifecycle(lifecycle, 'SUBAGENT_COMPLETED', attemptExecution, {
           childRunId,
           status: 'partial',
           evidenceIds: reducedScopeResult.evidenceIds,
@@ -193,7 +211,7 @@ async function* invokeSourceSubagent(
         }, attempt);
         return response;
       }
-      await publishLifecycle(lifecycle, 'SUBAGENT_FAILED', execution, {
+      await publishLifecycle(lifecycle, 'SUBAGENT_FAILED', attemptExecution, {
         childRunId,
         error: errorPayload(lifecycleErrorCode(code), safeErrorMessage(error), false),
         partialEvidenceIds: [],
@@ -261,6 +279,9 @@ function createExecutionBase(
   if (request.profileId !== options.profileId) {
     throw new SourceToolFailure('POLICY_DENIED', 'Source subagent profile scope does not match the host scope.', false);
   }
+  if (options.targetBindingId !== undefined && options.targetSourceId === undefined) {
+    throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+  }
   if (options.remainingToolCalls === undefined
     || !Number.isSafeInteger(options.remainingToolCalls) || options.remainingToolCalls <= 0) {
     throw new SourceToolFailure('BUDGET_EXCEEDED', 'Parent Tool-call budget is exhausted or unavailable.', false);
@@ -272,6 +293,8 @@ function createExecutionBase(
     profileId: options.profileId,
     ...(options.profileRevision === undefined ? {} : { profileRevision: options.profileRevision }),
     ...(options.targetBindingId === undefined ? {} : { targetBindingId: options.targetBindingId }),
+    ...(options.targetSourceId === undefined ? {} : { targetSourceId: options.targetSourceId }),
+    ...(options.targetOperations === undefined ? {} : { targetOperations: options.targetOperations }),
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     ...(options.replyId === undefined ? {} : { replyId: options.replyId }),
     ...(options.streamId === undefined ? {} : { streamId: options.streamId }),
@@ -419,6 +442,7 @@ function lifecycleErrorCode(code: AgentErrorCode): LifecycleErrorCode {
 }
 
 function errorCode(error: unknown): AgentErrorCode {
+  if (isTargetOperationDenied(error)) return 'POLICY_DENIED';
   if (isAgentErrorLike(error)) {
     const allowed = new Set<AgentErrorCode>([
       'ABORTED', 'BUDGET_EXCEEDED', 'CONFIRMATION_EXPIRED', 'INVALID_INPUT', 'LOOP_DETECTED', 'MODEL_ERROR',
@@ -429,6 +453,14 @@ function errorCode(error: unknown): AgentErrorCode {
     if (allowed.has(error.code)) return error.code;
   }
   return 'UNAVAILABLE';
+}
+
+function isTargetOperationDenied(error: unknown): error is TargetConfigurationError {
+  return error instanceof TargetConfigurationError && error.code === 'TARGET_OPERATION_DENIED';
+}
+
+function targetOperationDenied(error: unknown): TargetConfigurationError {
+  return isTargetOperationDenied(error) ? error : new TargetConfigurationError('TARGET_OPERATION_DENIED');
 }
 
 function safeErrorMessage(error: unknown): string {

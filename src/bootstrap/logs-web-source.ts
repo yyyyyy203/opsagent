@@ -67,6 +67,7 @@ export function createLogsWebSource(
     evidence: ports.evidence,
     evidenceRecorder: ports.evidenceRecorder,
     sharedEvents: ports.sharedEvents,
+    targetRecoveryGate: ports.targetRecoveryGate,
     ...(ports.durableState === undefined ? {} : { targetBindings: ports.durableState.targetBindings }),
     clock: ports.clock,
     ids: ports.ids,

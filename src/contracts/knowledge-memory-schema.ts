@@ -45,6 +45,13 @@ const shellCommandPatterns = [
   /\bInvoke-(?:WebRequest|RestMethod|Expression|Command)\b/iu,
 ] as const;
 const sqlStatementPattern = /\b(?:SELECT\s+.{1,256}?\s+FROM\s+\S+|INSERT\s+INTO\s+\S+|UPDATE\s+\S+\s+SET\b|DELETE\s+FROM\s+\S+|ALTER\s+TABLE\s+\S+|DROP\s+(?:TABLE|DATABASE)\s+\S+|CREATE\s+(?:TABLE|INDEX|DATABASE)\s+\S+|TRUNCATE\s+TABLE\s+\S+)/iu;
+const sqlPrivilegeStatementPattern = /\b(?:GRANT|REVOKE)\s+(?:ALL(?:\s+PRIVILEGES)?|(?:SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|USAGE|EXECUTE|CREATE|CONNECT|TEMP(?:ORARY)?)(?:\s*,\s*(?:SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|USAGE|EXECUTE|CREATE|CONNECT|TEMP(?:ORARY)?))*)(?:\s+PRIVILEGES)?\s+ON\s+(?:(?:TABLE|SCHEMA|DATABASE|SEQUENCE|FUNCTION|PROCEDURE|TYPE)\s+)?[\w.-]+\s+(?:TO|FROM)\s+[\w.-]+/iu;
+const sqlRoleIdentifierPattern = String.raw`(?:"[^"\r\n]+"|[\w.-]+)`;
+const sqlRoleListPattern = String.raw`${sqlRoleIdentifierPattern}(?:\s*,\s*${sqlRoleIdentifierPattern})*`;
+const sqlRoleMembershipStatementPattern = new RegExp(
+  String.raw`(?:^|[\r\n]|:\s*)\s*(?:GRANT\s+(?:ROLE\s+)?${sqlRoleListPattern}\s+TO\s+${sqlRoleListPattern}|REVOKE\s+(?:${sqlRoleListPattern}\s+FROM\s+${sqlRoleListPattern}|(?:ADMIN|GRANT)\s+OPTION\s+FOR\s+${sqlRoleListPattern}\s+FROM\s+${sqlRoleListPattern}))\s*;`,
+  'iu',
+);
 const rawHttpRequestPattern = /\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\/[^\s]*\s+HTTP\/\d(?:\.\d)?(?:\s|$)/iu;
 const toolJsonPattern = (value: string): boolean => value.includes('{') && value.includes('}')
   && /"(?:tool|toolName|tool_name|name)"\s*:/iu.test(value)
@@ -53,7 +60,8 @@ const executableDeclarationPattern = /(?:^|\n)\s*(?:(?:const|let|var)\s+[$\w]+\s
 const executableInvocationPattern = /\b(?:await\s+)?[$\w]+(?:\.[$\w]+)*\s*\([^()\n]*\)/iu;
 const containsExecutableOrRequestSyntax = (value: string): boolean => shellPromptPattern.test(value)
   || shellCommandPatterns.some((pattern) => pattern.test(value))
-  || sqlStatementPattern.test(value) || rawHttpRequestPattern.test(value)
+  || sqlStatementPattern.test(value) || sqlPrivilegeStatementPattern.test(value)
+  || sqlRoleMembershipStatementPattern.test(value) || rawHttpRequestPattern.test(value)
   || toolJsonPattern(value) || executableDeclarationPattern.test(value)
   || executableInvocationPattern.test(value) || /```|=>/u.test(value);
 const proceduralProse = (maxBytes: number) => boundedText(maxBytes).refine(
@@ -210,6 +218,9 @@ const semanticContentSchema = z.union([
   domainGlossarySchema,
 ]);
 
+/** Public strict content parsers shared by API boundaries and the governance services. */
+export const semanticKnowledgeContentSchema = semanticContentSchema;
+
 const proceduralContentSchema = z.object({
   type: z.literal('investigation_template'),
   templateId: identifier,
@@ -247,6 +258,8 @@ const proceduralContentSchema = z.object({
   limitations: z.array(proceduralProse(512)).max(32),
   sourceReferences: sourceReferencesSchema,
 }).strict();
+
+export const proceduralKnowledgeContentSchema = proceduralContentSchema;
 
 const commonRecordSchema = z.object({
   schemaVersion: z.literal(1),

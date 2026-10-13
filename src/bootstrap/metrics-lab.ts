@@ -1,4 +1,4 @@
-import { PrometheusSettlementSource } from '../infrastructure/prometheus/settlement-source.js';
+import { PrometheusSettlementSource, type SettlementSnapshot } from '../infrastructure/prometheus/settlement-source.js';
 import { startSettlementMcpServer } from '../infrastructure/mcp/settlement-server.js';
 import { startSimulatorAdminServer } from '../infrastructure/simulator/admin-server.js';
 import { startSimulatorMetricsServer } from '../infrastructure/simulator/http-server.js';
@@ -11,6 +11,8 @@ export interface MetricsLabOptions {
   adminPort?: number;
   mcpPort?: number;
   initialScenario?: SettlementScenario;
+  /** Test seam for deterministic end-to-end source failures; production uses Prometheus. */
+  sourceFactory?: (url: string) => { query(signal: AbortSignal): Promise<SettlementSnapshot> };
 }
 
 /** Owns local lab lifecycle. Prometheus itself remains owned by Compose. */
@@ -22,7 +24,13 @@ export async function startMetricsLab(options: MetricsLabOptions) {
   let mcp: Awaited<ReturnType<typeof startSettlementMcpServer>> | undefined;
   try {
     admin = await startSimulatorAdminServer(simulator, { port: options.adminPort ?? 19109 });
-    const source = new PrometheusSettlementSource({ url: options.prometheusUrl });
+    const upstream = (options.sourceFactory ?? ((url) => new PrometheusSettlementSource({ url })))(options.prometheusUrl);
+    const source = {
+      async query(signal: AbortSignal): Promise<SettlementSnapshot> {
+        if (simulator.consumeSourceFailure()) throw new TypeError('SIMULATED_SOURCE_UNAVAILABLE');
+        return upstream.query(signal);
+      },
+    };
     mcp = await startSettlementMcpServer(source, { port: options.mcpPort ?? 19110 });
   } catch (error) {
     await admin?.close();

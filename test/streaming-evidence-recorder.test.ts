@@ -8,6 +8,7 @@ import { SqliteDatabase } from '../src/infrastructure/sqlite/database.js';
 import { SqliteEvidenceManifestStore } from '../src/infrastructure/sqlite/blob-manifest-store.js';
 import { LocalEvidenceBlobStore } from '../src/infrastructure/blob/local-evidence-blob-store.js';
 import { DefaultStreamingEvidenceRecorder } from '../src/application/streaming-evidence-recorder.js';
+import { TargetConfigurationError } from '../src/contracts/target.js';
 import { EventFactoryV2 } from '../src/event/v2/event-factory.js';
 import { EventPublisherV2, InMemoryProjectionFailureSink } from '../src/event/v2/event-publisher.js';
 import { InMemoryEventMessageStore } from '../src/event/v2/in-memory-event-store.js';
@@ -194,6 +195,22 @@ describe('DefaultStreamingEvidenceRecorder', () => {
         code: 'ABORTED',
       });
       expect(await manifests.getVisible('evidence-log-1')).toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+
+  it('does not commit or expose evidence when Target policy is revoked before commit', async () => {
+    const { recorder, manifests, database } = await createRecorder();
+    try {
+      await expect(recorder.capture(request(generatedLogPages({ totalBytes: 64 * 1024 })), {
+        validateBeforeCommit: async () => {
+          throw new TargetConfigurationError('TARGET_OPERATION_DENIED');
+        },
+      })).rejects.toMatchObject({ code: 'TARGET_OPERATION_DENIED' });
+
+      expect(await manifests.getVisible('evidence-log-1')).toBeNull();
+      expect(await manifests.get('evidence-log-1')).toMatchObject({ state: 'failed' });
     } finally {
       database.close();
     }
