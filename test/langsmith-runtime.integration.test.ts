@@ -163,7 +163,9 @@ describe('LangSmith Web runtime integration', () => {
       const exit = await withTimeout(exitPromise, 15_000, 'CLI_SHUTDOWN_TIMEOUT');
       expect(exit.code === 0 || exit.signal === 'SIGTERM'
         || (process.platform === 'win32' && exit.code === null)).toBe(true);
-      expect(requestPaths).toHaveLength(0);
+      // The LangSmith SDK may probe /info during startup; no trace export is
+      // allowed until a Run produces spans.
+      expect(requestPaths.every((path) => new URL(path, proxy).pathname.endsWith('/info'))).toBe(true);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
       await withTimeout(exitPromise, 15_000, 'CLI_CLEANUP_TIMEOUT');
