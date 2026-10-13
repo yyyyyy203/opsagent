@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -17,7 +17,7 @@ afterEach(async () => {
 
 describe('acceptance SQLite reader', () => {
   it('reads a bounded parent/child Run tree and only public evidence summaries', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentops-acceptance-reader-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentops-acceptance-reader-')));
     roots.push(root);
     const sqlitePath = join(root, 'agent.sqlite');
     const persistence = createSqlitePersistence({ path: sqlitePath, clock: { now: () => new Date(now) } });
@@ -69,7 +69,7 @@ describe('acceptance SQLite reader', () => {
   });
 
   it('does not create a database when the acceptance data directory has no existing database', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentops-acceptance-empty-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentops-acceptance-empty-')));
     roots.push(root);
     await expect(readAcceptanceSnapshot({ dataDirectory: root, runId: 'missing-run' }))
       .rejects.toMatchObject({ code: 'DATABASE_NOT_FOUND' });
@@ -77,7 +77,7 @@ describe('acceptance SQLite reader', () => {
   });
 
   it('rejects relative directories, malformed Run IDs, and absent Runs with stable error codes', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentops-acceptance-invalid-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentops-acceptance-invalid-')));
     roots.push(root);
     await expect(readAcceptanceSnapshot({ dataDirectory: 'relative-data', runId: 'run-1' }))
       .rejects.toMatchObject({ code: 'INVALID_DATA_DIRECTORY' });

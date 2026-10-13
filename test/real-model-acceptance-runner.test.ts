@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAcceptanceFixture } from './fixtures/acceptance-cases.js';
@@ -68,7 +69,7 @@ describe('Trace admission before paid smoke resources', () => {
 });
 
 const NOW = Date.parse('2026-10-04T12:00:00.000Z');
-const PRECHECK_ROOT = resolve(tmpdir(), 'agentops-real-model-runner-test');
+const PRECHECK_ROOT = resolve(realpathSync(tmpdir()), 'agentops-real-model-runner-test');
 
 describe('acceptance boundary payload audit', () => {
   it('accepts only the public Evidence view fields and rejects raw-content additions', () => {
@@ -323,7 +324,7 @@ describe('runRealModelAcceptance preflight', () => {
   });
 
   it('persists sanitized diagnostics when the parent Run reaches a non-completed terminal status', async () => {
-    const root = await mkdtemp(resolve(tmpdir(), 'agentops-real-runner-failure-'));
+    const root = await createCanonicalTempDirectory('agentops-real-runner-failure-');
     const expiresAt = new Date(NOW + 120_000).toISOString();
     const labClose = vi.fn(() => Promise.resolve());
     const webClose = vi.fn(() => Promise.resolve());
@@ -435,7 +436,7 @@ describe('runRealModelAcceptance preflight', () => {
   });
 
   it('reports an allowlisted Web startup error code without persisting its message', async () => {
-    const root = await mkdtemp(resolve(tmpdir(), 'agentops-real-runner-web-start-failure-'));
+    const root = await createCanonicalTempDirectory('agentops-real-runner-web-start-failure-');
     const expiresAt = new Date(NOW + 120_000).toISOString();
     const labClose = vi.fn(() => Promise.resolve());
     const lab = {
@@ -492,7 +493,7 @@ describe('runRealModelAcceptance preflight', () => {
   });
 
   it('starts one parent Run, closes only owned resources, and writes a review-required report', async () => {
-    const root = await mkdtemp(resolve(tmpdir(), 'agentops-real-runner-success-'));
+    const root = await createCanonicalTempDirectory('agentops-real-runner-success-');
     const expiresAt = new Date(NOW + 120_000).toISOString();
     const labClose = vi.fn(() => Promise.resolve());
     const webClose = vi.fn(() => Promise.resolve());
@@ -663,4 +664,8 @@ function makeOptions(overrides: RunnerOverrides = {}): RealModelAcceptanceOption
     ...otherOverrides,
     modelConfig: { baseUrl: 'https://model.example/v1', apiKey: 'test-only-api-key', model: 'test-model', ...modelConfig },
   };
+}
+
+async function createCanonicalTempDirectory(prefix: string): Promise<string> {
+  return realpath(await mkdtemp(resolve(tmpdir(), prefix)));
 }
