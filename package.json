@@ -21,7 +21,7 @@
     "logs:backend:up": "docker compose -p agentops-logs -f infrastructure/logs-lab/compose.yaml up -d",
     "logs:backend:stop": "docker compose -p agentops-logs -f infrastructure/logs-lab/compose.yaml stop",
     "logs:lab": "pnpm build && node apps/logs-lab/index.mjs",
-    "test": "vitest run",
+    "test": "pnpm build && vitest run --maxWorkers=2",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "web:server": "pnpm build && node apps/agent-server/index.mjs",
