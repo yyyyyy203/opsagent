@@ -18,7 +18,7 @@ const sourceDigest = 'a'.repeat(64);
 export const scope: KnowledgeScope = {
   targetId: 'market-a-sim', projectId: 'market-a', deploymentId: 'lab', deploymentGeneration: 1,
   targetFingerprint: 'market-a-lab-dataset-a', profileId: 'market-a.lab.settlement', profileRevision: 'profile/v1',
-  scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.0.0', serviceIds: ['checkout'],
+  scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.1.0', serviceIds: ['checkout'],
   faultTypes: ['window_failure_rate.v1'], environment: 'simulation', dataClass: 'simulated', datasetId: 'dataset-a-v1',
 };
 export async function fixture(backend: 'sqlite' | 'memory', path = ':memory:') {

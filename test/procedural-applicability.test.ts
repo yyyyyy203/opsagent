@@ -17,7 +17,7 @@ const source = { sourceId: 'settlement-runbook', sourceVersion: 'runbook/v1', di
 const scope: KnowledgeScope = {
   targetId: 'market-a-sim', projectId: 'market-a', deploymentId: 'lab', deploymentGeneration: 1,
   targetFingerprint: 'market-a-lab-dataset-a', profileId: 'market-a.lab.settlement', profileRevision: 'profile/v1',
-  scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.0.0', serviceIds: ['checkout'],
+  scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.1.0', serviceIds: ['checkout'],
   faultTypes: ['window_failure_rate.v1'], environment: 'simulation', dataClass: 'simulated', datasetId: 'dataset-a-v1',
 };
 
@@ -42,7 +42,7 @@ async function targetFixture(references: readonly { id: string; version: string;
 function content(overrides: Partial<ProceduralKnowledgeContent> = {}): ProceduralKnowledgeContent {
   return {
     type: 'investigation_template', templateId: 'failure-rate-investigation',
-    scenario: { id: 'window_failure_rate.v1', version: '1.0.0' },
+    scenario: { id: 'window_failure_rate.v1', version: '1.1.0' },
     applicableTo: { serviceIds: ['checkout'], faultTypes: ['window_failure_rate.v1'], environments: ['simulation'] },
     preconditions: ['The failure-rate threshold was crossed.'],
     requiredEvidence: [{ category: 'metric', minimumCount: 2 }],
