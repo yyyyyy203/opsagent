@@ -26,7 +26,7 @@ export const multiProjectTargetCatalog = Object.freeze({
       enabled: true,
       scenario: {
         id: 'window_failure_rate.v1',
-        version: '1.0.0',
+        version: '1.1.0',
         implementationDigest: WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST,
         serviceId: 'checkout',
         serviceName: 'Checkout',
@@ -38,6 +38,11 @@ export const multiProjectTargetCatalog = Object.freeze({
           failureValue: 'failed',
           serviceSelector: { label: 'service', value: 'checkout' },
           staticLabels: {},
+          windowBoundaryMapping: {
+            startMetricName: 'market_checkout_window_start_timestamp_seconds',
+            endMetricName: 'market_checkout_window_end_timestamp_seconds',
+            timestampUnit: 'unix_seconds',
+          },
         },
         threshold: 0.05,
         minSamples: 20,
@@ -69,7 +74,7 @@ export const multiProjectTargetCatalog = Object.freeze({
       enabled: true,
       scenario: {
         id: 'window_failure_rate.v1',
-        version: '1.0.0',
+        version: '1.1.0',
         implementationDigest: WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST,
         serviceId: 'checkout',
         serviceName: 'Checkout',
@@ -81,6 +86,11 @@ export const multiProjectTargetCatalog = Object.freeze({
           failureValue: 'error',
           serviceSelector: { label: 'application', value: 'checkout-api' },
           staticLabels: {},
+          windowBoundaryMapping: {
+            startMetricName: 'orders_submit_window_start_timestamp_seconds',
+            endMetricName: 'orders_submit_window_end_timestamp_seconds',
+            timestampUnit: 'unix_seconds',
+          },
         },
         threshold: 0.02,
         minSamples: 20,

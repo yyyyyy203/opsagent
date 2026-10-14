@@ -5,18 +5,23 @@ import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
 import { checkpointChecksum } from '../src/contracts/stable-json.js';
 import type { KnowledgeScope, TargetKnowledgePublication } from '../src/contracts/knowledge-memory.js';
 import { multiProjectTargetCatalog, multiProjectConnectionRegistry, multiProjectProfiles } from '../src/profiles/target-samples.js';
-import { WINDOW_FAILURE_RATE_INSTALLATION } from '../src/profiles/scenarios/window-failure-rate-v1.js';
+import {
+  WINDOW_FAILURE_RATE_INSTALLATION,
+  WINDOW_FAILURE_RATE_INSTALLATIONS,
+  WINDOW_FAILURE_RATE_V1_0_0_IMPLEMENTATION_DIGEST,
+  WINDOW_FAILURE_RATE_V1_1_0_IMPLEMENTATION_DIGEST,
+} from '../src/profiles/scenarios/window-failure-rate-v1.js';
 import { createTargetIdentityTestPorts } from './helpers/target-identity-test-ports.js';
 
 const capturedAt = '2026-10-11T10:00:00.000Z';
-const installedScenarios = [WINDOW_FAILURE_RATE_INSTALLATION];
+const installedScenarios = [...WINDOW_FAILURE_RATE_INSTALLATIONS];
 const installedAdapters = [{ id: 'prometheus-mcp.v1', kind: 'metrics' as const }];
 
 async function publishedReferenceResolver(references: TargetKnowledgePublication['references']) {
   const scope: KnowledgeScope = {
     targetId: 'market-a-sim', projectId: 'market-a', deploymentId: 'lab', deploymentGeneration: 1,
     targetFingerprint: 'market-a-lab-dataset-a', profileId: 'market-a.lab.settlement', profileRevision: 'profile/v1',
-    scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.0.0', serviceIds: ['checkout'],
+    scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.1.0', serviceIds: ['checkout'],
     faultTypes: ['window_failure_rate.v1'], environment: 'simulation', dataClass: 'simulated', datasetId: 'dataset-a-v1',
   };
   return createStaticTargetResolver({ ...createTargetIdentityTestPorts(),
@@ -32,6 +37,35 @@ async function publishedReferenceResolver(references: TargetKnowledgePublication
 }
 
 describe('StaticTargetResolver', () => {
+  it('resolves the 1.1.0 boundary mapping with only host-owned selectors', async () => {
+    const resolver = await createStaticTargetResolver({
+      ...createTargetIdentityTestPorts(),
+      catalog: multiProjectTargetCatalog,
+      connections: multiProjectConnectionRegistry,
+      profileResolver: new StaticProfileResolver(multiProjectProfiles),
+      installedScenarios,
+      installedAdapters,
+      validationTime: capturedAt,
+    });
+
+    const snapshot = await resolver.resolve({ targetId: 'market-a-sim', capturedAt,
+      signal: new AbortController().signal });
+
+    expect(snapshot.scenario).toMatchObject({
+      version: '1.1.0',
+      metricMapping: {
+        serviceSelector: { label: 'service', value: 'checkout' },
+        staticLabels: {},
+        windowBoundaryMapping: {
+          startMetricName: 'market_checkout_window_start_timestamp_seconds',
+          endMetricName: 'market_checkout_window_end_timestamp_seconds',
+          timestampUnit: 'unix_seconds',
+        },
+      },
+    });
+    expect(snapshot.scenarioImplementationDigest).toBe(WINDOW_FAILURE_RATE_V1_1_0_IMPLEMENTATION_DIGEST);
+  });
+
   it('rejects a mutable Profile port that changes rules without republishing its resolver', async () => {
     const ports = createTargetIdentityTestPorts();
     const profiles = new StaticProfileResolver(multiProjectProfiles);
@@ -193,7 +227,7 @@ describe('StaticTargetResolver', () => {
     const scope: KnowledgeScope = {
       targetId: 'market-a-sim', projectId: 'market-a', deploymentId: 'lab', deploymentGeneration: 1,
       targetFingerprint: 'market-a-lab-dataset-a', profileId: 'market-a.lab.settlement', profileRevision: 'profile/v1',
-      scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.0.0', serviceIds: ['checkout'],
+      scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.1.0', serviceIds: ['checkout'],
       faultTypes: ['window_failure_rate.v1'], environment: 'simulation', dataClass: 'simulated', datasetId: 'dataset-a-v1',
     };
     const reference = { id: 'unavailable-knowledge', version: '1', digest: 'a'.repeat(64), approval: 'approved' as const };
@@ -229,7 +263,7 @@ describe('StaticTargetResolver', () => {
       knowledgePublications: { inspectBinding: async () => ({ scopeKey: mismatch === 'scope' ? 'b'.repeat(64) : checkpointChecksum({
         targetId: 'market-a-sim', projectId: 'market-a', deploymentId: 'lab', deploymentGeneration: 1,
         targetFingerprint: 'market-a-lab-dataset-a', profileId: 'market-a.lab.settlement', profileRevision: 'profile/v1',
-        scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.0.0', serviceIds: ['checkout'],
+        scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.1.0', serviceIds: ['checkout'],
         faultTypes: ['window_failure_rate.v1'], environment: 'simulation', dataClass: 'simulated', datasetId: 'dataset-a-v1',
       }), publication: { targetId: mismatch === 'target' ? 'market-b-sim' : 'market-a-sim', publicationVersion: 1,
         references: [], policy: { schemaVersion: 1, targetId: 'market-a-sim', policyVersion: 'policy/v1',
@@ -260,7 +294,7 @@ describe('StaticTargetResolver', () => {
     const scope: KnowledgeScope = {
       targetId: 'market-a-sim', projectId: 'market-a', deploymentId: 'lab', deploymentGeneration: 1,
       targetFingerprint: 'market-a-lab-dataset-a', profileId: 'market-a.lab.settlement', profileRevision: 'profile/v1',
-      scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.0.0', serviceIds: ['checkout'],
+      scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.1.0', serviceIds: ['checkout'],
       faultTypes: ['window_failure_rate.v1'], environment: 'simulation', dataClass: 'simulated', datasetId: 'dataset-a-v1',
     };
     const reference = { id: 'settlement-runbook', version: '1', digest: 'a'.repeat(64), approval: 'approved' as const };
@@ -294,7 +328,7 @@ describe('StaticTargetResolver', () => {
     const scope: KnowledgeScope = {
       targetId: 'market-a-sim', projectId: 'market-a', deploymentId: 'lab', deploymentGeneration: 1,
       targetFingerprint: 'market-a-lab-dataset-a', profileId: 'market-a.lab.settlement', profileRevision: 'profile/v1',
-      scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.0.0', serviceIds: ['checkout'],
+      scenarioId: 'window_failure_rate.v1', scenarioVersion: '1.1.0', serviceIds: ['checkout'],
       faultTypes: ['window_failure_rate.v1'], environment: 'simulation', dataClass: 'simulated', datasetId: 'dataset-a-v1',
     };
     const reference = { id: 'settlement-runbook', version: '1', digest: 'a'.repeat(64), approval: 'approved' as const };
@@ -567,7 +601,7 @@ function sampleTarget(input: { targetId: string; projectId: string; projectName:
     description: 'Generated target for capacity acceptance.',
     enabled: true,
     scenario: { id: 'window_failure_rate.v1', version: '1.0.0',
-      implementationDigest: WINDOW_FAILURE_RATE_INSTALLATION.implementationDigest, serviceId: 'checkout', serviceName: 'Checkout',
+      implementationDigest: WINDOW_FAILURE_RATE_V1_0_0_IMPLEMENTATION_DIGEST, serviceId: 'checkout', serviceName: 'Checkout',
       metricSemantics: 'integer_window_snapshot', metricMapping: { metricName: input.metricName,
         outcomeLabel: 'outcome', successValue: 'success', failureValue: 'failed',
         serviceSelector: { label: 'service', value: 'checkout' }, staticLabels: {} },

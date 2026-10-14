@@ -16,6 +16,12 @@ const labelName = z.string().min(1).max(128)
   .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/u);
 const boundedText = (max: number) => z.string().min(1).max(max).refine(value => value.trim().length > 0);
 
+const windowBoundaryMapping = z.object({
+  startMetricName: metricName,
+  endMetricName: metricName,
+  timestampUnit: z.literal('unix_seconds'),
+}).strict();
+
 const metricMapping = z.object({
   metricName,
   outcomeLabel: labelName,
@@ -23,6 +29,7 @@ const metricMapping = z.object({
   failureValue: boundedText(128),
   serviceSelector: z.object({ label: labelName, value: boundedText(128) }).strict(),
   staticLabels: z.record(labelName, boundedText(128)).refine(value => Object.keys(value).length <= 32),
+  windowBoundaryMapping: windowBoundaryMapping.optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.successValue === value.failureValue) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['failureValue'], message: 'Outcome values must differ.' });
@@ -35,6 +42,12 @@ const metricMapping = z.object({
   }
   if (value.serviceSelector.label === value.outcomeLabel) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['serviceSelector'], message: 'Service and outcome labels must differ.' });
+  }
+  const boundary = value.windowBoundaryMapping;
+  if (boundary !== undefined && (boundary.startMetricName === boundary.endMetricName
+    || boundary.startMetricName === value.metricName || boundary.endMetricName === value.metricName)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['windowBoundaryMapping'],
+      message: 'Window boundary metrics must be distinct from each other and the count metric.' });
   }
 });
 
@@ -68,7 +81,17 @@ const scenario = z.object({
   metricMapping,
   threshold: z.number().finite().min(0).max(1),
   minSamples: z.number().int().positive().safe(),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  const boundary = value.metricMapping.windowBoundaryMapping;
+  if (value.version === '1.0.0' && boundary !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['metricMapping', 'windowBoundaryMapping'],
+      message: 'Scenario 1.0.0 does not define window boundary metrics.' });
+  }
+  if (value.version === '1.1.0' && boundary === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['metricMapping', 'windowBoundaryMapping'],
+      message: 'Scenario 1.1.0 requires window boundary metrics.' });
+  }
+});
 
 const commonTarget = z.object({
   targetId: identifier,

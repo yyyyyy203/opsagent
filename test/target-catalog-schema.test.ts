@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseTargetCatalog } from '../src/profiles/target-catalog-schema.js';
-import { WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST } from '../src/profiles/scenarios/window-failure-rate-v1.js';
+import { WINDOW_FAILURE_RATE_V1_0_0_IMPLEMENTATION_DIGEST } from '../src/profiles/scenarios/window-failure-rate-v1.js';
 
 function target(overrides: Record<string, unknown> = {}) {
   return {
@@ -21,7 +21,7 @@ function target(overrides: Record<string, unknown> = {}) {
     scenario: {
       id: 'window_failure_rate.v1',
       version: '1.0.0',
-      implementationDigest: WINDOW_FAILURE_RATE_IMPLEMENTATION_DIGEST,
+      implementationDigest: WINDOW_FAILURE_RATE_V1_0_0_IMPLEMENTATION_DIGEST,
       serviceId: 'checkout',
       serviceName: 'Checkout',
       metricSemantics: 'integer_window_snapshot',
@@ -54,6 +54,90 @@ function catalog(targets: readonly unknown[]) {
 }
 
 describe('parseTargetCatalog', () => {
+  it('preserves the exact 1.0.0 catalog binding shape', () => {
+    const parsed = parseTargetCatalog(catalog([target()]));
+
+    expect(parsed.targets[0]?.scenario.version).toBe('1.0.0');
+    expect(parsed.targets[0]?.scenario.metricMapping).toEqual({
+      metricName: 'market_checkout_window_requests',
+      outcomeLabel: 'outcome',
+      successValue: 'success',
+      failureValue: 'failed',
+      serviceSelector: { label: 'service', value: 'checkout' },
+      staticLabels: {},
+    });
+    expect(parsed.targets[0]?.scenario.implementationDigest)
+      .toBe(WINDOW_FAILURE_RATE_V1_0_0_IMPLEMENTATION_DIGEST);
+  });
+
+  it('accepts 1.1.0 only with explicit valid boundary metrics and fixed Unix-seconds units', () => {
+    const parsed = parseTargetCatalog(catalog([targetV1_1()]));
+
+    expect(parsed.rejected).toEqual([]);
+    expect(parsed.targets[0]?.scenario.metricMapping).toMatchObject({
+      metricName: 'market_checkout_window_requests',
+      serviceSelector: { label: 'service', value: 'checkout' },
+      staticLabels: {},
+      windowBoundaryMapping: {
+        startMetricName: 'market_checkout_window_start_timestamp_seconds',
+        endMetricName: 'market_checkout_window_end_timestamp_seconds',
+        timestampUnit: 'unix_seconds',
+      },
+    });
+  });
+
+  it.each([
+    ['invalid metric name', {
+      startMetricName: 'market checkout start',
+      endMetricName: 'market_checkout_window_end_timestamp_seconds',
+      timestampUnit: 'unix_seconds',
+    }],
+    ['same boundary metric', {
+      startMetricName: 'market_checkout_window_boundary_timestamp_seconds',
+      endMetricName: 'market_checkout_window_boundary_timestamp_seconds',
+      timestampUnit: 'unix_seconds',
+    }],
+    ['count metric reused as a boundary', {
+      startMetricName: 'market_checkout_window_requests',
+      endMetricName: 'market_checkout_window_end_timestamp_seconds',
+      timestampUnit: 'unix_seconds',
+    }],
+    ['non-Unix timestamp unit', {
+      startMetricName: 'market_checkout_window_start_timestamp_seconds',
+      endMetricName: 'market_checkout_window_end_timestamp_seconds',
+      timestampUnit: 'milliseconds',
+    }],
+  ])('fails closed for %s in a 1.1.0 boundary mapping', (_caseName, mapping) => {
+    const parsed = parseTargetCatalog(catalog([targetV1_1(mapping)]));
+
+    expect(parsed.targets).toEqual([]);
+    expect(parsed.rejected).toEqual([{ index: 0, targetId: 'market-a-sim', reasonCode: 'TARGET_BINDING_INVALID' }]);
+  });
+
+  it('fails closed when a 1.1.0 binding omits its boundary mapping', () => {
+    const incomplete = targetV1_1();
+    const scenario = incomplete.scenario as unknown as Record<string, unknown>;
+    const metricMapping = scenario.metricMapping as Record<string, unknown>;
+    delete metricMapping.windowBoundaryMapping;
+    const parsed = parseTargetCatalog(catalog([incomplete]));
+
+    expect(parsed.targets).toEqual([]);
+    expect(parsed.rejected).toEqual([{ index: 0, targetId: 'market-a-sim', reasonCode: 'TARGET_BINDING_INVALID' }]);
+  });
+
+  it('rejects a boundary mapping on the legacy 1.0.0 binding', () => {
+    const scenario = target().scenario as unknown as Record<string, unknown>;
+    const metricMapping = scenario.metricMapping as Record<string, unknown>;
+    const legacyWithBoundary = target({ scenario: {
+      ...scenario,
+      metricMapping: { ...metricMapping, windowBoundaryMapping: validBoundaryMapping() },
+    } });
+    const parsed = parseTargetCatalog(catalog([legacyWithBoundary]));
+
+    expect(parsed.targets).toEqual([]);
+    expect(parsed.rejected[0]?.reasonCode).toBe('TARGET_BINDING_INVALID');
+  });
+
   it('accepts two strict, distinct project targets for the same installed scenario', () => {
     const marketB = target({
       targetId: 'market-b-sim',
@@ -144,4 +228,22 @@ function captureError(action: () => unknown): unknown {
     return error;
   }
   return undefined;
+}
+
+function validBoundaryMapping() {
+  return {
+    startMetricName: 'market_checkout_window_start_timestamp_seconds',
+    endMetricName: 'market_checkout_window_end_timestamp_seconds',
+    timestampUnit: 'unix_seconds',
+  };
+}
+
+function targetV1_1(mapping: unknown = validBoundaryMapping()) {
+  const scenario = target().scenario as unknown as Record<string, unknown>;
+  const metricMapping = scenario.metricMapping as Record<string, unknown>;
+  return target({ scenario: {
+    ...scenario,
+    version: '1.1.0',
+    metricMapping: { ...metricMapping, windowBoundaryMapping: mapping },
+  } });
 }

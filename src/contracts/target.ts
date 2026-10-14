@@ -36,6 +36,14 @@ export interface TargetMetricMapping {
   failureValue: string;
   serviceSelector: { label: string; value: string };
   staticLabels: Readonly<Record<string, string>>;
+  /** Required by scenario 1.1.0; the same trusted selectors apply to both boundary metrics. */
+  windowBoundaryMapping?: TargetWindowBoundaryMapping;
+}
+
+export interface TargetWindowBoundaryMapping {
+  startMetricName: string;
+  endMetricName: string;
+  timestampUnit: 'unix_seconds';
 }
 
 export interface TargetScenarioBinding {
