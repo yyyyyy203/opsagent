@@ -41,12 +41,10 @@ describe('versioned Target snapshots', () => {
 
     expect({
       implementation: WINDOW_FAILURE_RATE_V1_0_0_IMPLEMENTATION_DIGEST,
-      implementationV1_1: WINDOW_FAILURE_RATE_V1_1_0_IMPLEMENTATION_DIGEST,
       snapshotV1: legacy.digest,
       snapshotV2: snapshot.digest,
     }).toEqual({
       implementation: 'sha256:v1:597ce39d12e68048fdce6b4180194d11785b35e3d288f0ae56aadf3a0dc8670f',
-      implementationV1_1: 'sha256:v1:4443ba59139f2bd42bcb9e2f3907bc2bd674af2a5103ffad2f26a510e77379e6',
       snapshotV1: 'sha256:v1:2af0af6d57adcbefa19ef224b37fb32db71193210dc313e0906cdbef0774dbd4',
       snapshotV2: 'sha256:v2:29939b0076d7ddcd4e5b91ca55e32a83b3e01b705e3a3efd6cf892c9695670a4',
     });
@@ -77,7 +75,7 @@ describe('versioned Target snapshots', () => {
         timestampUnit: 'unix_seconds',
       },
     };
-    candidate.scenarioImplementationDigest = `sha256:v1:${'b'.repeat(64)}`;
+    candidate.scenarioImplementationDigest = WINDOW_FAILURE_RATE_V1_1_0_IMPLEMENTATION_DIGEST;
     const { digest: _digest, ...unsigned } = candidate;
     void _digest;
     const snapshot = {
