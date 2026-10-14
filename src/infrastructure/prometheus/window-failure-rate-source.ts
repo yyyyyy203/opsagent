@@ -11,6 +11,19 @@ export interface WindowPrometheusQueryPort {
 }
 export interface WindowFreshnessPolicy {
   authorize(window: Readonly<HostAuthorizedRequestedWindowV1>, nowUnixSeconds: number): 'authorized' | 'stale' | 'denied';
+  /** Bound to the acquired Target by the host; age and cross-query coherence limits are host policy. */
+  authorizeObservations(input: Readonly<{
+    requestedWindow: Readonly<HostAuthorizedRequestedWindowV1>;
+    observations: readonly WindowPrometheusObservation[];
+    nowUnixSeconds: number;
+  }>): 'authorized' | 'stale' | 'denied';
+}
+export interface WindowPrometheusObservation {
+  readonly role: 'start_boundary' | 'end_boundary' | 'success_count' | 'failure_count';
+  readonly metricName: string;
+  readonly outcomeValue?: string;
+  readonly evaluationUnixSeconds: number;
+  readonly sampleUnixSeconds: number;
 }
 export interface PrometheusWindowFailureRateOptions {
   scenario: TargetScenarioBinding;
@@ -25,6 +38,7 @@ export interface WindowQueryCapture {
   query: string;
   evaluationUnixSeconds: number;
   payload: unknown;
+  observation?: WindowPrometheusObservation;
 }
 export interface WindowFailureRateCollection {
   fact: WindowCountSnapshotV1;
@@ -34,7 +48,8 @@ export interface WindowFailureRateCollection {
 export type WindowSourceErrorCode = 'WINDOW_AUTHORITY_REQUIRED' | 'WINDOW_NOT_AUTHORIZED' | 'STALE_WINDOW'
   | 'INVALID_REQUESTED_WINDOW' | 'INVALID_MAPPING' | 'INVALID_LIMITS' | 'INVALID_RESPONSE'
   | 'SCOPE_MISMATCH' | 'AMBIGUOUS_SERIES' | 'MISSING_SERIES' | 'RESPONSE_TOO_LARGE'
-  | 'QUERY_TIMEOUT' | 'ABORTED' | 'QUERY_FAILED' | 'HTTP_ERROR';
+  | 'QUERY_TIMEOUT' | 'ABORTED' | 'QUERY_FAILED' | 'HTTP_ERROR'
+  | 'STALE_OBSERVATION' | 'OBSERVATIONS_NOT_AUTHORIZED';
 
 export class WindowSourceError extends Error {
   constructor(readonly code: WindowSourceErrorCode) { super(code); this.name = 'WindowSourceError'; }
@@ -49,7 +64,7 @@ const envelope = z.object({
     metric: z.record(z.string()), value: z.tuple([z.number().finite(), z.string()]),
   })) }),
 });
-type QuerySpec = Readonly<{ query: string; metricName: string; outcome?: string }>;
+type QuerySpec = Readonly<{ query: string; metricName: string; role: WindowPrometheusObservation['role']; outcome?: string }>;
 
 /** Infrastructure only: no ToolResponse, public events, persistence, or private connection arguments. */
 export class PrometheusWindowFailureRateSource {
@@ -57,7 +72,8 @@ export class PrometheusWindowFailureRateSource {
   private readonly queries: readonly QuerySpec[];
 
   constructor(options: PrometheusWindowFailureRateOptions) {
-    if (typeof options.nowUnixSeconds !== 'function' || typeof options.windowPolicy?.authorize !== 'function') {
+    if (typeof options.nowUnixSeconds !== 'function' || typeof options.windowPolicy?.authorize !== 'function'
+      || typeof options.windowPolicy.authorizeObservations !== 'function') {
       throw new WindowSourceError('WINDOW_AUTHORITY_REQUIRED');
     }
     if (!Number.isSafeInteger(options.maxResponseBytes) || options.maxResponseBytes <= 0
@@ -74,9 +90,10 @@ export class PrometheusWindowFailureRateSource {
       .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([label, value]) => ({ label, value }))];
     const base = selectors.map(({ label, value }) => `${label}=${JSON.stringify(value)}`).join(',');
     this.queries = Object.freeze([
-      { metricName: boundary.startMetricName, query: `${boundary.startMetricName}{${base}}` },
-      { metricName: boundary.endMetricName, query: `${boundary.endMetricName}{${base}}` },
-      ...[mapping.successValue, mapping.failureValue].map(outcome => ({ metricName: mapping.metricName, outcome,
+      { role: 'start_boundary', metricName: boundary.startMetricName, query: `${boundary.startMetricName}{${base}}` },
+      { role: 'end_boundary', metricName: boundary.endMetricName, query: `${boundary.endMetricName}{${base}}` },
+      ...[mapping.successValue, mapping.failureValue].map((outcome, index) => ({ metricName: mapping.metricName, outcome,
+        role: index === 0 ? 'success_count' as const : 'failure_count' as const,
         query: `${mapping.metricName}{${base},${mapping.outcomeLabel}=${JSON.stringify(outcome)}}` })),
     ]);
   }
@@ -91,6 +108,7 @@ export class PrometheusWindowFailureRateSource {
     const timer = setTimeout(() => deadline.abort(), this.options.timeoutMs);
     const boundedSignal = AbortSignal.any([signal, deadline.signal]);
     const rawCapture: WindowQueryCapture[] = [];
+    const observations: WindowPrometheusObservation[] = [];
     const samples: (number | undefined)[] = [];
     let exporter: string | undefined;
     try {
@@ -104,6 +122,7 @@ export class PrometheusWindowFailureRateSource {
         const series = parsedEnvelope.data.data.result;
         if (series.length > 1) throw new WindowSourceError('AMBIGUOUS_SERIES');
         const sample = series[0];
+        let observation: WindowPrometheusObservation | undefined;
         if (sample !== undefined) {
           const mapping = this.options.scenario.metricMapping;
           if (sample.metric.__name__ !== spec.metricName
@@ -121,14 +140,22 @@ export class PrometheusWindowFailureRateSource {
           // Reject JavaScript-specific numeric syntaxes and empty strings; Prometheus numbers are decimal.
           if (timestamp > evaluationUnixSeconds || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/u.test(text)
             || !Number.isFinite(Number(text))) throw new WindowSourceError('INVALID_RESPONSE');
+          observation = Object.freeze({ role: spec.role, metricName: spec.metricName,
+            ...(spec.outcome === undefined ? {} : { outcomeValue: spec.outcome }),
+            evaluationUnixSeconds, sampleUnixSeconds: timestamp });
+          observations.push(observation);
           samples.push(Number(text));
         } else {
           samples.push(undefined);
         }
         // Captures are private and only retained after scope/shape validation.
-        rawCapture.push(Object.freeze({ query: spec.query, evaluationUnixSeconds, payload }));
+        rawCapture.push(Object.freeze({ query: spec.query, evaluationUnixSeconds, payload,
+          ...(observation === undefined ? {} : { observation }) }));
       }
-      this.authorize(requestedWindow);
+      const nowUnixSeconds = this.authorize(requestedWindow);
+      // Instant selectors may legitimately use older samples. The host authorizes age/coherence,
+      // without exposing raw payload or imposing timestamp equality or an adapter-wide skew.
+      this.authorizeObservations(requestedWindow, Object.freeze(observations), nowUnixSeconds);
       checkAbort(boundedSignal);
       const [startUnixSeconds, endUnixSeconds, successCount, failureCount] = samples;
       const missingEvidence: ('start_boundary' | 'end_boundary')[] = [];
@@ -149,6 +176,18 @@ export class PrometheusWindowFailureRateSource {
       if (deadline.signal.aborted) throw new WindowSourceError('QUERY_TIMEOUT');
       throw error;
     } finally { clearTimeout(timer); }
+  }
+
+  private authorizeObservations(requestedWindow: Readonly<HostAuthorizedRequestedWindowV1>,
+    observations: readonly WindowPrometheusObservation[], nowUnixSeconds: number): void {
+    let decision: 'authorized' | 'stale' | 'denied';
+    try {
+      decision = this.options.windowPolicy.authorizeObservations(Object.freeze({ requestedWindow, observations, nowUnixSeconds }));
+    } catch {
+      throw new WindowSourceError('OBSERVATIONS_NOT_AUTHORIZED');
+    }
+    if (decision === 'stale') throw new WindowSourceError('STALE_OBSERVATION');
+    if (decision !== 'authorized') throw new WindowSourceError('OBSERVATIONS_NOT_AUTHORIZED');
   }
 
   private authorize(window: Readonly<HostAuthorizedRequestedWindowV1>): number {
@@ -190,6 +229,7 @@ export class PrometheusWindowFailureRateSource {
         while (true) {
           const chunk = await abortable(reader.read(), signal);
           if (chunk.done) { complete = true; break; }
+          if (chunk.value.byteLength === 0) throw new WindowSourceError('INVALID_RESPONSE');
           bytes += chunk.value.byteLength;
           if (bytes > this.options.maxResponseBytes) throw new WindowSourceError('RESPONSE_TOO_LARGE');
           chunks.push(chunk.value);

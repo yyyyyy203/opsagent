@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { Worker } from 'node:worker_threads';
 import * as prometheus from '../src/infrastructure/prometheus/index.js';
 import { multiProjectTargetCatalog } from '../src/profiles/target-samples.js';
 import { parseTargetCatalog } from '../src/profiles/target-catalog-schema.js';
+import type { WindowFreshnessPolicy } from '../src/infrastructure/prometheus/window-failure-rate-source.js';
 
 const window = { timestampUnit: 'unix_seconds' as const, startUnixSeconds: 10_000, endUnixSeconds: 10_601 };
 const scenario = parseTargetCatalog(multiProjectTargetCatalog).targets[0]!.scenario;
@@ -20,11 +22,31 @@ function body(raw: unknown): ReadableStream<Uint8Array> {
   } });
 }
 type Options = ConstructorParameters<typeof prometheus.PrometheusWindowFailureRateSource>[0];
+// Explicit test-host policy; these limits are not adapter defaults.
+function hostPolicy(maxAgeSeconds: number, maxSpreadSeconds: number): WindowFreshnessPolicy {
+  return {
+    authorize: () => 'authorized',
+    authorizeObservations: ({ observations, nowUnixSeconds }) => {
+      if (observations.some(observation => observation.sampleUnixSeconds > nowUnixSeconds)) return 'denied';
+      if (observations.some(observation => nowUnixSeconds - observation.sampleUnixSeconds > maxAgeSeconds)) return 'stale';
+      const times = observations.map(observation => observation.sampleUnixSeconds);
+      if (times.length && Math.max(...times) - Math.min(...times) > maxSpreadSeconds) return 'denied';
+      return 'authorized';
+    },
+  };
+}
+const defaultHostPolicy = hostPolicy(10, 2);
+function observationsAt(times: readonly number[]): Record<string, unknown>[] {
+  return times.map((time, index) => ({ status: 'success', data: { resultType: 'vector', result: [{
+    metric: { __name__: names[index], service: 'checkout', instance: 'exporter-a',
+      ...(index >= 2 ? { outcome: index === 2 ? 'success' : 'failed' } : {}) }, value: [time, values[index]],
+  }] } }));
+}
 function setup(overrides: Partial<Options> = {}, raws = names.map((_, i) => payload(i))) {
   const requests: { query: string; evaluationUnixSeconds: number; signal: AbortSignal }[] = [];
   const source = new prometheus.PrometheusWindowFailureRateSource({
     scenario, nowUnixSeconds: () => 10_602,
-    windowPolicy: { authorize: () => 'authorized' }, maxResponseBytes: 4096, timeoutMs: 1000,
+    windowPolicy: defaultHostPolicy, maxResponseBytes: 4096, timeoutMs: 1000,
     queryPort: { async query(request) {
       requests.push(request); return { status: 200, body: body(raws[requests.length - 1]) };
     } }, ...overrides,
@@ -78,7 +100,7 @@ describe('Target-bound Prometheus window source', () => {
     expect(requests.every(r => r.query.includes('environment="sim\\"\\\\\\n"'))).toBe(true);
   });
   it.each(['stale', 'denied'] as const)('rejects host policy decision %s before querying', async decision => {
-    const { source, requests } = setup({ windowPolicy: { authorize: () => decision } });
+    const { source, requests } = setup({ windowPolicy: { ...defaultHostPolicy, authorize: () => decision } });
     await expect(source.collect(window, signal())).rejects.toMatchObject({ code: decision === 'stale' ? 'STALE_WINDOW' : 'WINDOW_NOT_AUTHORIZED' });
     expect(requests).toHaveLength(0);
   });
@@ -87,7 +109,7 @@ describe('Target-bound Prometheus window source', () => {
   });
   it('uses the injected clock and immutable request for policy authorization', async () => {
     const seen: number[] = [];
-    const { source } = setup({ windowPolicy: { authorize: (requested, now) => {
+    const { source } = setup({ windowPolicy: { ...defaultHostPolicy, authorize: (requested, now) => {
       expect(Object.isFrozen(requested)).toBe(true); expect(requested).toEqual(window); seen.push(now); return 'authorized';
     } } });
     await source.collect(window, signal()); expect(seen.every(now => now === 10_602)).toBe(true);
@@ -95,7 +117,7 @@ describe('Target-bound Prometheus window source', () => {
   });
   it('rechecks freshness before returning evidence', async () => {
     let checks = 0;
-    const { source } = setup({ windowPolicy: { authorize: () => ++checks === 1 ? 'authorized' : 'stale' } });
+    const { source } = setup({ windowPolicy: { ...defaultHostPolicy, authorize: () => ++checks === 1 ? 'authorized' : 'stale' } });
     await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'STALE_WINDOW' });
   });
   it.each([
@@ -165,6 +187,76 @@ describe('Target-bound Prometheus window source', () => {
     await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'RESPONSE_TOO_LARGE' });
     expect(cancelled).toBe(true);
   });
+  it('terminates an endless microtask-ready empty stream before timeout and cancels its reader', async () => {
+    // Isolate the genuine endless stream: the unfixed reader starves timers in its own worker.
+    // The parent watchdog can still terminate it and report an assertion failure for RED.
+    const worker = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { registerHooks } = require('node:module');
+      const { readFileSync } = require('node:fs');
+      const ts = require('typescript');
+      // Test-only, in-memory source loader. Keep hooks local to this worker and source root.
+      // This handles the source's .js specifiers and parameter properties without dist.
+      registerHooks({
+        resolve(specifier, context, nextResolve) {
+          if (context.parentURL?.startsWith(workerData.sourceRootUrl)
+            && specifier.startsWith('.') && specifier.endsWith('.js')) {
+            return nextResolve(specifier.slice(0, -3) + '.ts', context);
+          }
+          return nextResolve(specifier, context);
+        },
+        load(url, context, nextLoad) {
+          if (url.startsWith(workerData.sourceRootUrl) && url.endsWith('.ts')) {
+            const source = ts.transpileModule(readFileSync(new URL(url), 'utf8'), {
+              fileName: new URL(url).pathname,
+              compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
+            }).outputText;
+            return { format: 'module', source, shortCircuit: true };
+          }
+          return nextLoad(url, context);
+        }
+      });
+      (async () => {
+        const { PrometheusWindowFailureRateSource } = await import(workerData.moduleUrl);
+        let cancelled = false, pulls = 0, requestSignal;
+        const source = new PrometheusWindowFailureRateSource({
+          scenario: workerData.scenario, nowUnixSeconds: () => 10602,
+          windowPolicy: { authorize: () => 'authorized', authorizeObservations: () => 'authorized' },
+          maxResponseBytes: 4096, timeoutMs: 10000,
+          queryPort: { async query(request) {
+            requestSignal = request.signal;
+            return { status: 200, body: new ReadableStream({
+              pull(controller) { pulls++; controller.enqueue(new Uint8Array(0)); },
+              cancel() { cancelled = true; }
+            }) };
+          } }
+        });
+        parentPort.postMessage({ ready: true });
+        try { await source.collect(workerData.window, new AbortController().signal); parentPort.postMessage({ complete: true }); }
+        catch (error) { parentPort.postMessage({ code: error.code, message: error.message, cancelled, pulls, aborted: requestSignal.aborted }); }
+      })().catch(error => parentPort.postMessage({ unexpected: String(error) }));
+    `, { eval: true, execArgv: [], workerData: {
+      moduleUrl: new URL('../src/infrastructure/prometheus/window-failure-rate-source.ts', import.meta.url).href,
+      sourceRootUrl: new URL('../src/', import.meta.url).href,
+      scenario, window,
+    } });
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await new Promise<unknown>((resolve, reject) => {
+        worker.on('message', (message: unknown) => {
+          if (typeof message === 'object' && message !== null && 'ready' in message) {
+            clearTimeout(watchdog); watchdog = setTimeout(() => resolve({ watchdog: true }), 1500);
+          } else { resolve(message); }
+        });
+        worker.once('error', reject);
+        watchdog = setTimeout(() => resolve({ startupWatchdog: true }), 5000);
+      });
+      expect(result).toMatchObject({ code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE', cancelled: true, aborted: false });
+      expect((result as { pulls: number }).pulls).toBeLessThanOrEqual(2);
+    } finally {
+      clearTimeout(watchdog); await worker.terminate();
+    }
+  });
   it('enforces timeout even when the query port ignores cancellation', async () => {
     const { source } = setup({ timeoutMs: 10, queryPort: { query: () => new Promise(() => {}) } });
     await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'QUERY_TIMEOUT' });
@@ -218,7 +310,7 @@ describe('Target-bound Prometheus window source', () => {
     expect(requests).toHaveLength(0);
   });
   it('fails closed on policy exceptions without exposing their detail', async () => {
-    const { source, requests } = setup({ windowPolicy: { authorize() { throw new Error('private policy'); } } });
+    const { source, requests } = setup({ windowPolicy: { ...defaultHostPolicy, authorize() { throw new Error('private policy'); } } });
     await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'WINDOW_NOT_AUTHORIZED', message: 'WINDOW_NOT_AUTHORIZED' });
     expect(requests).toHaveLength(0);
   });
@@ -233,5 +325,61 @@ describe('Target-bound Prometheus window source', () => {
   it('routes sample insufficiency through the reviewed analyzer', async () => {
     const { source } = setup({ scenario: { ...scenario, minSamples: 101 } });
     expect((await source.collect(window, signal())).assessment).toEqual({ status: 'insufficient_samples', sampleCount: 100, minimumSamples: 101 });
+  });
+  it('requires observation authorization even when window authorization exists', () => {
+    expect(() => setup({ windowPolicy: { authorize: defaultHostPolicy.authorize } as WindowFreshnessPolicy }))
+      .toThrow('WINDOW_AUTHORITY_REQUIRED');
+  });
+  it('preserves earlier fresh sample observations and passes immutable roles/times to the host', async () => {
+    let authorized = false;
+    const { source } = setup({ windowPolicy: { ...defaultHostPolicy, authorizeObservations: input => {
+      expect(input.requestedWindow).toEqual(window); expect(input.nowUnixSeconds).toBe(10_602);
+      expect(Object.isFrozen(input.observations)).toBe(true);
+      expect(input.observations.every(Object.isFrozen)).toBe(true);
+      expect(input.observations).toEqual([
+        { role: 'start_boundary', metricName: names[0], evaluationUnixSeconds: 10_602, sampleUnixSeconds: 10_600 },
+        { role: 'end_boundary', metricName: names[1], evaluationUnixSeconds: 10_602, sampleUnixSeconds: 10_600 },
+        { role: 'success_count', metricName: names[2], outcomeValue: 'success', evaluationUnixSeconds: 10_602, sampleUnixSeconds: 10_600 },
+        { role: 'failure_count', metricName: names[3], outcomeValue: 'failed', evaluationUnixSeconds: 10_602, sampleUnixSeconds: 10_600 },
+      ]);
+      authorized = true; return defaultHostPolicy.authorizeObservations(input);
+    } } }, observationsAt([10_600, 10_600, 10_600, 10_600]));
+    const result = await source.collect(window, signal());
+    expect(authorized).toBe(true);
+    expect(result.assessment).toMatchObject({ status: 'complete', failureRate: 0.04 });
+    expect(result.rawCapture.map(capture => capture.observation?.sampleUnixSeconds)).toEqual([10_600, 10_600, 10_600, 10_600]);
+    expect(result.fact).not.toHaveProperty('observations');
+  });
+  it('rejects samples older than the explicitly configured host age without producing a fact', async () => {
+    const { source } = setup({ windowPolicy: hostPolicy(1, 2) }, observationsAt([10_600, 10_600, 10_600, 10_600]));
+    await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'STALE_OBSERVATION' });
+  });
+  it('rejects mixed query sample times under the explicit host coherence limit', async () => {
+    const { source } = setup({ windowPolicy: hostPolicy(10, 1) }, observationsAt([10_598, 10_600, 10_601, 10_601]));
+    await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'OBSERVATIONS_NOT_AUTHORIZED' });
+  });
+  it('allows mixed query sample times when the host explicitly authorizes that spread', async () => {
+    const { source } = setup({ windowPolicy: hostPolicy(10, 3) }, observationsAt([10_598, 10_600, 10_601, 10_601]));
+    expect((await source.collect(window, signal())).assessment.status).toBe('complete');
+  });
+  it('rejects a future observation without producing a complete fact', async () => {
+    const { source } = setup({}, observationsAt([10_603, 10_602, 10_602, 10_602]));
+    await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+  it.each(['denied', 'stale', undefined] as const)('fails closed on observation policy decision %s', async decision => {
+    const policy = { ...defaultHostPolicy, authorizeObservations: () => decision } as WindowFreshnessPolicy;
+    await expect(setup({ windowPolicy: policy }).source.collect(window, signal())).rejects.toMatchObject({
+      code: decision === 'stale' ? 'STALE_OBSERVATION' : 'OBSERVATIONS_NOT_AUTHORIZED',
+    });
+  });
+  it('sanitizes observation policy exceptions', async () => {
+    const { source } = setup({ windowPolicy: { ...defaultHostPolicy, authorizeObservations() { throw new Error('private policy'); } } });
+    await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'OBSERVATIONS_NOT_AUTHORIZED', message: 'OBSERVATIONS_NOT_AUTHORIZED' });
+  });
+  it('passes the final injected clock to observation freshness authorization', async () => {
+    let clockReads = 0;
+    const { source } = setup({ nowUnixSeconds: () => ++clockReads === 1 ? 10_602 : 10_604,
+      windowPolicy: hostPolicy(3, 2) }, observationsAt([10_600, 10_600, 10_600, 10_600]));
+    await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'STALE_OBSERVATION' });
   });
 });
