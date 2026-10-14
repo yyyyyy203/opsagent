@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMessage, ChatModel, ModelResponse, ModelStreamEvent } from '../src/contracts/index.js';
-import { startAgentWebRuntime } from '../src/bootstrap/agent-web-runtime.js';
+import { startAgentWebRuntime, type AgentWebRuntimeOptions, type TargetRecoveryFactoryPorts,
+  type TargetResolverFactoryPorts } from '../src/bootstrap/agent-web-runtime.js';
+import type { TargetOperationRequest } from '../src/contracts/target.js';
 import { stableSourceChildRunId } from '../src/bootstrap/source-subagent-identity.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
@@ -164,6 +166,58 @@ describe('local Agent web runtime', () => {
       expect(await response.json()).toMatchObject({ error: 'TARGET_RUN_UNAVAILABLE' });
     } finally {
       await runtime.close();
+    }
+  });
+
+  it('owns one source-partition registry per Host Runtime and shares it with Target factories', async () => {
+    const runtimeRoots = await Promise.all([1, 2].map(async () => {
+      const root = await mkdtemp(join(tmpdir(), 'opsangent-web-source-partitions-'));
+      roots.push(root);
+      return root;
+    }));
+    const registriesByRuntime: unknown[][] = [[], []];
+    const createOptions = (root: string, registryIndex: number): AgentWebRuntimeOptions => ({
+      dataDirectory: root,
+      workspaceRoots: [root],
+      model: new ScriptedModel([]),
+      port: 0,
+      targetRuntime: {
+        createResolver: (ports: TargetResolverFactoryPorts) => createStaticTargetResolver({
+          ...ports,
+          catalog: multiProjectTargetCatalog,
+          connections: multiProjectConnectionRegistry,
+          profileResolver: new StaticProfileResolver(multiProjectProfiles),
+          installedScenarios: [WINDOW_FAILURE_RATE_INSTALLATION],
+          installedAdapters: [{ id: 'prometheus-mcp.v1', kind: 'metrics' }],
+          validationTime: '2026-10-11T10:00:00.000Z',
+        }),
+        createOperationPolicy: (ports: TargetRecoveryFactoryPorts) => {
+          registriesByRuntime[registryIndex]!.push(ports.sourcePartitions);
+          return {
+            authorize: async (request: TargetOperationRequest) => ({ bindingId: request.binding.bindingId, runId: request.runId,
+              rootRunId: request.rootRunId, snapshotDigest: request.snapshot.digest, operation: request.operation,
+              capability: request.capability, policyEpoch: 1, signal: request.signal }),
+            validate: async () => undefined,
+          };
+        },
+        createRuntimeProvider: (ports: TargetRecoveryFactoryPorts) => {
+          registriesByRuntime[registryIndex]!.push(ports.sourcePartitions);
+          return { acquire: async () => ({ model: new ScriptedModel([]), tools: [], release: () => undefined }) };
+        },
+      },
+    });
+    const runtimes = await Promise.all(runtimeRoots.map((root, index) =>
+      startAgentWebRuntime(createOptions(root, index))));
+
+    try {
+      expect(registriesByRuntime[0]).toHaveLength(2);
+      expect(registriesByRuntime[1]).toHaveLength(2);
+      expect(registriesByRuntime[0]![0]).toBeDefined();
+      expect(registriesByRuntime[0]![1]).toBe(registriesByRuntime[0]![0]);
+      expect(registriesByRuntime[1]![1]).toBe(registriesByRuntime[1]![0]);
+      expect(registriesByRuntime[1]![0]).not.toBe(registriesByRuntime[0]![0]);
+    } finally {
+      await Promise.all(runtimes.map(runtime => runtime.close()));
     }
   });
 

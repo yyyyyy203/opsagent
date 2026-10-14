@@ -25,6 +25,8 @@ import { parseDiagnosticMemoryConfig, resolveMemoryControl } from './memory-poli
 import { TargetRecoveryService } from '../application/target-recovery-service.js';
 import type { KnowledgeManagementApi } from '../api/knowledge-memory-routes.js';
 import { createTargetKnowledgeManagementService, type TargetKnowledgeManagementHostOptions } from './diagnostic-memory.js';
+import { SourceCircuitBreaker, ResilientExecutor } from '../mcp/resilience.js';
+import { TargetSourcePartitionRegistry, type TargetSourcePartitionRegistryPort } from '../infrastructure/target-source-partition-registry.js';
 
 const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
   id: 'group-buy-market',
@@ -36,6 +38,11 @@ const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
 const disabledTargetKnowledgeCapabilities: TargetKnowledgeCapabilityPort = {
   getForTarget: () => Promise.resolve({ semanticEnabled: false, proceduralEnabled: false }),
 };
+const DEFAULT_SOURCE_PARTITION_LIMITS = Object.freeze({
+  maxPartitions: 64,
+  maxConcurrentOperationsPerPartition: 8,
+  maxQueuedOperationsPerPartition: 32,
+});
 
 export interface AgentWebProfileConfig {
   id: string;
@@ -83,6 +90,12 @@ export interface AgentWebRuntimeOptions {
     /** Both factories are required before Target execution can be enabled. */
     createOperationPolicy?: (ports: TargetRecoveryFactoryPorts) => TargetOperationPolicy;
     createRuntimeProvider?: (ports: TargetRecoveryFactoryPorts) => TargetRuntimeProvider;
+    /** Host-owned bounds for ephemeral source resilience state; defaults are finite and per Runtime. */
+    sourcePartitionLimits?: {
+      maxPartitions?: number;
+      maxConcurrentOperationsPerPartition?: number;
+      maxQueuedOperationsPerPartition?: number;
+    };
     createStarter?: (ports: TargetRunStarterFactoryPorts) => TargetRunStarter;
   };
   host?: string;
@@ -117,6 +130,8 @@ export interface TargetResolverFactoryPorts {
 export interface TargetRecoveryFactoryPorts extends TargetResolverFactoryPorts {
   resolver: TargetResolver;
   durableState: DurableRunState;
+  /** Ephemeral host-lifetime capability; never persist it or place it in AgentContext/events. */
+  sourcePartitions: TargetSourcePartitionRegistryPort;
 }
 
 export interface AgentWebRuntime {
@@ -214,6 +229,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     }),
   });
 
+  let sourcePartitions: TargetSourcePartitionRegistry | undefined;
   try {
     await runtime.ready;
     if (runtime.durableState === undefined || runtime.queries === undefined) {
@@ -267,8 +283,29 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
         throw new Error('Target execution requires both current-policy and runtime-provider factories.');
       }
       if (hasOperationPolicy && hasRuntimeProvider) {
+        const limits = options.targetRuntime.sourcePartitionLimits;
+        sourcePartitions = new TargetSourcePartitionRegistry({
+          maxPartitions: limits?.maxPartitions ?? DEFAULT_SOURCE_PARTITION_LIMITS.maxPartitions,
+          maxConcurrentOperationsPerPartition: limits?.maxConcurrentOperationsPerPartition
+            ?? DEFAULT_SOURCE_PARTITION_LIMITS.maxConcurrentOperationsPerPartition,
+          maxQueuedOperationsPerPartition: limits?.maxQueuedOperationsPerPartition
+            ?? DEFAULT_SOURCE_PARTITION_LIMITS.maxQueuedOperationsPerPartition,
+          now: () => clock.now().getTime(),
+          scheduleTimeout: (callback, delayMs) => {
+            const timer = setTimeout(callback, delayMs);
+            return () => clearTimeout(timer);
+          },
+          createResilience: now => {
+            const breaker = new SourceCircuitBreaker({ now });
+            const executor = new ResilientExecutor(breaker, { now });
+            return {
+              get state() { return breaker.state; },
+              execute: (operation, executionOptions) => executor.execute(operation, executionOptions),
+            };
+          },
+        });
         const ports: TargetRecoveryFactoryPorts = { identityRegistry, knowledgePolicies, knowledgePublications,
-          knowledgeCapabilities, resolver: targetResolver, durableState: runtime.durableState };
+          knowledgeCapabilities, resolver: targetResolver, durableState: runtime.durableState, sourcePartitions };
         targetRecoveryGate = new TargetRecoveryService({
           bindings: runtime.durableState.targetBindings,
           identityRegistry,
@@ -338,6 +375,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       async close(): Promise<void> {
         if (closed) return;
         closed = true;
+        sourcePartitions?.shutdown();
         try {
           await server.close();
           await execution.close();
@@ -351,6 +389,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       },
     };
   } catch (error) {
+    sourcePartitions?.shutdown();
     try {
       await runtime.close();
     } finally {
