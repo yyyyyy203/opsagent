@@ -38,6 +38,7 @@ import { InMemoryEvidenceStore } from '../src/storage/in-memory-evidence-store.j
 import { createTargetIdentityTestPorts } from './helpers/target-identity-test-ports.js';
 import { SourceCircuitBreaker, SourceFailure, ResilientExecutor } from '../src/mcp/resilience.js';
 import { TargetSourcePartitionRegistry, type TargetSourceExecutionOptions } from '../src/infrastructure/target-source-partition-registry.js';
+import { FetchWindowPrometheusQueryPort } from '../src/infrastructure/prometheus/http-window-query-port.js';
 
 const capturedAt = '2026-10-12T02:00:00.000Z';
 const capturedAtMs = Date.parse(capturedAt);
@@ -129,17 +130,29 @@ describe('multi-Target Metrics M3 integration', () => {
           clock,
         });
         let failFirstRequest = snapshot.targetId === 'market-a-sim';
-        const metricsRuntime = createTargetMetricsSubagentRuntime({
-          snapshot,
-          sourcePartitions: registry,
-          queryPort: { query: async ({ query }) => {
+        const queryPort = new FetchWindowPrometheusQueryPort({
+          url: 'https://prometheus.test/',
+          now: () => currentTime,
+          fetch: async input => {
+            const url = input instanceof URL ? input : typeof input === 'string' ? new URL(input) : new URL(input.url);
+            const query = url.searchParams.get('query');
+            if (query === null) throw new Error('Expected the host-generated Prometheus query.');
             observations.queryCalls.push(query);
             if (failFirstRequest) {
               failFirstRequest = false;
-              return Object.assign(emptyResponse(429), { retryAfterMs: 750 });
+              return new Response('private transport diagnostics must not be read', {
+                status: 429,
+                headers: { 'retry-after': '1' },
+              });
             }
-            return metricsResponse(snapshot, query);
-          } },
+            const response = metricsResponse(snapshot, query);
+            return new Response(response.body, { status: response.status });
+          },
+        });
+        const metricsRuntime = createTargetMetricsSubagentRuntime({
+          snapshot,
+          sourcePartitions: registry,
+          queryPort,
           windowPolicy: { authorize: () => 'authorized', authorizeObservations: () => 'authorized' },
           evidenceRecorder: host.evidenceRecorder,
           childAgentFactory,
@@ -209,7 +222,7 @@ describe('multi-Target Metrics M3 integration', () => {
       expect(childEventsA.filter(event => event.type === 'DATASOURCE_RETRY_SCHEDULED').map(event => ({
         sourceId: event.payload.sourceId,
         delayMs: event.payload.delayMs,
-      }))).toEqual([{ sourceId: 'market-a-metrics', delayMs: 750 }]);
+      }))).toEqual([{ sourceId: 'market-a-metrics', delayMs: 1_000 }]);
       expect(childEventsB.filter(event => event.type === 'DATASOURCE_RETRY_SCHEDULED')).toEqual([]);
       expect(childEventsA.map(event => event.type)).toContain('MODEL_CALL_COMPLETED');
       expect(childEventsA.filter(event => event.type === 'MODEL_CALL_COMPLETED').map(event => event.payload.usage))
