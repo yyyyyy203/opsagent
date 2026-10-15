@@ -426,33 +426,46 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     cleanupInitialization();
     throw error;
   }
-  const model = options.modelRetry === undefined
-    ? options.model
-    : new RetryingChatModel(options.model, {
-      ...options.modelRetry,
-      onFallback: async (info) => {
-        await options.modelRetry?.onFallback?.(info);
-        if (options.modelRetry?.fallback !== undefined) {
-          await publishingV2.publish(eventFactoryV2.create('MODEL_FALLBACK_ACTIVATED', {
-            runId: info.runId,
-            correlationId: `run:${info.runId}`,
-            visibility: 'audit',
-            durability: 'durable',
-            stepId: info.stepId,
-          }, {
-            fromProvider: options.modelProvider ?? 'configured',
-            fromModel: options.modelName ?? 'configured',
-            toProvider: options.modelRetry.fallbackProvider ?? 'fallback',
-            toModel: options.modelRetry.fallbackModel ?? 'fallback',
-            reasonCode: info.reason.details.category as string,
-          })).then(() => undefined);
-        }
-      },
-      observer: options.modelRetry.observer ?? new CompositeModelAttemptObserver([
-        new ObservabilityModelAttemptObserver(observability),
-        new V2ModelAttemptObserver({ factory: eventFactoryV2, publisher: publishingV2, provider: options.modelProvider ?? 'configured', model: options.modelName ?? 'configured', correlationId: (runId) => `run:${runId}`, ids, now: () => clock.now().getTime() }),
-      ]),
+  const decorateModel = (baseModel: ChatModel, identity?: { provider: string; model: string }): ChatModel => {
+    const provider = identity?.provider ?? options.modelProvider ?? 'configured';
+    const modelName = identity?.model ?? options.modelName ?? 'configured';
+    const retryingModel = options.modelRetry === undefined
+      ? baseModel
+      : new RetryingChatModel(baseModel, {
+        ...options.modelRetry,
+        onFallback: async (info) => {
+          await options.modelRetry?.onFallback?.(info);
+          if (options.modelRetry?.fallback !== undefined) {
+            await publishingV2.publish(eventFactoryV2.create('MODEL_FALLBACK_ACTIVATED', {
+              runId: info.runId,
+              correlationId: `run:${info.runId}`,
+              visibility: 'audit',
+              durability: 'durable',
+              stepId: info.stepId,
+            }, {
+              fromProvider: provider,
+              fromModel: modelName,
+              toProvider: options.modelRetry.fallbackProvider ?? 'fallback',
+              toModel: options.modelRetry.fallbackModel ?? 'fallback',
+              reasonCode: info.reason.details.category as string,
+            })).then(() => undefined);
+          }
+        },
+        observer: options.modelRetry.observer ?? new CompositeModelAttemptObserver([
+          new ObservabilityModelAttemptObserver(observability),
+          new V2ModelAttemptObserver({ factory: eventFactoryV2, publisher: publishingV2, provider, model: modelName, correlationId: (runId) => `run:${runId}`, ids, now: () => clock.now().getTime() }),
+        ]),
+      });
+    return new EventedChatModel(new CompactingChatModel(retryingModel, toolResultCompactor), publishingV2, eventFactoryV2, {
+      provider,
+      model: modelName,
+      purpose: 'inspection',
+      correlationId: (runId) => `run:${runId}`,
+      clock,
+      ids,
     });
+  };
+  const model = decorateModel(options.model);
   const toolkit = new Toolkit();
   if (options.includeExternalBash !== false) toolkit.register(createExternalBashTool());
   for (const tool of options.tools ?? []) toolkit.register(tool);
@@ -535,14 +548,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   };
   const defaultCompressor = new RuleBasedContextCompressor(defaultCompressorOptions);
   const agent = new AgentHarness({
-    model: new EventedChatModel(new CompactingChatModel(model, toolResultCompactor), publishingV2, eventFactoryV2, {
-      provider: options.modelProvider ?? 'configured',
-      model: options.modelName ?? 'configured',
-      purpose: 'inspection',
-      correlationId: (runId) => `run:${runId}`,
-      clock,
-      ids,
-    }),
+    model,
     toolkit,
     batchExecutor,
     checkpoints,
@@ -560,6 +566,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ...((memory ?? options.memoryHarness) === undefined ? {} : { memory: memory ?? options.memoryHarness! }),
     ...(durableState === undefined ? {} : { durableState }),
     targetRecoveryGate,
+    targetModelDecorator: decorateModel,
     ...(options.targetSourceScopeId === undefined ? {} : { targetSourceScopeId: options.targetSourceScopeId }),
     hookRegistry,
     v2Events: v2EventDependencies,

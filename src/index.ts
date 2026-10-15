@@ -89,6 +89,7 @@ export * from './tool/adapters/skill-tool-adapter.js';
 export * from './tool/adapters/subagent-tool-adapter.js';
 export * from './tool/adapters/source-subagent-tool-adapter.js';
 export * from './application/source-subagent-runner.js';
+export * from './application/target-metrics-source-report-collector.js';
 export * from './bootstrap/index.js';
 export * from './mcp/index.js';
 export * from './infrastructure/mcp/index.js';

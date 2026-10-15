@@ -102,6 +102,26 @@ describe('source subagent Runner', () => {
     expect(created?.tools.map((tool) => tool.name)).toEqual(['logs.capture', 'source_report']);
   });
 
+  it('fails before creating a child when the inherited network-attempt budget is exhausted', async () => {
+    let created = false;
+    const runner = new DefaultSourceSubagentRunner({
+      source: 'metrics',
+      childAgentFactory: { create: () => { created = true; throw new Error('child must not be created'); } },
+      childTools: { create: () => [
+        { name: 'metrics.query', description: 'query', kind: 'evidence', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+        { name: 'source_report', description: 'report', kind: 'utility', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+      ] },
+      clock: { now: () => new Date('2026-09-14T00:00:00.000Z') },
+    });
+
+    const failure = await drainFailure(runner.run(request(), {
+      ...executionContext(),
+      networkAttemptBudget: { remaining: 0 },
+    }));
+    expect(failure).toMatchObject({ code: 'BUDGET_EXCEEDED', retryable: false });
+    expect(created).toBe(false);
+  });
+
   it('attaches observed evidence to a retryable child failure for reduced-scope fallback', async () => {
     const child: SourceChildAgent = {
       replyStream: async function* (options) {

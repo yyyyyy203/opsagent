@@ -7,7 +7,12 @@ import { assessWindowFailureRateV1, parseWindowCountSnapshotV1,
 /** Host-owned transport returns unread bytes; it must not prebuffer the response. */
 export interface WindowPrometheusQueryPort {
   query(request: Readonly<{ query: string; evaluationUnixSeconds: number; signal: AbortSignal }>):
-    Promise<{ status: number; body: ReadableStream<Uint8Array> | null }>;
+    Promise<{
+      status: number;
+      body: ReadableStream<Uint8Array> | null;
+      /** Normalized HTTP Retry-After value in milliseconds. */
+      retryAfterMs?: number;
+    }>;
 }
 export interface WindowFreshnessPolicy {
   authorize(window: Readonly<HostAuthorizedRequestedWindowV1>, nowUnixSeconds: number): 'authorized' | 'stale' | 'denied';
@@ -48,11 +53,19 @@ export interface WindowFailureRateCollection {
 export type WindowSourceErrorCode = 'WINDOW_AUTHORITY_REQUIRED' | 'WINDOW_NOT_AUTHORIZED' | 'STALE_WINDOW'
   | 'INVALID_REQUESTED_WINDOW' | 'INVALID_MAPPING' | 'INVALID_LIMITS' | 'INVALID_RESPONSE'
   | 'SCOPE_MISMATCH' | 'AMBIGUOUS_SERIES' | 'MISSING_SERIES' | 'RESPONSE_TOO_LARGE'
-  | 'QUERY_TIMEOUT' | 'ABORTED' | 'QUERY_FAILED' | 'HTTP_ERROR'
+  | 'QUERY_TIMEOUT' | 'ABORTED' | 'QUERY_FAILED' | 'HTTP_ERROR' | 'BUDGET_EXCEEDED'
   | 'STALE_OBSERVATION' | 'OBSERVATIONS_NOT_AUTHORIZED';
 
 export class WindowSourceError extends Error {
-  constructor(readonly code: WindowSourceErrorCode) { super(code); this.name = 'WindowSourceError'; }
+  readonly retryAfterMs?: number;
+
+  constructor(readonly code: WindowSourceErrorCode, readonly httpStatus?: number, retryAfterMs?: number) {
+    super(code);
+    this.name = 'WindowSourceError';
+    if (typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+      this.retryAfterMs = retryAfterMs;
+    }
+  }
 }
 
 const requestedWindowSchema = z.object({
@@ -98,7 +111,8 @@ export class PrometheusWindowFailureRateSource {
     ]);
   }
 
-  async collect(input: HostAuthorizedRequestedWindowV1, signal: AbortSignal): Promise<WindowFailureRateCollection> {
+  async collect(input: HostAuthorizedRequestedWindowV1, signal: AbortSignal,
+    networkAttemptBudget?: { remaining: number }): Promise<WindowFailureRateCollection> {
     checkAbort(signal);
     const parsed = requestedWindowSchema.safeParse(input);
     if (!parsed.success) throw new WindowSourceError('INVALID_REQUESTED_WINDOW');
@@ -114,7 +128,7 @@ export class PrometheusWindowFailureRateSource {
     try {
       for (const spec of this.queries) {
         checkAbort(boundedSignal);
-        const payload = await this.query(spec.query, evaluationUnixSeconds, boundedSignal);
+        const payload = await this.query(spec.query, evaluationUnixSeconds, boundedSignal, networkAttemptBudget);
         const parsedEnvelope = envelope.safeParse(payload);
         if (!parsedEnvelope.success || parsedEnvelope.data.warnings?.length || parsedEnvelope.data.infos?.length) {
           throw new WindowSourceError('INVALID_RESPONSE');
@@ -204,8 +218,15 @@ export class PrometheusWindowFailureRateSource {
     }
   }
 
-  private async query(query: string, evaluationUnixSeconds: number, signal: AbortSignal): Promise<unknown> {
+  private async query(query: string, evaluationUnixSeconds: number, signal: AbortSignal,
+    networkAttemptBudget?: { remaining: number }): Promise<unknown> {
     try {
+      if (networkAttemptBudget !== undefined) {
+        if (!Number.isSafeInteger(networkAttemptBudget.remaining) || networkAttemptBudget.remaining <= 0) {
+          throw new WindowSourceError('BUDGET_EXCEEDED');
+        }
+        networkAttemptBudget.remaining -= 1;
+      }
       const pending = this.options.queryPort.query(Object.freeze({ query, evaluationUnixSeconds, signal }))
         .then(response => {
           // An uncooperative transport may finish after abort. Dispose its unread body.
@@ -218,7 +239,7 @@ export class PrometheusWindowFailureRateSource {
       const response = await abortable(pending, signal);
       if (response.status !== 200) {
         void response.body?.cancel().catch(() => {});
-        throw new WindowSourceError('HTTP_ERROR');
+        throw new WindowSourceError('HTTP_ERROR', response.status, response.retryAfterMs);
       }
       if (response.body === null) throw new WindowSourceError('INVALID_RESPONSE');
       const reader = response.body.getReader();

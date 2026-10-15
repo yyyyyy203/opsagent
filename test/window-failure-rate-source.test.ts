@@ -287,9 +287,15 @@ describe('Target-bound Prometheus window source', () => {
   it('cancels HTTP error bodies without reading private diagnostics', async () => {
     let cancelled = false;
     const { source } = setup({ queryPort: { async query() {
-      return { status: 503, body: new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }) };
+      return {
+        status: 503,
+        body: new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }),
+        retryAfterMs: 375,
+      };
     } } });
-    await expect(source.collect(window, signal())).rejects.toMatchObject({ code: 'HTTP_ERROR' });
+    await expect(source.collect(window, signal())).rejects.toMatchObject({
+      code: 'HTTP_ERROR', httpStatus: 503, retryAfterMs: 375,
+    });
     expect(cancelled).toBe(true);
   });
   it('rejects a missing response body', async () => {

@@ -77,6 +77,8 @@ export interface AgentHarnessDependencies {
   memory?: AgentMemoryHarness;
   /** Current Target policy gate; Target-bound start/resume fails closed when absent. */
   targetRecoveryGate?: TargetRecoveryGate;
+  /** Host-owned model instrumentation/context decorator applied to each Target lease model. */
+  targetModelDecorator?: (model: ChatModel, identity?: { provider: string; model: string }) => ChatModel;
   /** Internal source capability scope for a Target-bound child Harness. */
   targetSourceScopeId?: string;
   durableState?: DurableRunState;
@@ -98,6 +100,7 @@ interface RunExecutionFrame {
   /** Per-Run capabilities reconstructed from the immutable Target snapshot. */
   targetRuntime?: {
     lease: TargetRunRuntimeLease;
+    model: ChatModel;
     toolkit: Toolkit;
     admission: ToolAdmission;
   };
@@ -198,6 +201,7 @@ export class AgentHarness implements DiagnosisAgent {
           lease,
           this.dependencies.targetSourceScopeId,
           this.dependencies.targetSourceScopeId === undefined ? undefined : this.dependencies.toolkit.list(),
+          this.dependencies.targetModelDecorator,
         );
       } catch (error) {
         await lease.release();
@@ -320,6 +324,7 @@ export class AgentHarness implements DiagnosisAgent {
               lease,
               this.dependencies.targetSourceScopeId,
               this.dependencies.targetSourceScopeId === undefined ? undefined : this.dependencies.toolkit.list(),
+              this.dependencies.targetModelDecorator,
             );
           } catch (error) {
             await lease.release();
@@ -1371,7 +1376,7 @@ export class AgentHarness implements DiagnosisAgent {
   }
 
   private modelFor(frame: RunExecutionFrame): ChatModel {
-    return frame.targetRuntime?.lease.model ?? this.dependencies.model;
+    return frame.targetRuntime?.model ?? this.dependencies.model;
   }
 
   private toolExecutionScope(frame: RunExecutionFrame): ToolBatchExecutionScope | undefined {
@@ -2096,12 +2101,18 @@ function createTargetExecutionScope(
   lease: TargetRunRuntimeLease,
   sourceScopeId?: string,
   hostTools?: readonly Tool[],
+  modelDecorator?: (model: ChatModel, identity?: { provider: string; model: string }) => ChatModel,
 ): NonNullable<RunExecutionFrame['targetRuntime']> {
   const tools = sourceScopeId === undefined ? lease.tools : validateChildSourceTools(hostTools ?? [], sourceScopeId);
   const toolkit = new Toolkit();
   for (const tool of tools) toolkit.register(tool);
   toolkit.freeze();
-  return { lease, toolkit, admission: new ToolAdmission(toolkit) };
+  return {
+    lease,
+    model: modelDecorator?.(lease.model, lease.modelIdentity) ?? lease.model,
+    toolkit,
+    admission: new ToolAdmission(toolkit),
+  };
 }
 
 function validateChildSourceTools(

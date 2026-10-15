@@ -115,6 +115,11 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
     if (!Number.isSafeInteger(remainingToolCalls) || remainingToolCalls <= 0) {
       throw new SourceSubagentFailure('BUDGET_EXCEEDED', 'Parent Tool-call budget is exhausted.', false);
     }
+    const remainingNetworkAttempts = execution.networkAttemptBudget?.remaining;
+    if (remainingNetworkAttempts !== undefined
+      && (!Number.isSafeInteger(remainingNetworkAttempts) || remainingNetworkAttempts <= 0)) {
+      throw new SourceSubagentFailure('BUDGET_EXCEEDED', 'Parent network-attempt budget is exhausted.', false);
+    }
     const parentRemainingMs = execution.deadline === undefined
       ? 30_000
       : Math.max(0, execution.deadline - startedAt);

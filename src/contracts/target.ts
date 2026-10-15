@@ -465,8 +465,10 @@ export interface TargetOperationGuard {
 }
 
 export interface TargetRuntimeLease {
-  /** Concrete implementations are reconstructed from this exact, validated snapshot. */
+  /** Concrete base model and Tools are reconstructed from this exact, validated snapshot. */
   model: ChatModel;
+  /** Optional non-secret identity used by model-call audit events. */
+  modelIdentity?: { provider: string; model: string };
   /** Every Target-scoped Tool must expose a non-empty implementationVersion for safe HITL recovery. */
   tools: readonly Tool[];
   release(): void | Promise<void>;
