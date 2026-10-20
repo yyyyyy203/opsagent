@@ -381,6 +381,8 @@ LangSmith/审计中的父子 Trace 关联与模型用量继续按 Run 收集；�
 | M4 Web 与知识接线 | 目标选择、所有读写入口范围校验、有限知识快照、独立记忆策略和熔断展示 | M2a+M3；不新建完整知识库 |
 | M5 联合验收 | 两项目并发/故障/恢复/隔离测试、浏览器验收及 legacy 回归；若实施 M2b，额外覆盖其迁移路径 | M1–M4；M2b 可选 |
 
+逐文件实施计划：[M1/M2a/R0](../plans/2026-10-11-multi-project-m1-m2a.md)、[M3](../plans/2026-10-14-multi-project-m3.md)、[可选 M2b](../plans/2026-10-20-multi-project-m2b.md)、[M4](../plans/2026-10-20-multi-project-m4.md)、[M5](../plans/2026-10-20-multi-project-m5.md)。这些计划的存在不表示其任务已经实施或通过验收。
+
 M1/M2a 基础及 R0 安全门通过后才能在新 Target 发起模型或来源操作；不能先做界面选择，再用单个共享可变配置凑多项目运行。下一步实施顺序为 R0 → 完整记忆 T1–T7；M2b 是可选的历史恢复增量，不阻塞新 Target 能力。Legacy 兼容入口何时退役需依据实际使用与保留策略另行评审；Counter 场景、真实 group-buy-market 接入、多人 ACL 和真实动作仍各立增量。
 
 ## 13. 第一版验收矩阵
