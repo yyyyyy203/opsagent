@@ -20,9 +20,9 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - 多来源夹具改用进程启动时固定的场景和 `2026-10-21T12:00:00.000Z` Clock；七个浏览器用例各用新的 Agent/Web 进程、SQLite 临时目录、调用统计和模型实例。每个用例从空案例/零调用开始，退出后由启动器清理目录并核对端口已释放。
 - Metrics 的真实 7 秒超时由来源侧收到 `TimeoutError` Abort 证明；错误、截止和 Logs partial 场景都直接请求审核 API，收到 422/`MEMORY_APPROVAL_DENIED`，回读后案例仍为 observation、revision 未变。案例证据引用核对了 ownerRunId、evidenceId、采集时间和 SHA-256。
 - 请求边界限于浏览器请求与 Node `globalThis.fetch`；本夹具 MCP SDK 的 `GET/POST /mcp` 均经 `fetch` 记录。禁止目的地自测在连接前被阻断；不声称覆盖原生 socket 或其他进程。
-- 本次实际检查通过：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build`；`TMPDIR=/private/tmp pnpm test`（215 个文件通过、5 个 opt-in 文件跳过；2247 项通过、9 项跳过）；`TMPDIR=/private/tmp pnpm acceptance:memory`（13 项、六格策略矩阵）；`pnpm e2e:memory:multisource`（7/7 个独立场景）；`pnpm e2e:multi-target`（2/2）；记忆 Web（10 通过、1 按配置跳过）及 disabled baseline（1/1）。最终 `git diff --check` 需在本状态文件改完后再执行。
-- Git 基线为分支 `codex/event-message-v2`、HEAD `22c94aaa200f362fda2b041e0efef2b901fa5bb4`；Node v24.19.0、pnpm v11.25.0（声明目标 v11.19.0）。本任务变更包括 E2E 配置、夹具、用例启动器、lint 配置、`package.json`、Spec、Plan、验收记录和本文件。
-- 交付阻塞：`git ls-remote origin refs/heads/codex/event-message-v2` 因 `Could not resolve host: github.com` 失败，远端 SHA 不能核对。实现和文档尚未提交；网络恢复后先查询分支、确认无远端独有提交，再独立提交/普通推送并核验远端 HEAD。目前不得称已同步。
+- 本次实际检查通过：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build`；`TMPDIR=/private/tmp pnpm test`（215 个文件通过、5 个 opt-in 文件跳过；2247 项通过、9 项跳过）；`TMPDIR=/private/tmp pnpm acceptance:memory`（13 项、六格策略矩阵）；`pnpm e2e:memory:multisource`（7/7 个独立场景）；`pnpm e2e:multi-target`（2/2）；记忆 Web（10 通过、1 按配置跳过）及 disabled baseline（1/1）。本状态更新后 `git diff --check` 通过。
+- Git 基线为分支 `codex/event-message-v2`、实施提交 `fb8355f85358c61a7a0fecab5e51927b9310cab2`；Node v24.19.0、pnpm v11.25.0（声明目标 v11.19.0）。任务变更包括 E2E 配置、夹具、用例启动器、lint 配置、`package.json`、Spec、Plan、验收记录和本文件。
+- 交付阻塞：`git ls-remote origin refs/heads/codex/event-message-v2` 因 `Could not resolve host: github.com` 失败，远端 SHA 不能核对；后续重试仍未返回远端结果。实施提交已在本地，未尝试推送以免在无法确认远端分支时写入。网络恢复后先查询分支、确认无远端独有提交，再普通推送并核验远端 HEAD。目前不得称已同步。
 
 ## 本次重排后的下一步（2026-10-21）
 
@@ -64,7 +64,7 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 ## 下一步
 
-1. 网络恢复后按上方记录核对并推送本轮多来源记忆韧性实现；在核对远端 SHA 前不推送，也不声称 GitHub 已同步。
+1. 网络恢复后查询远端分支；确认无远端独有提交后推送包含实现提交 `fb8355f` 和本状态记录的本地分支，再核验远端 HEAD。当前分支尚未同步。
 2. 完成推送后，为普通 `apps/agent-server` 是否组装 Target Runtime 与 Semantic/Procedural 知识治理 Host 单独编写 Spec/Plan，再以本地模拟 Target 验收。不得把当前 Target 知识测试说成已接入普通运行时。
 3. 记忆审核 API 暴露到其他用户或网络边界前，先定义和验证身份、角色及审计归属。M2b 仍需可证明身份的旧数据；后续验收继续使用本地模拟服务，不重新部署 `group-buy-market`。
 

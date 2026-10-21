@@ -2,7 +2,7 @@
 
 - 日期：2026-10-21（Asia/Shanghai）
 - 依据：[Spec 与 R01–R12 验收矩阵](../specs/2026-10-21-multisource-memory-resilience-design.md)
-- 状态：阶段 A、B、C、D 的本地实现与验收均通过；任务提交尚未推送，GitHub 当前查询因 DNS 无法解析而失败。逐条证据见[验收记录](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)和 STATUS。
+- 状态：阶段 A、B、C、D 的本地实现与验收均通过；实施提交 `fb8355f` 已在本地，GitHub 分支查询因 DNS 无法解析而失败，当前尚未推送。逐条证据见[验收记录](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)和 STATUS。
 - 分类：测试基础设施、适配器组合验收；仅按实际失败修复对应产品模块。
 - 兼容性：沿用公共契约、存储 Schema、审核/晋级与冻结选择规则，预计无需迁移。
 
@@ -108,7 +108,7 @@ Target 记忆流程由 `pnpm e2e:multi-target` 覆盖；原记忆禁用态场景
 | C | 完成 | R08/R09：同库 Target A/B 的浏览器采集、批准、正向召回、切换后隔离、跨 Target 证据/审核拒绝通过；Clock 验证到期前、等于到期和到期后不召回，UI 显示过期且不重写批准状态。 |
 | D | 本地验收通过，推送待办 | lint、typecheck、test、build、Web 检查、记忆验收、多来源/Target/记忆浏览器回归及 `git diff --check` 均有本次结果。远端查询失败：`Could not resolve host: github.com`。 |
 
-本计划的代码实现与本地验收已完成，按 AGENTS §18 仍须独立提交并推送后才能关闭任务。R12 当前证明的请求边界为浏览器请求及 Node `fetch`（包括本夹具 MCP SDK 的 HTTP 请求）；没有证明任意 socket 或其他进程的全网出站。R08/R09 已完成，只需作为回归，不应重复实施。
+本计划的代码实现与本地验收已完成，实施提交为 `fb8355f`。按 AGENTS §18 仍须远端核对并推送后才能关闭任务；当前因 DNS 失败尚未确认远端 SHA。R12 当前证明的请求边界为浏览器请求及 Node `fetch`（包括本夹具 MCP SDK 的 HTTP 请求）；没有证明任意 socket 或其他进程的全网出站。R08/R09 已完成，只需作为回归，不应重复实施。
 
 ## 7. 剩余改动的逐步实施方案
 

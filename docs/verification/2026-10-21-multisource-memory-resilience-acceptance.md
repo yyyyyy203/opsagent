@@ -48,4 +48,4 @@
 ## 完成状态与交付限制
 
 - 本计划 A–D 的实现与本地验收通过；未修改产品运行时、公共契约、持久化 Schema 或记忆审核语义。`git diff --check` 通过。
-- 当前实现仍须独立提交并推送到 `codex/event-message-v2`。本轮 `git ls-remote origin refs/heads/codex/event-message-v2` 返回 `Could not resolve host: github.com`，因此远端 SHA 尚不可核验，不能称为已同步。网络恢复后先查询远端，再普通推送并核验 HEAD；禁止使用陈旧 `origin/` 跟踪引用代替远端查询。
+- 实施已独立提交为 `fb8355f85358c61a7a0fecab5e51927b9310cab2`。本轮 `git ls-remote origin refs/heads/codex/event-message-v2` 返回 `Could not resolve host: github.com`，后续查询亦未返回结果，因此远端 SHA 尚不可核验，未执行推送，不能称为已同步。网络恢复后先查询远端，再普通推送并核验 HEAD；禁止使用陈旧 `origin/` 跟踪引用代替远端查询。
