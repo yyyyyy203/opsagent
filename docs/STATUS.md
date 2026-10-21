@@ -59,8 +59,9 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - 阶段 C 完成：Target Web+SQLite 闭环覆盖 A 采集、批准、召回，切换 B 后无 A 案例/模型输入，跨 Target 证据和审核请求返回 404；R08 用夹具 Clock 验证到期前、相等、之后三点，UI 标记过期但不改写已批准状态。新增 Target Profile `profile/v1` 校验回归，原配置校验器曾拒绝此快照版本格式。
 - 阶段 D 质量门：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build` 通过；`TMPDIR=/private/tmp pnpm test` 通过（215 文件通过、5 个 opt-in 文件跳过；2247 项通过、9 项跳过）；`TMPDIR=/private/tmp pnpm acceptance:memory` 通过（13 checks、6 策略行）；多来源 E2E 3/3、多 Target E2E 2/2、记忆 Web E2E 10 通过/1 跳过、禁用模式 1/1 通过。明细见验收报告。
 - 测试环境 Node.js v24.19.0，pnpm v11.25.0（与仓库声明的 v11.19.0 不同）。全量测试/验收使用 `/private/tmp` 规避 macOS 临时目录符号链接问题；浏览器测试需本机 loopback 权限。
-- 第一阶段改动已提交并推送：`0f33332 test: cover memory source failures and target isolation`。本轮后续新增了 AgentWeb Target 证据记录器注入、profileRevision 格式校验、Target 记忆 Web fixture/到期展示与验收；这些后续修改待提交。最近一次 `git fetch origin codex/event-message-v2` 在 75 秒后因无法连接 `github.com:443` 失败；本地 `origin/codex/event-message-v2` 跟踪 ref 仍指向旧提交 `7af008d`，因此 `HEAD...origin/...` 显示 `12 0` 仅是相对陈旧 ref。稍后以普通 fast-forward push 试同步，若远端有新提交将安全拒绝，届时先处理差异。当前相关未提交文件以 `git status --short` 为准。
+- 第一阶段改动已提交并推送：`0f33332 test: cover memory source failures and target isolation`。Target 记忆闭环及到期行为已独立提交为 `0ef4634 test: verify target episodic memory isolation`。最近一次 `git fetch origin codex/event-message-v2` 和该提交的普通 `git push origin codex/event-message-v2` 均在约 75 秒后因无法连接 `github.com:443` 失败；本地 `origin/codex/event-message-v2` 跟踪 ref 仍指向旧提交 `7af008d`，比较结果受陈旧 ref 影响，不能据此声明远端同步。待网络恢复后先 fetch 核对远端；无远端独有提交时普通 push，有新提交则先整合，禁止强推。
+- 后续状态收尾记录将在推送恢复后再次同步；当前实现与验收已本地提交，GitHub 同步仍受阻。
 - 未触发公共契约、Schema、Harness 顺序、Guard/Hook/HITL 或晋级语义变更，无需新增 DECISIONS 记录。`git diff --check` 当前通过。
-- 下一步：将 Target 记忆闭环和到期行为作为独立后续提交；GitHub 网络恢复后以普通 push 同步。计划仍有阶段 A/R12 的覆盖限制，不能标记整体完成。
+- 下一步：GitHub 网络恢复后 fetch 并重试普通 push，确认 `0ef4634` 已同步。计划仍有阶段 A/R12 的覆盖限制，不能标记整体完成。
 
 此前逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。

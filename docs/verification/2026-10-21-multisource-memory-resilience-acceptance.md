@@ -48,4 +48,4 @@
 ## 未完成与下一步
 
 - R12 / 阶段 A：决定是否需针对原生 HTTP/socket 补观测；当前报告只声明 Node `globalThis.fetch` 和浏览器请求范围，并使用单 worker 串行用例，不外推为全进程网络保证或通用运行中重置能力。
-- 推送本次 Target 记忆闭环及过期行为后续提交；后续若扩充 R12 观测范围，先更新 Spec/Plan 和验收证据。
+- Target 记忆闭环与过期行为已本地提交为 `0ef4634`；普通 GitHub push 在 75 秒后因无法连接 `github.com:443` 失败。网络恢复后先 fetch 并核对远端，再普通 push。后续若扩充 R12 观测范围，先更新 Spec/Plan 和验收证据。
