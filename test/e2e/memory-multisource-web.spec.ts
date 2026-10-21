@@ -6,8 +6,17 @@ const controlPort = process.env.AGENTOPS_MEMORY_MULTI_E2E_CONTROL_PORT ?? '45701
 const webPort = process.env.AGENTOPS_MEMORY_MULTI_E2E_WEB_PORT ?? '45773';
 const agentUrl = `http://127.0.0.1:${agentPort}`;
 const controlUrl = `http://127.0.0.1:${controlPort}`;
+const fixedNow = process.env.AGENTOPS_MEMORY_MULTI_E2E_NOW ?? '2026-10-21T12:00:00.000Z';
+const scenarios = [
+  { name: 'metrics_failure', missing: 'metrics' },
+  { name: 'metrics_timeout', missing: 'metrics' },
+  { name: 'logs_failure', missing: 'logs' },
+  { name: 'metrics_deadline', missing: 'metrics' },
+  { name: 'logs_partial', missing: 'logs' },
+] as const;
 
-test('simulated Metrics+Logs memory capture, review, recall, and Trace limitation work through the browser', async ({ page }) => {
+test('[case:normal] simulated Metrics+Logs memory capture, review, recall, and Trace limitation work through the browser', async ({ page }) => {
+  test.setTimeout(90_000);
   const requestOrigins = new Set<string>();
   page.on('request', (request: Request) => {
     const url = new URL(request.url());
@@ -15,6 +24,7 @@ test('simulated Metrics+Logs memory capture, review, recall, and Trace limitatio
   });
 
   await page.goto('/');
+  await expectFreshFixture(page, 'normal');
   await expect(page.getByRole('heading', { name: '巡检 Agent 工作台' })).toBeVisible();
   await expect(page.getByLabel('本次沉淀')).toHaveValue('manual');
   await expect(page.getByLabel('使用已审核历史参考')).not.toBeChecked();
@@ -36,6 +46,11 @@ test('simulated Metrics+Logs memory capture, review, recall, and Trace limitatio
   expect(children.every(({ detail }) => detail.status === 'completed')).toBe(true);
   const evidence = children.flatMap((child) => child.evidence);
   expect(evidence.map((item) => item.source).sort()).toEqual(['log', 'metric']);
+  expect(evidence.find((item) => item.source === 'metric')?.capturedAt).toBe(fixedNow);
+  expect(evidence.find((item) => item.source === 'log')?.capturedAt).toBe('2026-10-21T11:55:00.000Z');
+  expect(evidence.find((item) => item.source === 'metric')?.timeRange).toEqual({
+    start: '2026-10-21T11:55:00.000Z', end: fixedNow,
+  });
   expect(new Set(evidence.map((item) => item.runId)).size).toBe(2);
   await expect(page.locator('.evidence-card')).toHaveCount(2);
   await expect(page.locator('.missing-box')).toContainText('traces');
@@ -93,6 +108,9 @@ test('simulated Metrics+Logs memory capture, review, recall, and Trace limitatio
   expect(fixtureState).toMatchObject({
     runtimeReady: true,
     sourceMode: 'deterministic-local-simulation',
+    scenario: 'normal',
+    fixedNow,
+    sourceWindow: { start: '2026-10-21T11:55:00.000Z', end: fixedNow },
     blockedExternalRequests: 1,
   });
   expect(fixtureState.metricQueries).toBe(4);
@@ -103,58 +121,80 @@ test('simulated Metrics+Logs memory capture, review, recall, and Trace limitatio
   expect(fixtureState.scriptedModelCalls.logs).toBeGreaterThan(0);
   expect(new Set(fixtureState.backendRequests.map(({ origin }) => origin)))
     .toEqual(new Set(fixtureState.allowedBackendOrigins));
+  expect(fixtureState.backendRequests.every(({ method, path }) => ['GET', 'POST'].includes(method) && path === '/mcp'),
+    JSON.stringify(fixtureState.backendRequests)).toBe(true);
   expect([...requestOrigins].sort()).toEqual([`http://127.0.0.1:${webPort}`, agentUrl].sort());
 });
 
-test('source failures and partial logs retain the available evidence and cannot become recallable cases', async ({ page }) => {
-  await page.goto('/');
-  const scenarios = [
-    { name: 'metrics_failure', missing: 'metrics' },
-    { name: 'metrics_timeout', missing: 'metrics' },
-    { name: 'logs_failure', missing: 'logs' },
-    { name: 'logs_partial', missing: 'logs' },
-  ] as const;
+for (const scenario of scenarios) {
+  test(`[case:${scenario.name}] source failure retains available evidence and cannot be approved`, async ({ page }) => {
+    await page.goto('/');
+    await expectFreshFixture(page, scenario.name);
+    await exerciseInsufficientScenario(page, scenario);
+  });
+}
 
-  for (const scenario of scenarios) {
-    const before = await getFixtureState(page);
-    const runId = await startRun(page,
-      `E2E_SCENARIO=${scenario.name} SETTLEMENT_FAILURE_HIGH：模拟结算失败率升高；核验当前指标与日志。`);
-    const run = await getRun(page, runId);
-    if (scenario.name !== 'logs_partial') {
-      expect(run.missingEvidence.some((item) => item.includes(scenario.missing)),
-        `${scenario.name}: ${JSON.stringify(run.missingEvidence)}`).toBe(true);
-    }
-    const evidence = (await Promise.all(run.childRunIds.map((childRunId) => getEvidence(page, childRunId))))
-      .flat();
-    expect(evidence.some((item) => item.source === (scenario.missing === 'metrics' ? 'log' : 'metric'))).toBe(true);
-    if (scenario.name === 'logs_partial') {
-      expect(evidence.find((item) => item.source === 'log')).toMatchObject({ state: 'partial' });
-    }
-
-    await page.getByRole('button', { name: '沉淀本次巡检' }).click();
-    await expect(page.getByText('已保存候选')).toBeVisible();
-    const response = await page.request.get(`${agentUrl}/memory/cases?profileId=simulation&limit=50`);
-    expect(response.ok()).toBe(true);
-    const cases = await response.json() as MemoryCase[];
-    const candidate = cases.find((item) => item.sourceRunId === runId);
-    expect(candidate).toBeDefined();
-    expect(candidate).toMatchObject({ quality: 'insufficient', status: 'observation', eligibleForPromotion: false });
-    await expect(page.getByRole('article').filter({ hasText: runId })
-      .getByRole('button', { name: '批准历史参考' })).toBeDisabled();
-
-    const after = await getFixtureState(page);
-    const metricAttempts = after.metricQueries - before.metricQueries;
-    expect(metricAttempts).toBeGreaterThan(0);
-    expect(metricAttempts).toBeLessThanOrEqual(3);
-    expect(after.logPages).toBeGreaterThan(before.logPages);
+async function exerciseInsufficientScenario(page: Page, scenario: (typeof scenarios)[number]): Promise<void> {
+  const before = await getFixtureState(page);
+  const runId = await startRun(page,
+    'SETTLEMENT_FAILURE_HIGH：模拟结算失败率升高；核验当前指标与日志。',
+    scenario.name === 'metrics_deadline' ? 35_000 : 15_000);
+  const run = await getRun(page, runId);
+  if (scenario.name !== 'logs_partial' && scenario.name !== 'metrics_deadline') {
+    expect(run.missingEvidence.some((item) => item.includes(scenario.missing)),
+      `${scenario.name}: ${JSON.stringify(run.missingEvidence)}`).toBe(true);
   }
-});
+  const evidence = (await Promise.all(run.childRunIds.map((childRunId) => getEvidence(page, childRunId))))
+    .flat();
+  expect(evidence.some((item) => item.source === (scenario.missing === 'metrics' ? 'log' : 'metric'))).toBe(true);
+  expectEvidenceUsesFixedClock(evidence);
+  if (scenario.name === 'logs_partial') {
+    expect(evidence.find((item) => item.source === 'log')).toMatchObject({ state: 'partial' });
+  }
 
-test('cancelling an active source request aborts the local Metrics query', async ({ page }) => {
+  await page.getByRole('button', { name: '沉淀本次巡检' }).click();
+  await expect(page.getByText('已保存候选')).toBeVisible();
+  const response = await page.request.get(`${agentUrl}/memory/cases?profileId=simulation&limit=50`);
+  expect(response.ok()).toBe(true);
+  const cases = await response.json() as MemoryCase[];
+  const candidate = cases.find((item) => item.sourceRunId === runId);
+  expect(candidate).toBeDefined();
+  expect(candidate).toMatchObject({ quality: 'insufficient', status: 'observation', eligibleForPromotion: false });
+  expectCaseEvidenceRefs(candidate!, evidence);
+  const reviewResponse = await page.request.post(`${agentUrl}/memory/cases/${encodeURIComponent(candidate!.id)}/review`, {
+    data: {
+      profileId: 'simulation', requestId: `deny-insufficient-${scenario.name}-${runId}`,
+      expectedRevision: candidate!.revision, decision: 'approved', claimCheck: 'supported',
+    },
+  });
+  expect(reviewResponse.status(), `${scenario.name} review response`).toBe(422);
+  expect(await reviewResponse.json()).toMatchObject({ error: 'MEMORY_APPROVAL_DENIED' });
+  const afterReviewResponse = await page.request.get(`${agentUrl}/memory/cases/${encodeURIComponent(candidate!.id)}?profileId=simulation`);
+  expect(afterReviewResponse.ok()).toBe(true);
+  expect(await afterReviewResponse.json()).toMatchObject({ id: candidate!.id, status: 'observation', revision: candidate!.revision });
+  await expect(page.getByRole('article').filter({ hasText: runId })
+    .getByRole('button', { name: '批准历史参考' })).toBeDisabled();
+
+  const after = await getFixtureState(page);
+  const metricAttempts = after.metricQueries - before.metricQueries;
+  expect(metricAttempts).toBeLessThanOrEqual(3);
+  expect(after.logPages).toBeGreaterThan(before.logPages);
+  if (scenario.name === 'metrics_deadline') {
+    const reasons = after.metricAbortReasons.slice(before.metricAbortReasons.length);
+    expect(metricAttempts).toBeGreaterThan(0);
+    expect(after.metricAborts - before.metricAborts).toBe(metricAttempts);
+    expect(reasons).toHaveLength(metricAttempts);
+    expect(reasons.every(({ name }) => name === 'TimeoutError')).toBe(true);
+    expect(evidence.some((item) => item.source === 'metric')).toBe(false);
+  }
+}
+
+test('[case:metrics_hang] cancelling an active source request aborts the local Metrics query', async ({ page }) => {
   await page.goto('/');
+  await expectFreshFixture(page, 'metrics_hang');
   const before = await getFixtureState(page);
   const runId = await startUnfinishedRun(page,
-    'E2E_SCENARIO=metrics_hang SETTLEMENT_FAILURE_HIGH：等待模拟指标响应以验证取消传播。');
+    'SETTLEMENT_FAILURE_HIGH：等待模拟指标响应以验证取消传播。');
   await expect.poll(async () => (await getFixtureState(page)).metricQueries).toBeGreaterThan(before.metricQueries);
 
   const cancel = await page.request.post(`${agentUrl}/runs/${encodeURIComponent(runId)}/cancel`);
@@ -170,34 +210,47 @@ interface RunDetail {
   missingEvidence: string[];
 }
 
-interface EvidenceView { runId: string; source: string; evidenceId: string; state?: string }
+interface EvidenceView {
+  runId: string;
+  source: string;
+  evidenceId: string;
+  capturedAt: string;
+  rawSha256?: string;
+  state?: string;
+  timeRange?: { start: string; end: string };
+}
 interface MemoryCase {
   id: string;
   sourceRunId: string;
+  revision: number;
   quality: string;
   status: string;
   eligibleForPromotion: boolean;
   limitations: string[];
-  evidenceRefs: { source: string }[];
+  evidenceRefs: { evidenceId: string; ownerRunId: string; source: string; capturedAt: string; rawSha256: string }[];
 }
 interface FixtureState {
   runtimeReady: boolean;
   sourceMode: string;
+  scenario: string;
+  fixedNow: string;
+  sourceWindow: { start: string; end: string };
   metricQueries: number;
   metricAborts: number;
+  metricAbortReasons: { name: string; message?: string }[];
   logPages: number;
   recalledRuns: string[];
   scriptedModelCalls: { parent: number; metrics: number; logs: number };
-  backendRequests: { origin: string; method: string }[];
+  backendRequests: { origin: string; method: string; path: string }[];
   allowedBackendOrigins: string[];
   blockedExternalRequests: number;
 }
 
-async function startRun(page: Page, message: string): Promise<string> {
+async function startRun(page: Page, message: string, timeoutMs = 15_000): Promise<string> {
   const runId = await startUnfinishedRun(page, message);
-  await expect.poll(async () => (await getRun(page, runId)).status).toBe('completed');
+  await expect.poll(async () => (await getRun(page, runId)).status, { timeout: timeoutMs }).toBe('completed');
   await expect(page.locator('.run-card.selected code')).toHaveText(runId);
-  await expect(page.locator('.status-hero strong')).toHaveText('已完成');
+  await expect(page.locator('.status-hero strong')).toHaveText('已完成', { timeout: Math.max(30_000, timeoutMs) });
   return runId;
 }
 
@@ -233,6 +286,38 @@ async function getFixtureState(page: Page): Promise<FixtureState> {
   const response = await page.request.get(`${controlUrl}/__state`);
   expect(response.ok()).toBe(true);
   return response.json() as Promise<FixtureState>;
+}
+
+async function expectFreshFixture(page: Page, scenario: string): Promise<void> {
+  const state = await getFixtureState(page);
+  expect(state).toMatchObject({ runtimeReady: true, scenario, fixedNow,
+    sourceWindow: { start: new Date(Date.parse(fixedNow) - 300_000).toISOString(), end: fixedNow },
+    scriptedModelCalls: { parent: 0, metrics: 0, logs: 0 }, metricQueries: 0, metricAborts: 0,
+    metricAbortReasons: [], logPages: 0, recalledRuns: [], blockedExternalRequests: 1 });
+  const response = await page.request.get(`${agentUrl}/memory/cases?profileId=simulation&limit=50`);
+  expect(response.ok()).toBe(true);
+  expect(await response.json()).toEqual([]);
+}
+
+function expectEvidenceUsesFixedClock(evidence: readonly EvidenceView[]): void {
+  for (const item of evidence) {
+    expect(item.capturedAt, `${item.source} evidence time`).toBe(item.source === 'metric'
+      ? fixedNow : new Date(Date.parse(fixedNow) - 300_000).toISOString());
+  }
+}
+
+function expectCaseEvidenceRefs(candidate: MemoryCase, evidence: readonly EvidenceView[]): void {
+  const evidenceById = new Map(evidence.map((item) => [item.evidenceId, item]));
+  expect(candidate.evidenceRefs.length).toBeGreaterThan(0);
+  for (const reference of candidate.evidenceRefs) {
+    const source = evidenceById.get(reference.evidenceId);
+    expect(source, `missing owner evidence ${reference.evidenceId}`).toBeDefined();
+    expect(reference).toMatchObject({
+      ownerRunId: source!.runId, source: source!.source, capturedAt: source!.capturedAt,
+      rawSha256: source!.rawSha256,
+    });
+    expect(reference.rawSha256).toMatch(/^[a-f0-9]{64}$/u);
+  }
 }
 
 function isRunStartRequest(request: Request): boolean {

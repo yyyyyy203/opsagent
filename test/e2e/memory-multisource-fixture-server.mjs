@@ -1,25 +1,35 @@
 import { createServer } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { startAgentWebRuntime } from '../../dist/bootstrap/agent-web-runtime.js';
 import { startMetricsLab } from '../../dist/bootstrap/metrics-lab.js';
 import { startLogsMcpServer } from '../../dist/infrastructure/mcp/logs-server.js';
 import { generateScenarioLogs } from '../../dist/infrastructure/simulator/log-fixtures.js';
 import { ScriptedModel } from '../../dist/model/scripted-model.js';
 
-const root = await mkdtemp(join(tmpdir(), 'agentops-memory-multisource-e2e-'));
+const root = process.env.AGENTOPS_MEMORY_MULTI_E2E_DATA_DIR === undefined
+  ? await mkdtemp(join(tmpdir(), 'agentops-memory-multisource-e2e-'))
+  : resolve(process.env.AGENTOPS_MEMORY_MULTI_E2E_DATA_DIR);
 const agentPort = Number(process.env.AGENTOPS_MEMORY_MULTI_E2E_AGENT_PORT ?? 45700);
 const webPort = Number(process.env.AGENTOPS_MEMORY_MULTI_E2E_WEB_PORT ?? 45773);
 const controlPort = Number(process.env.AGENTOPS_MEMORY_MULTI_E2E_CONTROL_PORT ?? 45701);
-const nowSeconds = Math.floor(Date.now() / 1_000);
+const scenarioNames = new Set(['normal', 'metrics_failure', 'metrics_timeout', 'logs_failure', 'metrics_deadline', 'logs_partial', 'metrics_hang']);
+const activeScenario = process.env.AGENTOPS_MEMORY_MULTI_E2E_SCENARIO ?? 'normal';
+if (!scenarioNames.has(activeScenario)) throw new Error(`Unsupported multi-source E2E scenario: ${activeScenario}`);
+const fixedNow = process.env.AGENTOPS_MEMORY_MULTI_E2E_NOW ?? '2026-10-21T12:00:00.000Z';
+const fixedNowMs = Date.parse(fixedNow);
+if (!Number.isFinite(fixedNowMs) || new Date(fixedNowMs).toISOString() !== fixedNow) {
+  throw new Error('AGENTOPS_MEMORY_MULTI_E2E_NOW must be a canonical ISO timestamp.');
+}
+const clock = { now: () => new Date(fixedNowMs) };
+const nowSeconds = Math.floor(clock.now().getTime() / 1_000);
 const snapshot = { start: nowSeconds - 300, end: nowSeconds, success: 85, failure: 15 };
 const sourceWindow = {
   start: new Date(snapshot.start * 1_000).toISOString(),
   end: new Date(snapshot.end * 1_000).toISOString(),
 };
-const totals = { parent: 0, metrics: 0, logs: 0, metricQueries: 0, metricAborts: 0, logPages: 0, recalledRuns: [] };
-let activeScenario = 'normal';
+const totals = { parent: 0, metrics: 0, logs: 0, metricQueries: 0, metricAborts: 0, metricAbortReasons: [], logPages: 0, recalledRuns: [] };
 const metricRaw = { data: { marker: 'MEMORY_MULTISOURCE_SIMULATED_METRIC' } };
 let metricsLab;
 let logsMcp;
@@ -47,10 +57,15 @@ try {
           throw Object.assign(new Error('Simulated Metrics timeout.'), { name: 'TimeoutError' });
         }
         if (activeScenario === 'metrics_failure') throw new Error('Simulated Metrics source failure.');
-        if (activeScenario === 'metrics_hang') {
+        if (activeScenario === 'metrics_hang' || activeScenario === 'metrics_deadline') {
           await new Promise((_, reject) => {
             const abort = () => {
               totals.metricAborts += 1;
+              const reason = signal.reason;
+              totals.metricAbortReasons.push({
+                name: reason instanceof Error ? reason.name : typeof reason,
+                message: reason instanceof Error ? reason.message : undefined,
+              });
               reject(signal.reason ?? Object.assign(new Error('Simulated Metrics request aborted.'), { name: 'AbortError' }));
             };
             signal.addEventListener('abort', abort, { once: true });
@@ -98,6 +113,7 @@ try {
     dataDirectory: root,
     workspaceRoots: [root],
     model: createParentScriptedModel(),
+    clock,
     metrics: { profileId: 'simulation', mcpUrl: metricsLab.mcpUrl, childModel: createMetricsScriptedModel() },
     logs: { profileId: 'simulation', mcpUrl: logsMcp.url, childModel: createLogsScriptedModel(), cursorSecret: 'memory-multisource-local-cursor-secret-v1' },
     sourceWindow,
@@ -131,8 +147,6 @@ function createParentScriptedModel() {
   return {
     async *stream(messages, tools, options) {
     totals.parent += 1;
-    const requestedScenario = findScenario(messages);
-    if (requestedScenario !== undefined) activeScenario = requestedScenario;
     if (hasResult(messages, 'metrics_subagent') && hasResult(messages, 'logs_subagent')
       && containsText(messages, '历史案例，非本轮事实')) totals.recalledRuns.push(options.runId);
     let response;
@@ -224,13 +238,6 @@ function toolResult(messages, toolName) {
   return undefined;
 }
 
-function findScenario(messages) {
-  const text = messages.flatMap((message) => message.blocks ?? [])
-    .filter((block) => block.type === 'text').map((block) => block.text).join('\n');
-  const match = /E2E_SCENARIO=(normal|metrics_failure|logs_failure|metrics_timeout|metrics_hang|logs_partial)/u.exec(text);
-  return match?.[1] ?? undefined;
-}
-
 function evidenceFrom(messages, toolName) {
   for (const message of messages) {
     for (const block of message.blocks ?? []) {
@@ -257,9 +264,13 @@ async function startControlServer() {
     response.end(JSON.stringify({
       runtimeReady: runtime !== undefined,
       sourceMode: 'deterministic-local-simulation',
+      scenario: activeScenario,
+      fixedNow,
+      sourceWindow,
       scriptedModelCalls: { parent: totals.parent, metrics: totals.metrics, logs: totals.logs },
       metricQueries: totals.metricQueries,
       metricAborts: totals.metricAborts,
+      metricAbortReasons: totals.metricAbortReasons,
       logPages: totals.logPages,
       recalledRuns: totals.recalledRuns,
       backendRequests: [...observedBackendRequests],
@@ -285,7 +296,7 @@ function installBackendRequestGuard(allowedUrls) {
       blockedExternalRequests += 1;
       throw new Error(`E2E blocked non-local backend request to ${target.origin}`);
     }
-    observedBackendRequests.push({ origin: target.origin, method: init?.method ?? 'GET' });
+    observedBackendRequests.push({ origin: target.origin, method: init?.method ?? 'GET', path: target.pathname });
     return originalFetch(input, init);
   };
 }

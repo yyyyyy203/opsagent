@@ -29,7 +29,7 @@
     "web:build": "pnpm --dir apps/agent-web build",
     "web:typecheck": "pnpm --dir apps/agent-web typecheck",
     "e2e": "pnpm build && pnpm web:build && playwright test",
-    "e2e:memory:multisource": "pnpm build && pnpm web:build && playwright test --config=playwright.memory-multisource.config.ts",
+    "e2e:memory:multisource": "pnpm build && pnpm web:build && node ./test/e2e/run-memory-multisource-cases.mjs",
     "e2e:multi-target": "pnpm build && pnpm web:build && node ./node_modules/@playwright/test/cli.js test --config=playwright.multi-target.config.ts",
     "acceptance:multi-target-capacity": "pnpm build && AGENTOPS_RUN_CAPACITY_ACCEPTANCE=1 pnpm exec vitest run test/multi-target-capacity.test.ts",
     "acceptance:multi-target-load": "pnpm build && AGENTOPS_RUN_MULTI_TARGET_LOAD=1 pnpm exec vitest run test/multi-target-load.test.ts",

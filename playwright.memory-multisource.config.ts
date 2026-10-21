@@ -8,11 +8,14 @@ const root = fileURLToPath(new URL('.', import.meta.url));
 const agentPort = process.env.AGENTOPS_MEMORY_MULTI_E2E_AGENT_PORT ?? '45700';
 const webPort = process.env.AGENTOPS_MEMORY_MULTI_E2E_WEB_PORT ?? '45773';
 const controlPort = process.env.AGENTOPS_MEMORY_MULTI_E2E_CONTROL_PORT ?? '45701';
+const scenario = process.env.AGENTOPS_MEMORY_MULTI_E2E_SCENARIO ?? 'normal';
+const fixedNow = process.env.AGENTOPS_MEMORY_MULTI_E2E_NOW ?? '2026-10-21T12:00:00.000Z';
 const systemChrome = process.env.AGENTOPS_MEMORY_MULTI_E2E_CHROME_PATH
   ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const launchOptions = existsSync(systemChrome) ? { executablePath: systemChrome } : undefined;
 const environment = { ...process.env, AGENTOPS_MEMORY_MULTI_E2E_AGENT_PORT: agentPort,
-  AGENTOPS_MEMORY_MULTI_E2E_WEB_PORT: webPort, AGENTOPS_MEMORY_MULTI_E2E_CONTROL_PORT: controlPort } as Record<string, string>;
+  AGENTOPS_MEMORY_MULTI_E2E_WEB_PORT: webPort, AGENTOPS_MEMORY_MULTI_E2E_CONTROL_PORT: controlPort,
+  AGENTOPS_MEMORY_MULTI_E2E_SCENARIO: scenario, AGENTOPS_MEMORY_MULTI_E2E_NOW: fixedNow } as Record<string, string>;
 const quote = (value: string) => `"${value}"`;
 
 if (process.env.TEST_WORKER_INDEX === undefined) {

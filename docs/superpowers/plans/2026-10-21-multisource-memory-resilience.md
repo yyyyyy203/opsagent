@@ -2,7 +2,7 @@
 
 - 日期：2026-10-21（Asia/Shanghai）
 - 依据：[Spec 与 R01–R12 验收矩阵](../specs/2026-10-21-multisource-memory-resilience-design.md)
-- 状态：部分实施。阶段 C/R08/R09 有前次完整验收；阶段 B 的真实超时与多来源后端批准拒绝、阶段 A/R12 的 Clock 与用例隔离仍待补；阶段 D 已执行一轮回归，最终验收须在改动后重新运行。逐条既有证据见[验收记录](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)和 STATUS。
+- 状态：阶段 A、B、C、D 的本地实现与验收均通过；任务提交尚未推送，GitHub 当前查询因 DNS 无法解析而失败。逐条证据见[验收记录](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)和 STATUS。
 - 分类：测试基础设施、适配器组合验收；仅按实际失败修复对应产品模块。
 - 兼容性：沿用公共契约、存储 Schema、审核/晋级与冻结选择规则，预计无需迁移。
 
@@ -25,10 +25,10 @@
 
 - [x] 列出现有测试与 R01–R12 的映射，确定需新增的组合断言。
 - [x] 脚本模型依据实际 ToolResult 处理成功与失败，不因缺少 evidenceId 无限重试。
-- [ ] 为多来源夹具注入业务 Clock 并同步模拟证据窗口；记录实际模型输入中的历史案例标识。Target 过期浏览器场景已有独立 Clock，不代表本夹具已满足此项。
-- [ ] 每个独立用例启动新进程、Runtime、SQLite 临时目录与统计；场景在启动前设定，活动 Run 中不允许变更。只读状态端点无需扩展成重置 API；若未来新增可变更端点，再加入每次启动的凭证与活动 Run 拒绝规则。
+- [x] 为多来源夹具注入固定业务 Clock 并同步指标/日志窗口与证据时间；测试检查真实采集时间和窗口。正常场景模型实际输入仍记录案例召回 Run。
+- [x] 每个具名用例由独立 Playwright、Agent、Vite 进程和临时 SQLite 目录承载；场景通过启动环境固定，不从消息内容切换。
 - [x] 在 Node `globalThis.fetch` 与浏览器请求观测边界统计/阻止非允许目的地；用不发送网络的拦截自测验证。其他传输入口需先具体界定，不笼统宣称全进程保证。
-- [ ] 用连续两个独立用例证明后一用例初始无前一案例、调用计数、模型记录和目录残留；当前多场景流程在单个夹具实例中串行运行，尚未满足此项。
+- [x] 七个具名用例逐一以新进程运行；每个用例先验证空案例和零来源/模型计数，结束后启动器移除临时目录并验证所有服务端口已释放。
 
 退出条件：R01 原正常闭环保持通过，R12 有可信结果；故障可以重复触发，模型能有界结束，观测覆盖范围已记录。若源码语义与 Spec 冲突，先登记差异，不改规则来迁就测试。
 
@@ -42,11 +42,11 @@
 | `src/infrastructure/sqlite/memory-capture-source.ts`、`src/memory/case-builder.ts`、`src/memory/review-service.ts`、`apps/agent-web/src/components/MemoryPanel.tsx` | 条件性修复范围；先以失败测试复现，再最小修改。不得因计划列出文件就无条件重构。 |
 
 - [x] 来源错误与立即抛出的模拟 TimeoutError 从 source 产生，没有 mock 最终 memory API；真实计时器触发的超时仍待补。
-- [ ] 失败用例保留可用证据并检查 ownerRunId、evidenceId、原文/哈希回查。
-- [ ] 对 Metrics 失败、Logs 失败、Logs partial 和真实超时产生的不足案例，直接请求 `POST /memory/cases/:id/review`，断言 422/`MEMORY_APPROVAL_DENIED`；再次 GET 案例，断言 `status=observation`、revision 不变，同时检查 UI 按钮禁用。
-- [ ] 新增持续等待的 Metrics 来源，让现有 MCP 真实 7s 截止信号触发取消；断言 Abort 原因、调用上界、终态、无错误成功证据和资源释放。保留现有显式 Run cancel 用例作为独立对照。
-- [ ] Logs 已有页后失败/截断的 partial 行为按现有契约验证。
-- [ ] requiredSources 包含与不包含 trace 的质量判断形成对照。
+- [x] Metrics/Logs 失败、partial 和超时场景的候选引用回查对应子 Run/evidenceId、采集时间和 SHA-256。
+- [x] 对 Metrics 失败、立即 TimeoutError、Logs 失败、Logs partial 和真实截止场景直接请求审核 API；均为 422/`MEMORY_APPROVAL_DENIED`，回读状态仍为 observation 且 revision 不变，UI 按钮禁用。
+- [x] 持续等待的 Metrics 来源由 MCP 的 7 秒真实截止信号取消；三次有界调用均记录 TimeoutError，无指标成功证据，Run 结束且用例退出后端口释放。显式 Run cancel 由独立用例对照验证。
+- [x] Logs 已有页后失败的 partial 行为按现有契约验证，保留完整指标证据引用。
+- [x] requiredSources 可选/必需 Trace 的质量对照复用 `test/memory-capture-source.test.ts`；全量单测通过。
 
 退出条件：R02–R05、R11 通过，R01 无回退；API 与 UI 对不足案例的处理一致。确定性模型的文字回答不作为唯一通过条件。
 
@@ -95,7 +95,7 @@ Target 记忆流程由 `pnpm e2e:multi-target` 覆盖；原记忆禁用态场景
 - [x] 标明模拟验收与真实数据/在线模型/生产授权验收的边界。
 - [x] 检查本任务修改、`git diff --check`，更新计划和 `docs/STATUS.md`。
 - [x] 核对工作分支和远端；此前因网络阻塞未完成的提交已在本次 fetch 后普通 push，远端确认到 `a004da1`。
-- [ ] B/A 补充实现后，在新工作树重新执行本节全部相关命令、更新验收记录，再核对并推送最终实现提交；不得沿用前次通过记录。
+- [x] B/A 实现后重新执行本节相关核心、记忆、Target 和浏览器命令，并更新验收记录；本地检查通过。GitHub 分支查询因 DNS 失败，提交推送作为交付待办记录在 STATUS，不宣称远端已同步。
 
 退出条件：R01–R12 有本次可复现证据，必要质量门通过，相关缺陷已修复，报告/状态更新并提交推送。文档编写完成、某一条正常测试通过或仅本地 commit 都不等于本实施计划完成。
 
@@ -103,12 +103,12 @@ Target 记忆流程由 `pnpm e2e:multi-target` 覆盖；原记忆禁用态场景
 
 | 阶段 | 状态 | 本次结果 |
 | --- | --- | --- |
-| A | 部分完成 | 测试/R 矩阵映射、ScriptedModel 有界失败处理、Node fetch/浏览器请求观测、自测拦截和来源取消已验证。多来源夹具 Clock 与独立用例状态隔离证明尚未完成；新增传输入口需具体定义。 |
-| B | 补验收中 | Metrics/Logs 失败、立即抛 TimeoutError、Logs partial 浏览器矩阵曾通过；真实计时器超时与异常案例直接请求后端批准仍缺组合断言。 |
+| A | 本地验收通过 | 固定 Clock、七个独立进程用例、空数据库/零计数起始检查、临时目录清理和端口释放检查通过。请求观测覆盖浏览器请求与 Node `globalThis.fetch`；MCP SDK 的 HTTP 入口经该 `fetch` 记录为 `GET/POST /mcp`。未覆盖绕开 `fetch` 的原生 socket 或其他进程。 |
+| B | 通过 | 五种异常候选均由后端拒绝批准且状态/revision 不变；真实 7 秒 Metrics 截止取消与显式 Run cancel 分开通过，来源调用最多三次，超时原因及无错误成功证据均有结构化断言。 |
 | C | 完成 | R08/R09：同库 Target A/B 的浏览器采集、批准、正向召回、切换后隔离、跨 Target 证据/审核拒绝通过；Clock 验证到期前、等于到期和到期后不召回，UI 显示过期且不重写批准状态。 |
-| D | 待最终复验 | 前次质量门、浏览器验收、报告和差异检查已完成；B/A 补充实现后须在新工作树重跑。本轮方案提交已推送并核对远端为 `18f2753`。 |
+| D | 本地验收通过，推送待办 | lint、typecheck、test、build、Web 检查、记忆验收、多来源/Target/记忆浏览器回归及 `git diff --check` 均有本次结果。远端查询失败：`Could not resolve host: github.com`。 |
 
-本计划仍未整体完成：B 的真实超时和后端批准门禁、A 的多来源夹具 Clock 与独立用例隔离、D 的本次最终回归仍待实施。R12 当前已证明的请求边界是 Node `fetch` 与浏览器请求；新增传输入口应按实际调用链决定是否扩展观测。R08/R09 已完成，不应作为下一轮重复工作。
+本计划的代码实现与本地验收已完成，按 AGENTS §18 仍须独立提交并推送后才能关闭任务。R12 当前证明的请求边界为浏览器请求及 Node `fetch`（包括本夹具 MCP SDK 的 HTTP 请求）；没有证明任意 socket 或其他进程的全网出站。R08/R09 已完成，只需作为回归，不应重复实施。
 
 ## 7. 剩余改动的逐步实施方案
 

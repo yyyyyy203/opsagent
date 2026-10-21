@@ -1,7 +1,7 @@
 # 多来源记忆异常与隔离验收 Spec
 
 - 日期：2026-10-21（Asia/Shanghai）
-- 状态：部分实施；R01–R11 有前次测试证据，但 R02/R03/R05 的多来源后端批准拒绝、R04 的真实超时取消仍缺组合验收。R12 已验证 Node `fetch` 与浏览器请求观测及拦截自测；多来源夹具 Clock 和独立用例隔离仍待证明。具体证据与边界见[验收记录](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)。
+- 状态：本轮实现和本地回归验收通过，GitHub 推送待网络恢复。R01–R12 均有本次或复用的确定性证据；请求观测边界仅包括浏览器请求和 Node `globalThis.fetch`。具体结果与未覆盖项见[验收记录](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)。
 - 实施计划：[阶段 A–D](../plans/2026-10-21-multisource-memory-resilience.md)
 - 上位约束：[AGENTS.md](../../../AGENTS.md)、[项目范围](../../PROJECT.md)、[决策索引](../../DECISIONS.md)
 - 关联设计：[多项目适配](./2026-10-11-multi-project-adaptation-design.md)
