@@ -47,6 +47,7 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - 本任务涉及四份文件：上述 Spec、Plan、`docs/PROJECT.md`、`docs/STATUS.md`。开始时工作区干净；阶段 A–D 未启动。
 - 已检查当前分支 `codex/event-message-v2`、远端、既有测试和记忆接口；`git diff --check` 通过，四份文档的 25 个本地链接有效，R01–R12 矩阵及 A–D 未开始状态检查通过。核心/Web 构建和测试未运行：本次仅修改文档，不沿用前次结果作为通过依据。
 - 未触发契约、Schema、审核/晋级语义变更，不新增设计决策；后续实施若触发门槛，先补决策。
-- 提交范围限定为上述四份文档，目标为当前 `origin/codex/event-message-v2`；同步状态以本地/远端提交比较为准，若受阻须追加原因和待办。下一步实施不包含在本次文档交付内。
+- 四份方案文档已独立提交为 `74c9bdb`；GitHub 同步受阻，文档交付尚未满足推送完成条件。首次推送返回 `Error in the HTTP2 framing layer`；仅对重试命令改用 HTTP/1.1 后，仍在约 75 秒后无法连接 `github.com:443`。未修改全局 Git 配置，不能宣称远端已同步。
+- 待办：网络恢复后核对远端分支，再推送当前 `codex/event-message-v2`（包含本条阻塞记录）并核对远端提交；如远端已变化，先处理差异，禁止强推。下一步实施不包含在本次文档交付内。
 
 此前逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。
