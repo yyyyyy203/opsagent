@@ -35,6 +35,8 @@ pnpm web:build
 
 ## 迭代方式
 
+下一项已规划任务为[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)，按[阶段 A–D 实施计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)推进可信夹具、来源异常、召回资格与作用域隔离、完整回归。当前仅记录方案，实施尚未开始；延续本地模拟与既有契约边界。
+
 每个对话推进一个可验收任务；大任务按可独立验收的阶段交接。任务说明目标、范围、验收条件和约束。每完成一个任务或阶段，先核对验收条件，更新 [STATUS.md](./STATUS.md)，将本任务改动独立提交并推送到 GitHub 工作分支，然后标记完成或转入下一项。只有目标或架构改变时更新本文件，重要设计决策记录在 [DECISIONS.md](./DECISIONS.md)，规则改变时更新根目录 `AGENTS.md`。详细历史进度保留在 [implementation-status.md](./implementation-status.md)。
 
 新对话可从下面的指令开始；同一任务的后续轮次仍需重新核对工作区，而不直接把文档快照当成最新代码事实：
