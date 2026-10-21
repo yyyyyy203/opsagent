@@ -207,6 +207,7 @@ export function MemoryPanel({ profileId, targetId, runId, runTerminal, preferenc
           <p className="memory-case-meta">来源 Run <code>{item.sourceRunId}</code> · {item.sourceRunStatus}</p>
           {item.sourceRunStatus !== 'completed' && <p className="memory-archive-note">失败调查，仅供归档，不可批准召回</p>}
           {item.scope.dataClass === 'simulated' && <p className="memory-simulation-note">仅模拟环境可用，不可晋级</p>}
+          {Date.parse(item.validUntil) <= Date.now() && <p className="memory-expired-note">已过期，不能作为历史参考</p>}
           <p className="memory-case-meta">有效期至 <time dateTime={item.validUntil}>{formatDate(item.validUntil)}</time></p>
           {item.evidenceRefs.map((reference) => <button type="button" className="memory-evidence-link" key={`${reference.ownerRunId}:${reference.evidenceId}`}
             disabled={!reference.evidenceId || !reference.ownerRunId} onClick={() => onOpenEvidence?.(reference.ownerRunId, reference.evidenceId)}>

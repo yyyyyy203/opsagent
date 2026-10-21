@@ -18,8 +18,8 @@
 | R05 | 通过 | `logs_partial` 在第二页失败，浏览器读取到 `log` partial 证据，候选不足且不可批准。 |
 | R06 | 通过 | 多来源浏览器流程先检查 observation 不进入模型输入，批准后检查召回；既有记忆 API/召回测试覆盖拒绝资格过滤。单来源记忆 E2E 亦覆盖拒绝流程。 |
 | R07 | 通过 | 多来源流程批准后召回、撤销后再次运行并检查模型输入不再含该案例；`test/memory-recall.test.ts` 覆盖冻结选择重校验。 |
-| R08 | 部分通过 | `test/memory-recall.test.ts` 使用注入时间验证到期过滤和召回期间资格重校验；未增加浏览器过期展示及完整到期前/等于/到期后三段 E2E。 |
-| R09 | 部分通过 | 新增 `test/memory-recall.test.ts`：同一临时 SQLite 放入 Target A/B 案例，相同查询分别只召回各自案例，并拒绝读取错误 dataset/service 案例；现有 Target policy、API 隔离测试及 `pnpm e2e:multi-target` 回归通过。没有把 Target 切换、来源采集、记忆批准与召回组合成单一浏览器流程，因此 R09 未完全验收。 |
+| R08 | 通过 | `pnpm e2e:multi-target` 中的 Target 记忆浏览器流程先在有效期内正向召回，再由注入 Clock 精确推进到 `validUntil` 及其后 1ms；两次新 Run 的实际模型输入都不含案例标记。UI 显示“已过期，不能作为历史参考”，原案例仍是已批准状态。 |
+| R09 | 通过 | 同一 Target Web 宿主及 SQLite：A 经真实 Target Run 工具管线采集证据、手动沉淀、批准并在实际后续模型输入中召回；B 切换后案例列表为空、模型输入没有 A 标记。B 跨 Target 读取 A 案例/证据及提交审核均返回 404。另有 `test/memory-recall.test.ts` 的同库 A/B 正向隔离集成断言。 |
 | R10 | 通过（存储/召回层） | 新增 SQLite 作用域用例对 Target、dataset、service 做正向与反向隔离断言；`test/memory-recall.test.ts` 另有完整 scope 维度过滤测试。未另建 Target 端到端浏览器入口。 |
 | R11 | 通过（既有策略验收） | `pnpm acceptance:memory` 的 6 格策略矩阵通过，Trace 可选/必需的质量策略由现有确定性策略验收覆盖；本轮未新增独立 Trace-required 浏览器场景。 |
 | R12 | 部分通过 | 多来源夹具以实际 Node `globalThis.fetch` 后端传输入口记录允许来源、方法并拦截非本地来源；禁止目的地自测在发起网络请求前被拒绝。浏览器来源也受断言。观测不覆盖绕开 `fetch` 的原生 socket/其他进程传输；场景通过 Run 提示中的有限 marker 选择，测试串行运行，未提供通用活动 Run 重置控制面。 |
@@ -38,7 +38,7 @@
 | `TMPDIR=/private/tmp pnpm test` | 通过：215 个文件通过、5 个 opt-in 文件跳过；2247 项通过、9 项跳过。 |
 | `TMPDIR=/private/tmp pnpm acceptance:memory` | 通过：13 项检查、6 格策略矩阵；`modelRequestsSent=0`、`externalRequestsSent=0`、`externalRequestsBlocked=0`。 |
 | `AGENTOPS_MEMORY_MULTI_E2E_AGENT_PORT=48700 AGENTOPS_MEMORY_MULTI_E2E_WEB_PORT=48773 AGENTOPS_MEMORY_MULTI_E2E_CONTROL_PORT=48701 pnpm e2e:memory:multisource` | 通过：3/3。覆盖正常闭环、4 个来源异常场景、活动来源请求取消；Web 与核心构建通过。 |
-| `pnpm e2e:multi-target` | 通过：1/1。使用本机 Chrome 可执行文件配置。 |
+| `pnpm e2e:multi-target` | 通过：2/2，包含既有 Target 工作台回归和新的 Target 记忆隔离/到期流程。使用本机 Chrome 可执行文件配置。 |
 | `pnpm exec playwright test --config=playwright.memory.config.ts` | 通过：10 项通过、1 项跳过。 |
 | `AGENTOPS_MEMORY_E2E_DISABLED=1 pnpm exec playwright test --config=playwright.memory.config.ts -g 'disabled memory keeps existing inspection usable'` | 通过：1/1。 |
 | `git diff --check` | 通过。 |
@@ -47,7 +47,5 @@
 
 ## 未完成与下一步
 
-- R09：补专用 Target Web E2E fixture，把宿主 Target 选择、真实来源采集、沉淀/审核、A/B 切换后的召回/证据归属串起来，并验证跨 Target 证据读取和审核拒绝。
-- R08：补浏览器有效期展示，或将 UI 不在本轮范围写入 Spec 并保持集成测试覆盖边界。
-- R12 / 阶段 A：决定是否需要针对原生 HTTP/socket 补观测；补用例级时钟和重置/清理验证，避免把当前 fetch 观测范围外推为全进程网络保证。
-- 完成上述阶段后重跑相关矩阵和规定质量门，更新 STATUS/Plan，再独立提交并推送当前工作分支。
+- R12 / 阶段 A：决定是否需针对原生 HTTP/socket 补观测；当前报告只声明 Node `globalThis.fetch` 和浏览器请求范围，并使用单 worker 串行用例，不外推为全进程网络保证或通用运行中重置能力。
+- 推送本次 Target 记忆闭环及过期行为后续提交；后续若扩充 R12 观测范围，先更新 Spec/Plan 和验收证据。

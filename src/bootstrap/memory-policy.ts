@@ -6,6 +6,7 @@ import { MemoryError } from '../memory/memory-error.js';
 import type { MemoryScope } from '../contracts/diagnostic-memory.js';
 
 const identifier = z.string().min(1).max(256).regex(/^[\p{L}\p{N}][\p{L}\p{N}._-]*$/u);
+const profileRevisionIdentifier = /^[\p{L}\p{N}][\p{L}\p{N}._-]*(?:\/[\p{L}\p{N}][\p{L}\p{N}._-]*)?$/u;
 const profile = z.object({
   scope: memoryScopeSchema,
   profilePolicyRevision: identifier,
@@ -34,8 +35,11 @@ export function parseDiagnosticMemoryConfig(input: unknown): DiagnosticMemoryCon
     if (seen.has(item.scope.profileId)) throw new MemoryError('MEMORY_SCOPE_INVALID');
     seen.add(item.scope.profileId);
     // Scope labels are non-sensitive host resource IDs, never endpoints or credentials.
-    for (const label of Object.values(item.scope)) {
-      if (!identifier.safeParse(label).success || /\b(?:localhost|\d{1,3}(?:\.\d{1,3}){3})\b|\.internal\b|^sk-/iu.test(label)) {
+    for (const [key, label] of Object.entries(item.scope)) {
+      const validLabel = key === 'profileRevision'
+        ? profileRevisionIdentifier.test(label)
+        : identifier.safeParse(label).success;
+      if (!validLabel || /\b(?:localhost|\d{1,3}(?:\.\d{1,3}){3})\b|\.internal\b|^sk-/iu.test(label)) {
         throw new MemoryError('MEMORY_SCOPE_INVALID');
       }
     }

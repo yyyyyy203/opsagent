@@ -105,7 +105,7 @@ AGENTOPS_MEMORY_E2E_DISABLED=1 pnpm exec playwright test --config=playwright.mem
 | --- | --- | --- |
 | A | 部分完成 | 补充 AGENTS 方案落盘规则；ScriptedModel 有界处理失败结果、本地请求拦截与来源取消已验证。业务 Clock 注入、用例级全状态重置/隔离证明尚未完整覆盖。 |
 | B | 完成 | Metrics/Logs 失败、Metrics 超时、Logs partial 浏览器矩阵通过；本次全量记忆测试和 acceptance:memory 通过。 |
-| C | 部分完成 | 同一 SQLite 的 Target A/B 正向召回和互相隔离测试通过；单来源记忆 UI 回归通过。缺 Target 切换与记忆采集/召回一体化浏览器夹具，R09 不满足完整退出条件。 |
-| D | 进行中 | lint、typecheck、web:typecheck、test、memory acceptance、multi-source/multi-target/memory Web E2E 已通过；验收报告、最终差异检查与 Git 同步待完成。 |
+| C | 完成 | 同库 Target A/B 的浏览器采集、批准、正向召回、切换后隔离、跨 Target 证据/审核拒绝通过；Clock 验证到期前、等于到期和到期后不召回，UI 显示过期且不重写批准状态。 |
+| D | 进行中 | lint、typecheck、web:typecheck、test、memory acceptance、multi-source/multi-target/memory Web E2E 均通过；报告、最终差异检查和 Git 同步收尾中。 |
 
-本轮不能标记整个计划完成：R09 组合浏览器场景和阶段 A 中未完整证明的隔离条件仍待完成；其它已执行结果及环境边界见验收记录与 STATUS。
+本轮不能标记整个计划完成：阶段 A/R12 对原生 socket 等非 `fetch` 传输入口及通用活动 Run 重置的证明仍未覆盖；已执行结果及环境边界见验收记录与 STATUS。

@@ -87,7 +87,7 @@ describe('host memory policy', () => {
   });
 
   it('derives Target memory from the exact frozen MemoryScope and fails closed on scope drift', () => {
-    const scope = { ...simulationMemoryScope(), profileId: 'market-a.lab.settlement',
+    const scope = { ...simulationMemoryScope(), profileId: 'market-a.lab.settlement', profileRevision: 'profile/v1',
       targetFingerprint: 'market-a-lab-dataset-a', datasetId: 'dataset-a-v1' };
     const config = parseDiagnosticMemoryConfig({ ...deployment(), profiles: [{ scope, profilePolicyRevision: 'profile-v1' }] });
     expect(resolveTargetMemoryControl(config, scope, { capture: 'manual', recall: 'enabled' }))

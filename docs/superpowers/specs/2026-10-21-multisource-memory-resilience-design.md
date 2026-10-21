@@ -1,7 +1,7 @@
 # 多来源记忆异常与隔离验收 Spec
 
 - 日期：2026-10-21（Asia/Shanghai）
-- 状态：实施中；R01–R08、R10–R12 有本次测试证据，R09 的共享 SQLite 集成部分通过，Target 切换与记忆召回组合浏览器验收未完成。详见[验收记录](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)。
+- 状态：实施中；R01–R11 有本次测试证据，R12 的 `fetch` 观测与拦截自测通过但全传输栈/通用重置隔离仍未覆盖。详见[验收记录](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)。
 - 实施计划：[阶段 A–D](../plans/2026-10-21-multisource-memory-resilience.md)
 - 上位约束：[AGENTS.md](../../../AGENTS.md)、[项目范围](../../PROJECT.md)、[决策索引](../../DECISIONS.md)
 - 关联设计：[多项目适配](./2026-10-11-multi-project-adaptation-design.md)

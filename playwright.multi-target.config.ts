@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('.', import.meta.url));
 const agentPort = process.env.AGENTOPS_MULTI_TARGET_AGENT_PORT ?? '45600';
 const webPort = process.env.AGENTOPS_MULTI_TARGET_WEB_PORT ?? '45673';
-const env = { ...process.env, AGENTOPS_MULTI_TARGET_AGENT_PORT: agentPort, AGENTOPS_MULTI_TARGET_WEB_PORT: webPort };
+const controlPort = process.env.AGENTOPS_MULTI_TARGET_CONTROL_PORT ?? '45674';
+const env = { ...process.env, AGENTOPS_MULTI_TARGET_AGENT_PORT: agentPort, AGENTOPS_MULTI_TARGET_WEB_PORT: webPort,
+  AGENTOPS_MULTI_TARGET_CONTROL_PORT: controlPort };
 const quote = (value: string) => `"${value}"`;
 const systemChrome = process.env.AGENTOPS_MULTI_TARGET_CHROME_PATH
   ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';

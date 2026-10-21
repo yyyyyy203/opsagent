@@ -7,6 +7,7 @@ import type { TargetIdentityRegistry, TargetKnowledgePolicyStore, TargetOperatio
 import type { KnowledgePublicationInspectionPort } from '../contracts/knowledge-memory-storage.js';
 import type { ModelIdentity } from './model-identity.js';
 import type { RuntimeToolPorts } from '../application/create-runtime.js';
+import type { EvidenceRecorder } from '../application/evidence-recorder.js';
 import type { ReplyOptions } from '../agent/types.js';
 import { systemClock, randomIdGenerator } from '../contracts/index.js';
 import { createInspectionRuntime } from './inspection-runtime.js';
@@ -133,6 +134,8 @@ export interface TargetResolverFactoryPorts {
 export interface TargetRecoveryFactoryPorts extends TargetResolverFactoryPorts {
   resolver: TargetResolver;
   durableState: DurableRunState;
+  /** Host-owned evidence persistence boundary shared by Target-bound Tools. */
+  evidenceRecorder: EvidenceRecorder;
   /** Ephemeral host-lifetime capability; never persist it or place it in AgentContext/events. */
   sourcePartitions: TargetSourcePartitionRegistryPort;
 }
@@ -315,7 +318,8 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
           },
         });
         const ports: TargetRecoveryFactoryPorts = { identityRegistry, knowledgePolicies, knowledgePublications,
-          knowledgeCapabilities, resolver: targetResolver, durableState: runtime.durableState, sourcePartitions };
+          knowledgeCapabilities, resolver: targetResolver, durableState: runtime.durableState,
+          evidenceRecorder: runtime.evidenceRecorder, sourcePartitions };
         targetRecoveryGate = new TargetRecoveryService({
           bindings: runtime.durableState.targetBindings,
           identityRegistry,
