@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "profiles": [
+    {
+      "scope": {
+        "profileId": "simulation",
+        "profileRevision": "sim-v1",
+        "serviceId": "checkout",
+        "faultType": "settlement_failure",
+        "targetFingerprint": "local-metrics-logs-simulation",
+        "environment": "simulation",
+        "dataClass": "simulated",
+        "datasetId": "logs-lab-settlement-failure-v1"
+      },
+      "profilePolicyRevision": "sim-memory-policy-v1",
+      "captureDefault": "manual",
+      "recallDefault": false,
+      "allowAutomaticCapture": false,
+      "allowRecall": true
+    }
+  ],
+  "requiredSources": ["metric", "log"],
+  "modelWindowTokens": 32768,
+  "reservedOutputTokens": 4096
+}

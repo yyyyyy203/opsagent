@@ -91,8 +91,12 @@ export class SqliteMemoryCaptureSource implements MemoryCaptureSource {
     for (const code of run.missingEvidence.slice(0, 20)) limitations.add(safeCode(code));
 
     const refsBySource = new Set(refs.map((reference) => reference.source));
+    // Metrics and Logs simulation runs report missing traces because Trace is an optional source.
+    // Keep that gap visible as a limitation without failing a Profile whose requiredSources omit trace.
+    const requiredRunGaps = run.missingEvidence.filter((code) =>
+      code !== 'traces' || request.requiredSources.includes('trace'));
     const requiredEvidenceComplete = request.requiredSources.every((required) =>
-      refsBySource.has(required) && !sourceIncomplete.has(required)) && run.missingEvidence.length === 0
+      refsBySource.has(required) && !sourceIncomplete.has(required)) && requiredRunGaps.length === 0
       && page.nextCursor === undefined;
     return { context: snapshot.context, evidenceRefs: refs.slice(0, 20),
       requiredEvidenceComplete, limitations: [...limitations].slice(0, 20) };

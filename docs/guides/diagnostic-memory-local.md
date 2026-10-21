@@ -1,47 +1,23 @@
 # 受控诊断记忆：本地启用与离线验收
 
-本指南对应[受控诊断记忆一期 Spec R2](../superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)。当前实现范围是 Working Run 状态恢复和 Episodic 巡检案例沉淀/审核/有限召回；Semantic、Procedural 完整知识库和向量检索仍是后续工作。
+本指南对应[受控诊断记忆一期 Spec R2](../superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)。模拟 Profile 的工作台可使用 Working Run 状态恢复和 Episodic 巡检案例沉淀/审核/有限召回。Semantic、Procedural 的目标端能力需要显式 Target Runtime 和知识治理 Host；默认 `apps/agent-server` 未组装这些能力。向量检索仍通过独立实验入口验证。
 
 ## 默认行为
 
 记忆能力默认关闭。未设置 `AGENTOPS_MEMORY_ENABLED=1` 时，Agent 保持无记忆行为，旧版巡检请求仍可运行。启用时需要通过 `AGENTOPS_MEMORY_CONFIG` 指向一个本机绝对路径 JSON 配置文件；配置仅描述 Profile、scope、保存策略、召回策略和 token 预算，不接受模型端点、API Key 或任意查询语句。
 
-下面是**模拟环境**配置的形状示例。`targetFingerprint` 必须是目标 Profile 指纹，不能照抄示例到实际环境；启用 Profile 必须同时在 Web Host 的 Profile allowlist 中。
+仓库提供了仅供本地模拟 Metrics+Logs 巡检使用的[记忆配置](../../examples/diagnostic-memory-simulation.json)。scope 固定标识 `simulation`、`checkout`、`settlement_failure` 和 Logs Lab 模拟数据集；它不是 `group-buy-market` 身份，也不能用于真实目标。配置要求一个 Run 同时有指标和日志证据；缺少任一必需来源时，该 Run 不满足沉淀质量门。未配置的 Trace 缺口会保留在案例限制中，不会阻止该模拟 Profile 的指标与日志案例沉淀。
 
-```json
-{
-  "enabled": true,
-  "profiles": [
-    {
-      "scope": {
-        "profileId": "simulation",
-        "profileRevision": "sim-v1",
-        "serviceId": "settlement",
-        "faultType": "settlement_failure",
-        "targetFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "environment": "simulation",
-        "dataClass": "simulated",
-        "datasetId": "memory-lab-v1"
-      },
-      "profilePolicyRevision": "memory-policy-v1",
-      "captureDefault": "manual",
-      "recallDefault": false,
-      "allowAutomaticCapture": false,
-      "allowRecall": true
-    }
-  ],
-  "requiredSources": ["metric"],
-  "modelWindowTokens": 32768,
-  "reservedOutputTokens": 4096
-}
-```
-
-运行服务时，在同一个 PowerShell 会话中设置部署开关和配置文件路径。配置 JSON 应放在受控本地目录并限制文件 ACL；不要写入密钥、客户数据、内部 URL 或业务原始遥测。
+结合本地模拟指标和日志进行验证时，先按[Logs Web 本地验收指南](./logs-web-elasticsearch-local.md)启动 `settlement_failure` 场景，并在启动 Agent Web 的同一个 PowerShell 会话设置记忆开关和配置绝对路径。`AGENTOPS_LOGS_MCP_URL` 与 `AGENTOPS_EVIDENCE_CURSOR_SECRET` 也必须按该指南配置：
 
 ```powershell
 $env:AGENTOPS_MEMORY_ENABLED = '1'
-$env:AGENTOPS_MEMORY_CONFIG = 'D:\agentops-config\diagnostic-memory.json'
+$env:AGENTOPS_MEMORY_CONFIG = (Resolve-Path '.\examples\diagnostic-memory-simulation.json').Path
 ```
+
+之后正常运行 `pnpm web:server`。配置文件不含密钥，只包含固定模拟 scope 和策略；不要把本地数据目录或证据 Blob 提交到 Git。该模拟入口不部署、不修改、不连接 `group-buy-market`。
+
+此 Profile 只允许手动沉淀，默认关闭召回和自动沉淀。UI 中“沉淀本次巡检”要求 Run 已完成且有完整的指标与日志证据；候选先进入 `observation`，需人工审核后才可在同 scope 的后续 Run 中启用历史召回。若只想验证巡检本身，不需要启用记忆，默认关闭即可。
 
 恢复为默认关闭：
 

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { resolve } from 'node:path';
 import { applyManualReview, evaluateAcceptance } from '../src/acceptance/index.js';
+import type { DiagnosticMemoryCase, MemoryCaptureTicket, MemoryCapabilities } from '../src/contracts/diagnostic-memory.js';
+import { readDiagnosticMemoryConfig } from '../src/bootstrap/diagnostic-memory.js';
 import { readSourceReports } from '../src/acceptance/source-reports.js';
 import { readAcceptanceSnapshot } from '../src/bootstrap/acceptance-reader.js';
 import { createAcceptanceFixture } from './fixtures/acceptance-cases.js';
@@ -30,6 +33,56 @@ describe('scripted combined-source acceptance fixtures', () => {
 });
 
 describe('scripted combined-source runtime acceptance', () => {
+  it('captures and reviews one simulation memory case from both metric and log evidence', async () => {
+    const diagnosticMemory = await readDiagnosticMemoryConfig({ AGENTOPS_MEMORY_ENABLED: '1',
+      AGENTOPS_MEMORY_CONFIG: resolve(process.cwd(), 'examples/diagnostic-memory-simulation.json') });
+    const runtime = await startScriptedAcceptanceRuntime({ logs: 'available', diagnosticMemory });
+    active.push(runtime);
+    const runId = 'acceptance-runtime-parent';
+    const started = await fetch(`${runtime.web.url}/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ runId, message: '检查 checkout 结算失败', profileId: 'simulation', maxToolCalls: 12,
+        memoryPreferences: { capture: 'manual', recall: 'disabled' } }),
+    });
+    expect(started.status).toBe(202);
+    await waitForTerminal(runtime.web.url, runId, 'completed');
+
+    const capabilities = await readJson<MemoryCapabilities>(`${runtime.web.url}/memory/capabilities?profileId=simulation`);
+    expect(capabilities).toMatchObject({ enabled: true, manualCapture: true, automaticCapture: false,
+      recall: true, defaults: { capture: 'manual', recall: false } });
+    const capture = await readJson<MemoryCaptureTicket>(`${runtime.web.url}/runs/${runId}/memory/capture`);
+    expect(capture.sourceCheckpointRevision).toBeGreaterThan(0);
+    const queued = await fetch(`${runtime.web.url}/runs/${runId}/memory/capture`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: 'simulation-dual-source-capture',
+        expectedCheckpointRevision: capture.sourceCheckpointRevision }),
+    });
+    expect([200, 202]).toContain(queued.status);
+
+    const saved = await readJson<MemoryCaptureTicket>(`${runtime.web.url}/runs/${runId}/memory/capture`);
+    expect(saved.state).toBe('saved');
+    const cases = await readJson<DiagnosticMemoryCase[]>(`${runtime.web.url}/memory/cases?profileId=simulation`);
+    expect(cases).toHaveLength(1);
+    const candidate = cases[0];
+    if (candidate === undefined) throw new Error('SIMULATION_MEMORY_CASE_MISSING');
+    expect(candidate).toMatchObject({ sourceRunId: runId, sourceRunStatus: 'completed', status: 'observation', quality: 'sufficient' });
+    expect(candidate.evidenceRefs.map(reference => reference.source).sort()).toEqual(['log', 'metric']);
+    expect(candidate.limitations).toContain('TRACES');
+    expect(JSON.stringify(candidate)).not.toContain(runtime.rawMetricsCanary);
+    expect(JSON.stringify(candidate)).not.toContain(runtime.rawLogsCanary);
+
+    const reviewed = await fetch(`${runtime.web.url}/memory/cases/${candidate.id}/review`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ profileId: 'simulation', requestId: 'simulation-dual-source-review',
+        expectedRevision: candidate.revision, decision: 'approved', claimCheck: 'supported' }),
+    });
+    expect(reviewed.status).toBe(200);
+    expect(await reviewed.json()).toMatchObject({ status: 'approved', eligibleForPromotion: false });
+    expect(runtime.metricsQueries()).toBe(1);
+    expect(runtime.logsQueries()).toBe(1);
+  });
+
   it('runs both canonical source subagents and keeps evidence and LangSmith export free of raw canaries', async () => {
     const runtime = await startScriptedAcceptanceRuntime({ logs: 'available' });
     active.push(runtime);

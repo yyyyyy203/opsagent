@@ -54,6 +54,8 @@ pnpm web:dev
 
 `simulation` 使用本地 Prometheus lab 产生的模拟遥测数据，不代表生产数据；`group-buy-market` 当前仍未接入 Prometheus、ELK 或 Trace。Agent Web 不会自动启动 Docker、模拟器或 Prometheus，也不提供模拟器写控制。
 
+如需在指标与日志模拟 Run 上验证 Episodic 记忆，可按[诊断记忆本地启用指南](./diagnostic-memory-local.md)显式启用，并按[Logs Web 本地验收指南](./logs-web-elasticsearch-local.md)同时提供两个只读来源。记忆开关未设置时保持关闭。验证使用本地模拟数据，不需要重新部署或改动 `group-buy-market`；日志/指标来源或场景变化时应使用新的模拟数据集标识，避免将不同夹具的案例混在一起。
+
 ## 页面行为
 
 - 左侧显示公开 Run 历史；中间提交 Profile 和巡检问题，展示公开消息块。

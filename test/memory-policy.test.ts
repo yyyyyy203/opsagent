@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { resolve } from 'node:path';
 import type { DiagnosticMemoryConfig } from '../src/contracts/diagnostic-memory.js';
 import { HostMemoryPolicy, parseDiagnosticMemoryConfig, resolveMemoryControl, resolveTargetMemoryControl } from '../src/bootstrap/memory-policy.js';
 import { readDiagnosticMemoryConfig } from '../src/bootstrap/diagnostic-memory.js';
@@ -15,6 +16,18 @@ function expectPolicyDenied(action: () => unknown): void {
 }
 
 describe('host memory policy', () => {
+  it('loads the checked-in simulation configuration with both evidence sources required', async () => {
+    const config = await readDiagnosticMemoryConfig({ AGENTOPS_MEMORY_ENABLED: '1',
+      AGENTOPS_MEMORY_CONFIG: resolve(process.cwd(), 'examples/diagnostic-memory-simulation.json') });
+
+    expect(config).toMatchObject({ enabled: true, profiles: [{ scope: {
+      profileId: 'simulation', serviceId: 'checkout', faultType: 'settlement_failure',
+      environment: 'simulation', dataClass: 'simulated', datasetId: 'logs-lab-settlement-failure-v1',
+    }, captureDefault: 'manual', recallDefault: false, allowAutomaticCapture: false, allowRecall: true }],
+    requiredSources: ['metric', 'log'] });
+    expect(resolveMemoryControl(config, 'simulation')).toMatchObject({ capture: 'manual', recall: false });
+  });
+
   it('makes enabled defaults restrictive and resolves only the host Profile scope', () => {
     const config = parseDiagnosticMemoryConfig(deployment());
     expect(config).toMatchObject({ profiles: [{ captureDefault: 'manual', recallDefault: false,

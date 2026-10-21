@@ -354,7 +354,7 @@ Implementation Plan 中给出 Worker、手动捕获、审核、召回、Schema �
 
 Worker 只能使用已持久化的 Run 状态、实际诊断文本和有界证据元数据；禁止读取模拟器 oracle/rootCause、评测 expectedOutcome 或标签文件。评测库和日常试验库分离，当前 Run 永远列入 excludeRunIds。手动保存也不能注入评测答案。
 
-`quality=sufficient` 只表示该 Profile 定义的必需取证完整、关联和哈希有效，不表示根因已经验证。非必需数据源缺失保留在 limitations；必需证据 partial、窗口不正确、引用不属于父/子 Run 或 required completeness 无法确定时均为 insufficient/failed。人工批准仍需 `claimCheck=supported`，缺证记录不能靠人工勾选强行晋级。
+`quality=sufficient` 只表示该 Profile 定义的必需取证完整、关联和哈希有效，不表示根因已经验证。非必需数据源缺失保留在 limitations，且不阻止满足 `requiredSources` 的案例通过质量门；必需证据 partial、窗口不正确、引用不属于父/子 Run 或必需来源完整性无法确定时均为 insufficient/failed。人工批准仍需 `claimCheck=supported`，缺证记录不能靠人工勾选强行晋级。
 
 一期始终 `diagnosisOnly=true`：只读诊断完成不是“问题已解决”；真实恢复和动作有效性不能从当前报告自动生成。
 

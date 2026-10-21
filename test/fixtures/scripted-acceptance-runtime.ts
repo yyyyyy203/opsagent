@@ -10,6 +10,7 @@ import { startLogsMcpServer } from '../../src/infrastructure/mcp/logs-server.js'
 import { startSettlementMcpServer } from '../../src/infrastructure/mcp/settlement-server.js';
 import { ScriptedModel } from '../../src/model/scripted-model.js';
 import type { ChatModel, Clock } from '../../src/contracts/index.js';
+import type { DiagnosticMemoryConfig } from '../../src/contracts/diagnostic-memory.js';
 
 const FIXED_NOW = Date.parse('2026-10-04T12:00:00.000Z');
 const WINDOW_START = '2026-10-04T11:55:00.000Z';
@@ -33,6 +34,7 @@ export async function startScriptedAcceptanceRuntime(input: {
   readonly logs: 'available' | 'unavailable';
   readonly captureWindow?: 'requested' | 'mismatch';
   readonly parentBehavior?: 'normal' | 'wait_for_abort';
+  readonly diagnosticMemory?: DiagnosticMemoryConfig;
 }): Promise<ScriptedAcceptanceRuntime> {
   const dataDirectory = await mkdtemp(join(tmpdir(), 'agentops-scripted-acceptance-'));
   const clock: Clock = { now: () => new Date(FIXED_NOW) };
@@ -166,6 +168,7 @@ export async function startScriptedAcceptanceRuntime(input: {
       logs: { profileId: 'simulation', mcpUrl: logsMcp.url, childModel: logsModel,
         modelIdentity: { provider: 'test-provider', model: 'scripted-logs-child' },
         cursorSecret: 'scripted-acceptance-cursor-secret-0123456789' },
+      ...(input.diagnosticMemory === undefined ? {} : { diagnosticMemory: input.diagnosticMemory }),
       eventObservability: tracing.eventObservability,
       clock,
       port: 0,

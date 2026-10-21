@@ -15,12 +15,13 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function setup() {
+async function setup(missingEvidence: readonly string[] = []) {
   const root = await mkdtemp(join(tmpdir(), 'agentops-memory-source-'));
   roots.push(root);
   const path = join(root, 'agent.sqlite');
   const persistence = createSqlitePersistence({ path });
   const context = captureContext();
+  context.missingEvidence.push(...missingEvidence);
   const saved = await persistence.checkpoints.save(context, null);
   await persistence.evidence.save({
     evidenceId: context.evidenceIds[0]!, runId: context.runId, source: 'metric',
@@ -47,6 +48,23 @@ it('loads bounded evidence references through metadata-only queries without read
     expect(loaded.requiredEvidenceComplete).toBe(true);
     expect(loaded.evidenceRefs).toMatchObject([{ evidenceId: 'capture-evidence', ownerRunId: 'capture-run', source: 'metric' }]);
     expect(JSON.stringify(loaded)).not.toContain('private-raw-evidence');
+  } finally {
+    harness.captureDatabase.close();
+    harness.persistence.close();
+  }
+});
+
+it('keeps an unconfigured Trace gap visible without blocking complete required metric evidence', async () => {
+  const harness = await setup(['traces']);
+  try {
+    const loaded = await harness.source.load(harness.request, harness.operation);
+    expect(loaded.requiredEvidenceComplete).toBe(true);
+    expect(loaded.limitations).toContain('TRACES');
+
+    const traceRequired = { ...harness.request, requiredSources: ['metric', 'trace'] as const };
+    const traceLoaded = await harness.source.load(traceRequired, harness.operation);
+    expect(traceLoaded.requiredEvidenceComplete).toBe(false);
+    expect(traceLoaded.limitations).toContain('TRACES');
   } finally {
     harness.captureDatabase.close();
     harness.persistence.close();
