@@ -14,6 +14,13 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - **M5：完成（本地模拟验收）。** Spec §13 的适用项、双 Target 浏览器、容量、负载及全仓质量门通过。结果和限制见 [M5 验收记录](./verification/2026-10-21-multi-project-m5-acceptance.md)。
 - **M2b：M2b.1 盘点完成，M2b.2 未触发。** 当前工作树未发现数据库文件，`AGENTOPS_DATA_DIR` 未配置，没有可核验候选；未创建历史绑定或迁移写路径。详见 [M2b 盘点报告](./verification/2026-10-21-m2b-inventory.md)。
 
+## 本次重排后的下一步（2026-10-21）
+
+1. **在途提交收尾：已完成。** 工作区干净；fetch 后确认 `origin/codex/event-message-v2` 无独有提交，本地领先 14 个提交，普通 push 已将远端更新到 `a004da1`。文档中的仓库路径 `/Users/yumohan/Documents/ChatGPT/巡检项目/opsagent` 与当前实际路径一致，无需改写。
+2. **多来源计划：R08、R09 已完成，不再列作缺口。** R08 到期前/到期时/到期后召回和过期 UI 已通过 Target 浏览器场景；R09 A 采集、批准、召回及切换 B 后隔离已通过浏览器场景。阶段 A/R12 仍未完成：多来源夹具尚无注入业务 Clock、用例级状态重置/隔离证明仍有限，请求观测只覆盖 Node `fetch` 与浏览器请求，不覆盖任意原生 socket/其他进程传输。详见[验收记录](./verification/2026-10-21-multisource-memory-resilience-acceptance.md)。
+3. **Semantic/Procedural 运行时接线：暂缓。** 普通 `apps/agent-server` 目前不组装 Target Runtime/知识治理 Host；这两类 Target 知识流程尚未接入常规运行时。本阶段继续以 simulation Profile 的 Episodic 记忆和本地模拟来源为验收范围，接线另立 Spec/Plan 后再做。
+4. **认证授权：外部开放前的发布门槛。** 当前本地单操作员模拟验收不以此为阻塞；若将记忆审核 API 暴露给其他用户或网络边界，须先为 `/memory/cases/:id/review` 等审核入口定义并验证身份、角色和审计归属。
+
 ## 持续模拟验证与记忆接线（2026-10-21）
 
 - 按用户确定的验证约束，后续常规开发持续使用本地模拟 Metrics+Logs，不重新部署或修改 `group-buy-market`。该约束已写入 [AGENTS.md](../AGENTS.md)、[PROJECT.md](./PROJECT.md) 和[决策记录](./DECISIONS.md)。
@@ -39,7 +46,7 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 ## 下一步
 
-正在实施[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[阶段 A–D 计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。阶段 B、C 的来源异常、Target 隔离和召回过期验收已通过；阶段 A/R12 对非 `fetch` 网络栈和通用用例重置仍有边界。逐项结果、命令和限制见[验收记录](./verification/2026-10-21-multisource-memory-resilience-acceptance.md)。所有验收使用本地模拟服务，不需要重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据。
+继续[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[阶段 A–D 计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)：阶段 B、C、D 已完成，阶段 A/R12 仍部分完成。R08/R09 已有浏览器验收证据。近期实施应先补齐多来源夹具的业务 Clock 与用例级隔离，再决定是否扩大请求观测；不把“全传输栈”作为未定义范围的笼统承诺。所有验收继续使用本地模拟服务，不重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据。
 
 ## 前次方案文档任务（2026-10-21）
 
@@ -59,9 +66,9 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - 阶段 C 完成：Target Web+SQLite 闭环覆盖 A 采集、批准、召回，切换 B 后无 A 案例/模型输入，跨 Target 证据和审核请求返回 404；R08 用夹具 Clock 验证到期前、相等、之后三点，UI 标记过期但不改写已批准状态。新增 Target Profile `profile/v1` 校验回归，原配置校验器曾拒绝此快照版本格式。
 - 阶段 D 质量门：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build` 通过；`TMPDIR=/private/tmp pnpm test` 通过（215 文件通过、5 个 opt-in 文件跳过；2247 项通过、9 项跳过）；`TMPDIR=/private/tmp pnpm acceptance:memory` 通过（13 checks、6 策略行）；多来源 E2E 3/3、多 Target E2E 2/2、记忆 Web E2E 10 通过/1 跳过、禁用模式 1/1 通过。明细见验收报告。
 - 测试环境 Node.js v24.19.0，pnpm v11.25.0（与仓库声明的 v11.19.0 不同）。全量测试/验收使用 `/private/tmp` 规避 macOS 临时目录符号链接问题；浏览器测试需本机 loopback 权限。
-- 第一阶段改动已提交并推送：`0f33332 test: cover memory source failures and target isolation`。Target 记忆闭环及到期行为已独立提交为 `0ef4634 test: verify target episodic memory isolation`。最近一次 `git fetch origin codex/event-message-v2` 和该提交的普通 `git push origin codex/event-message-v2` 均在约 75 秒后因无法连接 `github.com:443` 失败；本地 `origin/codex/event-message-v2` 跟踪 ref 仍指向旧提交 `7af008d`，比较结果受陈旧 ref 影响，不能据此声明远端同步。待网络恢复后先 fetch 核对远端；无远端独有提交时普通 push，有新提交则先整合，禁止强推。
-- 后续状态收尾记录将在推送恢复后再次同步；当前实现与验收已本地提交，GitHub 同步仍受阻。
+- 当时（此前网络阻塞阶段）`git fetch` 与普通 `git push` 曾因无法连接 `github.com:443` 失败；本次 fetch 已成功，核对远端无独有提交后普通 push 成功，远端现为 `a004da1`。
+- 本次已完成 GitHub 同步；后续状态变更仍需按 §18 独立提交并推送。
 - 未触发公共契约、Schema、Harness 顺序、Guard/Hook/HITL 或晋级语义变更，无需新增 DECISIONS 记录。`git diff --check` 当前通过。
-- 下一步：GitHub 网络恢复后 fetch 并重试普通 push，确认 `0ef4634` 已同步。计划仍有阶段 A/R12 的覆盖限制，不能标记整体完成。
+- 下一步：实施计划的阶段 A/R12 剩余项；R08、R09 不再重复实施。计划整体仍未完成。
 
 此前逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。

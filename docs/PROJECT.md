@@ -35,7 +35,7 @@ pnpm web:build
 
 ## 迭代方式
 
-正在实施[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[阶段 A–D 计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。来源异常、Target A/B 同库隔离、审核与到期前/到期时/到期后召回行为已有本次模拟浏览器验证；剩余限制是 R12 请求观测和夹具隔离只覆盖本地 `fetch`/串行场景。详细覆盖、命令和限制见[验收记录](./verification/2026-10-21-multisource-memory-resilience-acceptance.md)。所有验收使用本地模拟服务，不需要重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据。
+继续[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[阶段 A–D 计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。来源异常、Target A/B 同库隔离、审核与到期前/到期时/到期后召回已有模拟浏览器验证；R08/R09 已完成。当前剩余工作在阶段 A/R12：为多来源夹具加入可控业务 Clock，补用例级重置和状态隔离证明，并按具体传输入口界定请求观测范围。Semantic/Procedural Target 知识治理尚未接入普通 `apps/agent-server`，暂留后续独立任务。所有验收使用本地模拟服务，不重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据；记忆审核 API 在对外开放前须完成身份与授权设计。
 
 每个对话推进一个可验收任务；大任务按可独立验收的阶段交接。任务说明目标、范围、验收条件和约束。每完成一个任务或阶段，先核对验收条件，更新 [STATUS.md](./STATUS.md)，将本任务改动独立提交并推送到 GitHub 工作分支，然后标记完成或转入下一项。只有目标或架构改变时更新本文件，重要设计决策记录在 [DECISIONS.md](./DECISIONS.md)，规则改变时更新根目录 `AGENTS.md`。详细历史进度保留在 [implementation-status.md](./implementation-status.md)。
 
