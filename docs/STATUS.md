@@ -17,9 +17,16 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 ## 本次重排后的下一步（2026-10-21）
 
 1. **此前在途提交收尾：已完成。** fetch 后确认远端无独有提交，普通 push 将远端更新到 `a004da1`。文档中的仓库路径 `/Users/yumohan/Documents/ChatGPT/巡检项目/opsagent` 与当前实际路径一致，无需改写。**本次重排文档提交 `32a7259` 和其后的状态收尾提交尚未同步**：之后显式 fetch 遇到 HTTP/2 错误，`ls-remote` 和普通 push 因连接 `github.com:443` 超时失败；远端当前 SHA 未能核实，禁止据陈旧跟踪引用推断同步状态。
-2. **多来源计划：R08、R09 已完成，不再列作缺口。** R08 到期前/到期时/到期后召回和过期 UI 已通过 Target 浏览器场景；R09 A 采集、批准、召回及切换 B 后隔离已通过浏览器场景。阶段 A/R12 仍未完成：多来源夹具尚无注入业务 Clock、用例级状态重置/隔离证明仍有限，请求观测只覆盖 Node `fetch` 与浏览器请求，不覆盖任意原生 socket/其他进程传输。详见[验收记录](./verification/2026-10-21-multisource-memory-resilience-acceptance.md)。
+2. **多来源计划：R08、R09 已完成，不再列作缺口。** R08 到期边界和过期 UI、R09 A 采集/批准/召回及切换 B 后隔离已有浏览器证据。新一轮审阅发现 B 尚缺真实计时器超时取消、异常案例直接请求后端批准的组合验收；A/R12 尚缺多来源业务 Clock 和独立用例状态隔离。请求观测当前覆盖 Node `fetch` 与浏览器请求，其他入口按实际调用链界定。修订的逐文件方案见[实施计划 §7](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。
 3. **Semantic/Procedural 运行时接线：暂缓。** 普通 `apps/agent-server` 目前不组装 Target Runtime/知识治理 Host；这两类 Target 知识流程尚未接入常规运行时。本阶段继续以 simulation Profile 的 Episodic 记忆和本地模拟来源为验收范围，接线另立 Spec/Plan 后再做。
 4. **认证授权：外部开放前的发布门槛。** 当前本地单操作员模拟验收不以此为阻塞；若将记忆审核 API 暴露给其他用户或网络边界，须先为 `/memory/cases/:id/review` 等审核入口定义并验证身份、角色和审计归属。
+
+## 本次方案修订（2026-10-21）
+
+- 目标：把前次审阅指出的真实超时、后端审核拒绝、Clock 与用例隔离缺口形成可执行的逐文件方案；本轮只修改方案文档，不把计划项记为已实施。
+- 范围：修订[Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)、[Plan](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)、`docs/PROJECT.md` 和本文件。修改分类为测试基础设施/适配器组合验收方案；不涉及公共契约、持久化 Schema、HITL、写动作或依赖方向，故本轮无新增设计决策和迁移。
+- 本次检查：开始时 `git status --short` 干净；`git diff --check` 通过；四份修订文档的 29 个本地 Markdown 链接均可解析。未运行 lint、typecheck、test、build 或浏览器测试，因为本轮没有实现代码改动；前次测试结果仍只属于前次代码基线。
+- 当前待办：核对远端后将此前本地提交和本次方案提交普通推送；若 GitHub 仍不可达，保留本地提交并记录失败。随后按 Plan §7 分阶段实施、重新执行质量门和更新验收报告。本轮涉及的未提交文件在提交前仅为上述四份文档。
 
 ## 持续模拟验证与记忆接线（2026-10-21）
 
@@ -46,7 +53,7 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 ## 下一步
 
-继续[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[阶段 A–D 计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)：阶段 B、C、D 已完成，阶段 A/R12 仍部分完成。R08/R09 已有浏览器验收证据。近期实施应先补齐多来源夹具的业务 Clock 与用例级隔离，再决定是否扩大请求观测；不把“全传输栈”作为未定义范围的笼统承诺。所有验收继续使用本地模拟服务，不重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据。
+继续[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[实施计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)：先补阶段 B 的真实超时与审核 API 断言，再补阶段 A 的 Clock/独立用例隔离，最后重跑阶段 D。阶段 C/R08/R09 只做回归。所有验收使用本地模拟服务，不重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据。
 
 ## 前次方案文档任务（2026-10-21）
 
@@ -57,7 +64,7 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - 四份方案文档已独立提交为 `74c9bdb`；GitHub 同步受阻，文档交付尚未满足推送完成条件。首次推送返回 `Error in the HTTP2 framing layer`；仅对重试命令改用 HTTP/1.1 后，仍在约 75 秒后无法连接 `github.com:443`。未修改全局 Git 配置，不能宣称远端已同步。
 - 待办：网络恢复后核对远端分支，再推送当前 `codex/event-message-v2`（包含本条阻塞记录）并核对远端提交；如远端已变化，先处理差异，禁止强推。下一步实施不包含在本次文档交付内。
 
-## 当前实施任务（2026-10-21）
+## 前次实施任务快照（2026-10-21；以下“完成”是当时的覆盖口径）
 
 - 用户授权按 Spec/Plan 实施，并补充 AGENTS 规则。本轮范围仍是本地模拟验证。
 - 更新 AGENTS.md §18，明确多模块/核心/分阶段任务需先检查并维护 `docs/superpowers/specs/`、`plans/`，STATUS 链接必须准确区分方案、实施和验收；既有授权决定是否实施。
@@ -69,6 +76,6 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - 当时（此前网络阻塞阶段）`git fetch` 与普通 `git push` 曾因无法连接 `github.com:443` 失败；本次 fetch 已成功，核对远端无独有提交后普通 push 成功，远端现为 `a004da1`。
 - 此前实现与状态记录已同步到 `a004da1`；本次重排记录 `32a7259` 及其后的状态收尾提交尚待网络恢复后 fetch 核对并普通 push。当前本地工作区干净。
 - 未触发公共契约、Schema、Harness 顺序、Guard/Hook/HITL 或晋级语义变更，无需新增 DECISIONS 记录。`git diff --check` 当前通过。
-- 下一步：先在网络恢复后 fetch 并核对当前远端，再推送本次重排及状态收尾提交；随后实施计划的阶段 A/R12 剩余项。R08、R09 不再重复实施，计划整体仍未完成。
+- 当时记录的下一步是阶段 A/R12；本次审阅新增阶段 B 的真实超时与审核 API 组合缺口，以上方“下一步”及修订后的 Spec/Plan 为准。R08、R09 不再重复实施，计划整体仍未完成。
 
 此前逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。
