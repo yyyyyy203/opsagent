@@ -146,6 +146,49 @@ describe('browser API client', () => {
     expect(JSON.stringify(await requests[5]?.clone().json())).not.toMatch(/scope|actor|reviewer|profile|threshold|endpoint/iu);
   });
 
+  it('uses Target-scoped Run, memory, and SSE routes with a separate idempotency header', async () => {
+    const requests: Request[] = [];
+    const client = new ApiClient({
+      baseUrl: 'http://127.0.0.1:4100',
+      fetchImpl: (input, init) => {
+        requests.push(new Request(input, init));
+        return Promise.resolve(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+      },
+      eventSourceFactory: url => ({ close: () => { client.lastEventSourceUrl = url; } }),
+    });
+    await client.listTargetRuns('target/a', { cursor: 'page-1', limit: 5 });
+    await client.startTargetRun('target/a', { requestId: 'request-1', message: 'inspect', memoryPreferences: { capture: 'manual', recall: 'disabled' } });
+    await client.getTargetRun('target/a', 'run/1');
+    await client.getTargetMessages('target/a', 'run/1', { limit: 10 });
+    await client.listTargetEvidence('target/a', 'run/1');
+    await client.getTargetConfirmation('target/a', 'run/1');
+    await client.targetMemoryCapabilities('target/a');
+    await client.listTargetMemoryCases('target/a', { status: 'approved', limit: 10 });
+    await client.getTargetRunMemory('target/a', 'run/1');
+    await client.reviewTargetMemory('target/a', 'case/1', { requestId: 'review-1', expectedRevision: 2,
+      decision: 'approved', claimCheck: 'supported' });
+    client.openTargetRunEvents('target/a', 'run/1', undefined, () => undefined).close();
+
+    expect(requests.map(request => [request.url, request.method])).toEqual([
+      ['http://127.0.0.1:4100/targets/target%2Fa/runs?cursor=page-1&limit=5', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/runs', 'POST'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/runs/run%2F1', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/runs/run%2F1/messages?limit=10', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/runs/run%2F1/evidence', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/runs/run%2F1/confirmation', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/memory/capabilities', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/memory/cases?status=approved&limit=10', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/runs/run%2F1/memory', 'GET'],
+      ['http://127.0.0.1:4100/targets/target%2Fa/memory/cases/case%2F1/review', 'POST'],
+    ]);
+    expect(requests[1]?.headers.get('idempotency-key')).toBe('request-1');
+    expect(await requests[1]?.clone().json()).toEqual({ message: 'inspect',
+      memoryPreferences: { capture: 'manual', recall: 'disabled' } });
+    expect(await requests[9]?.clone().json()).toEqual({ requestId: 'review-1', expectedRevision: 2,
+      decision: 'approved', claimCheck: 'supported' });
+    expect(client.lastEventSourceUrl).toBe('http://127.0.0.1:4100/targets/target%2Fa/runs/run%2F1/events?snapshots=none');
+  });
+
   it('surfaces memory revision conflicts without retrying a capture or review command', async () => {
     let calls = 0;
     const client = new ApiClient({

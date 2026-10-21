@@ -338,6 +338,8 @@ export class TargetConfigurationError extends Error {
 export interface TargetResolver {
   resolve(input: TargetSelection & { capturedAt: string; signal: AbortSignal }): Promise<ResolvedTargetSnapshotV2>;
   listCatalog(): readonly TargetCatalogDto[];
+  /** Host-only profile ownership predicate; never included in the public catalog. */
+  ownsProfileId?(profileId: string): boolean;
 }
 
 /** Durable Run-to-Target ownership record. A bindingId identifies one immutable snapshot shared by a Run tree. */

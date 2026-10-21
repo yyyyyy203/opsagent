@@ -19,6 +19,7 @@ import type {
 import { publicEvidenceFromManifest, publicEvidenceFromRecord, publicRunMissingEvidence, publicRunKnowledgeQualification } from '../contracts/read-model.js';
 import { readRunUsageSummary } from '../contracts/run-usage.js';
 import type { AgentContext } from '../contracts/context.js';
+import type { TargetBindingStore } from '../contracts/target.js';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
@@ -32,17 +33,23 @@ export class InMemoryInspectionQueryService implements InspectionQueryService {
     private readonly checkpoints: AnyCheckpointStore,
     private readonly evidence: EvidenceStore & EvidenceQueryStore,
     private readonly manifests?: EvidenceManifestStore & Partial<EvidenceManifestQueryStore>,
+    private readonly targetBindings?: Pick<TargetBindingStore, 'getBinding'>,
   ) {}
 
   public async listRuns(options: RunListOptions = {}): Promise<PublicRunPage> {
     const limit = pageLimit(options.limit);
     const cursor = options.cursor === undefined ? undefined : decodeRunCursor(options.cursor);
-    if (cursor !== undefined && (cursor.profileId !== options.profileId || cursor.status !== options.status)) {
+    if (cursor !== undefined && (cursor.profileId !== options.profileId || cursor.status !== options.status
+      || (cursor.excludeTargetBound === true) !== (options.excludeTargetBound === true))) {
       throw new Error('run cursor does not match its filters');
     }
     const runIds = this.events.listRunIds === undefined ? [] : await this.events.listRunIds();
     const items: PublicRunSummary[] = [];
     for (const runId of runIds) {
+      if (options.excludeTargetBound === true) {
+        if (this.targetBindings === undefined) throw new Error('Target-bound Run filter is unavailable.');
+        if (await this.targetBindings.getBinding(runId) !== null) continue;
+      }
       const detail = await this.getRun(runId);
       if (detail === null || (options.profileId !== undefined && detail.profileId !== options.profileId)
         || (options.status !== undefined && detail.status !== options.status)) continue;
@@ -199,17 +206,17 @@ function pageLimit(value: number | undefined): number {
   return value;
 }
 
-interface RunCursor { updatedAt: string; runId: string; profileId?: string; status?: string }
+interface RunCursor { updatedAt: string; runId: string; profileId?: string; status?: string; excludeTargetBound?: boolean }
 interface EvidenceCursor { runId: string; capturedAt: string; evidenceId: string }
 
 function encodeRunCursor(item: PublicRunSummary, options: RunListOptions): string {
-  return encode({ updatedAt: item.updatedAt, runId: item.runId, ...(options.profileId === undefined ? {} : { profileId: options.profileId }), ...(options.status === undefined ? {} : { status: options.status }) });
+  return encode({ updatedAt: item.updatedAt, runId: item.runId, ...(options.profileId === undefined ? {} : { profileId: options.profileId }), ...(options.status === undefined ? {} : { status: options.status }), ...(options.excludeTargetBound === true ? { excludeTargetBound: true } : {}) });
 }
 
 function decodeRunCursor(value: string): RunCursor {
   const parsed = decode(value);
   if (!isRecord(parsed) || typeof parsed.updatedAt !== 'string' || typeof parsed.runId !== 'string') throw new Error('run cursor is invalid');
-  return { updatedAt: parsed.updatedAt, runId: parsed.runId, ...(typeof parsed.profileId === 'string' ? { profileId: parsed.profileId } : {}), ...(typeof parsed.status === 'string' ? { status: parsed.status } : {}) };
+  return { updatedAt: parsed.updatedAt, runId: parsed.runId, ...(typeof parsed.profileId === 'string' ? { profileId: parsed.profileId } : {}), ...(typeof parsed.status === 'string' ? { status: parsed.status } : {}), ...(parsed.excludeTargetBound === true ? { excludeTargetBound: true } : {}) };
 }
 
 function encodeEvidenceCursor(runId: string, capturedAt: string, evidenceId: string): string {

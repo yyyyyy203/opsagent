@@ -20,6 +20,21 @@ export interface PublicRunSummary {
   createdAt: string;
   updatedAt: string;
   parentRunId?: string;
+  /** Safe immutable Target context, included only on Target-scoped query routes. */
+  targetScope?: PublicTargetRunScope;
+}
+
+export interface PublicTargetRunScope {
+  targetId: string;
+  projectId: string;
+  deploymentId: string;
+  deploymentGeneration: number;
+  environment: string;
+  scenarioId: string;
+  scenarioVersion: string;
+  serviceId: string;
+  profileRevision: string;
+  snapshotDigest: string;
 }
 
 export interface PublicRunDetail extends PublicRunSummary {
@@ -49,6 +64,8 @@ export interface RunListOptions {
   status?: RunStatus;
   cursor?: string;
   limit?: number;
+  /** Host-only query restriction used to keep Target-bound Runs out of legacy pages. */
+  excludeTargetBound?: boolean;
 }
 
 export interface PublicRunPage {

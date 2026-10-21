@@ -24,6 +24,7 @@ export { canPublishKnowledgeRevision, diagnosisQualificationLabel, isKnowledgePu
 
 export interface MemoryPanelProps {
   profileId: string;
+  targetId?: string;
   runId?: string;
   preferences: MemoryPreferences;
   onPreferencesChange: (preferences: MemoryPreferences) => void;
@@ -33,7 +34,7 @@ export interface MemoryPanelProps {
 
 type MemoryTab = 'cases' | 'semantic' | 'procedural';
 
-export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange, onOpenEvidence, client }: MemoryPanelProps): ReactElement {
+export function MemoryPanel({ profileId, targetId, runId, preferences, onPreferencesChange, onOpenEvidence, client }: MemoryPanelProps): ReactElement {
   const api = useMemo(() => client ?? new ApiClient({ baseUrl: apiBaseUrl() }), [client]);
   const [capabilities, setCapabilities] = useState<MemoryCapabilities | null>(null);
   const [cases, setCases] = useState<readonly DiagnosticMemoryCase[]>([]);
@@ -51,9 +52,12 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
   useEffect(() => {
     let active = true;
     setLoading(true);
+    setCases([]);
+    setCapabilities(null);
     void (async () => {
       try {
-        const nextCapabilities = await api.memoryCapabilities(profileId);
+        const nextCapabilities = targetId === undefined ? await api.memoryCapabilities(profileId)
+          : await api.targetMemoryCapabilities(targetId);
         if (!active) return;
         setCapabilities(nextCapabilities);
         if (!nextCapabilities.enabled) {
@@ -61,7 +65,9 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
           setLoading(false);
           return;
         }
-        const nextCases = await api.listMemoryCases(profileId, { limit: 50, ...(filter === '' ? {} : { status: filter }) });
+        const nextCases = targetId === undefined
+          ? await api.listMemoryCases(profileId, { limit: 50, ...(filter === '' ? {} : { status: filter }) })
+          : await api.listTargetMemoryCases(targetId, { limit: 50, ...(filter === '' ? {} : { status: filter }) });
         if (active) setCases(nextCases);
       } catch (error) {
         if (active) setNotice(errorMessage(error));
@@ -70,9 +76,9 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
       }
     })();
     return () => { active = false; };
-  }, [api, filter, profileId, refresh]);
+  }, [api, filter, profileId, refresh, targetId]);
 
-  useEffect(() => { setNotice(null); }, [filter, profileId]);
+  useEffect(() => { setNotice(null); }, [filter, profileId, targetId]);
 
   useEffect(() => {
     let active = true;
@@ -80,7 +86,10 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
     setRunMemory(null);
     setCaptureTicket(null);
     if (runId === undefined || capabilities?.enabled !== true) return () => { active = false; };
-    void Promise.all([api.getRun(runId), api.getRunMemory(runId), api.getRunMemoryCapture(runId)])
+    const details = targetId === undefined
+      ? Promise.all([api.getRun(runId), api.getRunMemory(runId), api.getRunMemoryCapture(runId)])
+      : Promise.all([api.getTargetRun(targetId, runId), api.getTargetRunMemory(targetId, runId), api.getTargetRunMemoryCapture(targetId, runId)]);
+    void details
       .then(([nextRun, nextMemory, nextTicket]) => {
         if (!active) return;
         setRun(nextRun);
@@ -89,7 +98,7 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
       })
       .catch((error: unknown) => { if (active) setNotice(errorMessage(error)); });
     return () => { active = false; };
-  }, [api, capabilities?.enabled, runId, refresh]);
+  }, [api, capabilities?.enabled, runId, refresh, targetId]);
 
   async function capture(): Promise<void> {
     if (runId === undefined || !canCapture(capabilities, run) || pendingRef.current) return;
@@ -98,17 +107,21 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
     setNotice(null);
     const requestId = newRequestId();
     try {
-      const current = await api.getRunMemoryCapture(runId);
+      const current = targetId === undefined ? await api.getRunMemoryCapture(runId)
+        : await api.getTargetRunMemoryCapture(targetId, runId);
       setCaptureTicket(current);
       if (current.state === 'saved') return;
       if (current.sourceCheckpointRevision === undefined) throw new Error('本次巡检缺少可核验的 Checkpoint 版本。');
-      await api.captureRunMemory(runId, { requestId, expectedCheckpointRevision: current.sourceCheckpointRevision });
-      setCaptureTicket(await api.getRunMemoryCapture(runId));
+      if (targetId === undefined) await api.captureRunMemory(runId, { requestId, expectedCheckpointRevision: current.sourceCheckpointRevision });
+      else await api.captureTargetRunMemory(targetId, runId, { requestId, expectedCheckpointRevision: current.sourceCheckpointRevision });
+      setCaptureTicket(targetId === undefined ? await api.getRunMemoryCapture(runId)
+        : await api.getTargetRunMemoryCapture(targetId, runId));
       setRefresh((value) => value + 1);
     } catch (error) {
       if (error instanceof ApiClientError && error.status === 409) {
         setNotice('本次巡检状态已更新，已刷新版本；请检查后再发起沉淀。');
-        try { setCaptureTicket(await api.getRunMemoryCapture(runId)); } catch { /* keep the original conflict visible */ }
+        try { setCaptureTicket(targetId === undefined ? await api.getRunMemoryCapture(runId)
+          : await api.getTargetRunMemoryCapture(targetId, runId)); } catch { /* keep the original conflict visible */ }
       } else setNotice(errorMessage(error));
     } finally {
       pendingRef.current = false;
@@ -122,9 +135,10 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
     setPending(item.id);
     setNotice(null);
     try {
-      const command = { profileId, expectedRevision: item.revision, requestId: newRequestId(), decision,
+      const command = { expectedRevision: item.revision, requestId: newRequestId(), decision,
         claimCheck: decision === 'approved' ? 'supported' as const : 'unsupported' as const };
-      await api.reviewMemory(item.id, command);
+      if (targetId === undefined) await api.reviewMemory(item.id, { ...command, profileId });
+      else await api.reviewTargetMemory(targetId, item.id, command);
       setRefresh((value) => value + 1);
     } catch (error) {
       if (error instanceof ApiClientError && error.status === 409) {
@@ -210,11 +224,12 @@ export function MemoryPanel({ profileId, runId, preferences, onPreferencesChange
         </article>)}</div>}
     {!loading && capabilities?.enabled === true && <button className="text-button" type="button" onClick={() => setRefresh((value) => value + 1)}>刷新案例</button>}
     </>}
-    {(activeTab === 'semantic' || activeTab === 'procedural') && <KnowledgeGovernancePanel api={api} kind={activeTab} />}
+    {(activeTab === 'semantic' || activeTab === 'procedural') && <KnowledgeGovernancePanel api={api} kind={activeTab}
+      {...(targetId === undefined ? {} : { selectedTargetId: targetId })} />}
   </section>;
 }
 
-function KnowledgeGovernancePanel({ api, kind }: { api: ApiClient; kind: KnowledgeKind }): ReactElement {
+function KnowledgeGovernancePanel({ api, kind, selectedTargetId }: { api: ApiClient; kind: KnowledgeKind; selectedTargetId?: string }): ReactElement {
   const [targets, setTargets] = useState<readonly TargetCatalogDto[]>([]);
   const [targetId, setTargetId] = useState('');
   const [readiness, setReadiness] = useState<TargetReadinessDto | null>(null);
@@ -240,13 +255,13 @@ function KnowledgeGovernancePanel({ api, kind }: { api: ApiClient; kind: Knowled
     void api.listTargets().then(nextTargets => {
       if (!active) return;
       setTargets(nextTargets);
-      setTargetId(current => nextTargets.some(target => target.targetId === current)
-        ? current : nextTargets[0]?.targetId ?? '');
+      setTargetId(current => selectedTargetId !== undefined ? selectedTargetId
+        : nextTargets.some(target => target.targetId === current) ? current : nextTargets[0]?.targetId ?? '');
       setNotice(nextTargets.length === 0 ? '宿主没有提供可选择的 Target；不能在页面手工填写知识作用域。' : null);
     }).catch(() => { if (active) setNotice('Target 知识管理当前不可用；请确认宿主是否配置了 Target 和知识管理能力。'); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [api]);
+  }, [api, selectedTargetId]);
 
   useEffect(() => {
     if (targetId === '') {
@@ -255,6 +270,7 @@ function KnowledgeGovernancePanel({ api, kind }: { api: ApiClient; kind: Knowled
     }
     let active = true;
     setLoading(true);
+    setTargetStatus(null); setRevisions([]); setSelectedReferences([]);
     void Promise.all([api.getTargetReadiness(targetId), api.getTargetKnowledgeStatus(targetId),
       api.listTargetKnowledge(targetId, kind, { limit: 50 })])
       .then(([nextReadiness, nextStatus, page]) => {
@@ -322,7 +338,8 @@ function KnowledgeGovernancePanel({ api, kind }: { api: ApiClient; kind: Knowled
   const selectedTarget = targets.find(target => target.targetId === targetId);
   return <div className="knowledge-manager" role="tabpanel" aria-label={kind === 'semantic' ? '系统知识' : '调查模板'}>
     <div className="knowledge-target-picker"><label htmlFor="knowledge-target">目标系统</label>
-      <select id="knowledge-target" value={targetId} onChange={event => { setTargetId(event.target.value); setNotice(null); }}>
+      <select id="knowledge-target" value={targetId} disabled={selectedTargetId !== undefined}
+        onChange={event => { setTargetId(event.target.value); setNotice(null); }}>
         {targets.length === 0 && <option value="">没有可选 Target</option>}
         {targets.map(target => <option key={target.targetId} value={target.targetId}>{target.displayName} · {target.environment}</option>)}
       </select>

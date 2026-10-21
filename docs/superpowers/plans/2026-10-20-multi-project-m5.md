@@ -3,7 +3,7 @@
 - 日期：2026-10-20
 - 依据：[多项目适配设计 Spec](../specs/2026-10-11-multi-project-adaptation-design.md) §13 验收矩阵
 - 前置：M4 的 Target 主工作台、归属读写入口和模拟 Target 运行能力均已实现。
-- 状态：待实施；本计划只定义验收，不代表测试已运行。
+- 状态：已完成（离线模拟验收）。Spec §13 适用项、回归、浏览器、容量及负载结果见[验收记录](../../verification/2026-10-21-multi-project-m5-acceptance.md)；不代表真实业务目标验收。
 
 ## 验收边界
 
@@ -23,7 +23,7 @@
 | `test/multi-target-capacity.test.ts`（新） | 在具名固定环境中登记并解析至少 200 Target，首屏目录查询 p95 < 100 ms；登记至少 50 来源分区，纯内存查找 p95 < 10 ms 且外部调用数为 0。记录硬件、Node/pnpm、冷热状态、样本量与方法。 |
 | `test/multi-target-load.test.ts`（新）或独立 opt-in 脚本 | 用可覆盖默认并发 2 的显式压测配置运行 10 个并发父 Run；记录排队和 Agent 调度 p50/p95/p99、作用域隔离、预算与注册表上界。固定环境才作为性能门，外部网络延迟不作回归阈值。 |
 | `playwright.multi-target.config.ts`（新）、`package.json` | 增加 opt-in `e2e:multi-target` 与必要的本地 fixture 启动命令；不改变默认测试对真实外部服务的禁用行为。 |
-| `docs/verification/2026-10-20-multi-project-m5-acceptance.md`（新）、`docs/implementation-status.md` | 逐条映射 Spec §13 的 1–20 项至测试、命令、结果和未覆盖项；记录浏览器截图/日志的安全摘要、容量环境、跳过项与所有外部请求计数。明确模拟验收与真实目标验收的差别。 |
+| `docs/verification/2026-10-21-multi-project-m5-acceptance.md`（新）、`docs/implementation-status.md` | 已逐条映射 Spec §13 的 1–20 项至测试和结果，记录浏览器摘要、容量/负载环境、默认跳过项与外部请求边界，并说明模拟验收和真实目标验收的差别。 |
 
 ## 执行顺序与完成标准
 
@@ -32,3 +32,7 @@
 3. 运行容量和 opt-in 负载项，记录环境与分位数；资源上限与默认并发配置分别核对。
 4. 执行 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`、Web typecheck/build、`e2e:multi-target` 和现有 simulation/Episodic/知识/熔断回归；记录通过、失败及跳过。
 5. 只有 Spec §13 的适用项均有本次可复现证据，且没有跨 Target 数据或权限泄漏，才把 M5 标记完成。可选 M2b 仅在实施后追加其迁移路径验收。真实 `group-buy-market` 只读 Prometheus 接入另立验收任务。
+
+## 本轮逐文件执行结果（2026-10-21）
+
+新增双 Target 本地 Playwright fixture/config/browser spec、200 Target 与 50 来源分区容量验收、10 并发父 Run 负载验收，以及根 Run FIFO 准入上限；决策见[Root Run 准入上限](../decisions/2026-10-21-root-run-admission-limit.md)。验收入口分别为 `pnpm e2e:multi-target`、`pnpm acceptance:multi-target-capacity` 和 `pnpm acceptance:multi-target-load`，均已通过。Spec §13 每项证据和限制见[验收矩阵](../../verification/2026-10-21-multi-project-m5-acceptance.md)。

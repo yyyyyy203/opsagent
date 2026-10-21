@@ -9,6 +9,7 @@ import { EventStreamCursorError, type EventStreamService } from './event-stream-
 import type { RunExecutionCoordinator } from '../application/run-execution-coordinator.js';
 import type { WebConfirmationDecisionInput, WebConfirmationService } from '../application/web-confirmation-service.js';
 import type { TargetRunService } from '../application/target-run-service.js';
+import type { TargetWebQueryService } from '../application/target-web-query-service.js';
 import type { TargetBindingStore } from '../contracts/target.js';
 import { handleMemoryRoute, type MemoryRoutePorts } from './memory-routes.js';
 import { handleKnowledgeMemoryRoute, type KnowledgeManagementApi } from './knowledge-memory-routes.js';
@@ -34,6 +35,7 @@ export interface InspectionHttpServerOptions {
   knowledgeManagement?: KnowledgeManagementApi;
   /** Optional Target-scoped application facade; target routes never accept bindings from JSON. */
   targetRuns?: TargetRunService;
+  targetWebQueries?: TargetWebQueryService;
   /** Always pass the host-owned registry when available, even if Target start is not enabled. */
   targetBindings?: Pick<TargetBindingStore, 'getBinding'>;
   /** Synchronous host validation before the transport accepts a Run. */
@@ -96,6 +98,17 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (method === 'OPTIONS') { response.writeHead(204); response.end(); return; }
   if (method === 'GET' && parsed.pathname === '/health') { writeJson(response, 200, { status: 'ok' }); return; }
+  const legacyBindingStore = options.targetBindings ?? (options.targetRuns === undefined
+    ? undefined
+    : { getBinding: (runId: string) => options.targetRuns!.bindingForRun(runId) });
+  const legacyRunPath = /^\/runs\/([^/]+)(?:\/|$)/u.exec(parsed.pathname);
+  if (legacyRunPath?.[1] !== undefined && legacyBindingStore !== undefined) {
+    const runId = decodePath(legacyRunPath[1]);
+    if (await legacyBindingStore.getBinding(runId) !== null) {
+      writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' });
+      return;
+    }
+  }
   if (await handleMemoryRoute(request, response, parsed, options.memory ?? {
     clock: systemClock, schedule: async () => {},
   }, () => readJson(request, maxBodyBytes))) return;
@@ -141,8 +154,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     }
     if (method === 'POST') {
       const body = await readJson(request, maxBodyBytes);
-      if (Object.keys(body).some(key => key !== 'message')) {
-        throw Object.assign(new Error('Target Run body accepts only message.'), { statusCode: 400 });
+      if (Object.keys(body).some(key => key !== 'message' && key !== 'memoryPreferences')) {
+        throw Object.assign(new Error('Target Run body contains unsupported fields.'), { statusCode: 400 });
       }
       const requestIds = request.headers['idempotency-key'];
       if (typeof requestIds !== 'string' || requestIds.trim().length === 0 || requestIds.length > 256) {
@@ -151,7 +164,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       if (typeof body.message !== 'string') {
         throw Object.assign(new Error('message is required.'), { statusCode: 400 });
       }
-      const accepted = await options.targetRuns.start({ targetId, requestId: requestIds, message: body.message });
+      const memoryPreferences = targetMemoryPreferences(body.memoryPreferences);
+      const accepted = await options.targetRuns.start({ targetId, requestId: requestIds, message: body.message,
+        ...(memoryPreferences === undefined ? {} : { memoryPreferences }) });
       const encodedTarget = encodeURIComponent(targetId);
       const encodedRun = encodeURIComponent(accepted.runId);
       writeJson(response, 202, {
@@ -193,6 +208,58 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     }
   }
 
+  const targetRunMessagesMatch = method === 'GET'
+    ? /^\/targets\/([^/]+)\/runs\/([^/]+)\/messages$/u.exec(parsed.pathname) : null;
+  if (targetRunMessagesMatch?.[1] !== undefined && targetRunMessagesMatch[2] !== undefined) {
+    if (options.targetWebQueries === undefined) throw unavailable();
+    queryKeys(parsed, ['cursor', 'limit']);
+    const page = await options.targetWebQueries.listMessages(decodePath(targetRunMessagesMatch[1]),
+      decodePath(targetRunMessagesMatch[2]), {
+        ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
+        ...(parsed.searchParams.get('limit') === null ? {} : { limit: parseWebPageLimit(parsed.searchParams.get('limit')!) }),
+      });
+    if (page === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return; }
+    writeJson(response, 200, page);
+    return;
+  }
+
+  const targetRunConfirmationMatch = method === 'GET'
+    ? /^\/targets\/([^/]+)\/runs\/([^/]+)\/confirmation$/u.exec(parsed.pathname) : null;
+  if (targetRunConfirmationMatch?.[1] !== undefined && targetRunConfirmationMatch[2] !== undefined) {
+    if (options.targetWebQueries === undefined) throw unavailable();
+    if (parsed.searchParams.size > 0) throw Object.assign(new Error('Confirmation query parameters are not supported.'), { statusCode: 400 });
+    const confirmation = await options.targetWebQueries.getConfirmation(decodePath(targetRunConfirmationMatch[1]),
+      decodePath(targetRunConfirmationMatch[2]));
+    if (confirmation === null && !await options.targetRuns?.ownsRun(decodePath(targetRunConfirmationMatch[1]), decodePath(targetRunConfirmationMatch[2]))) {
+      writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return;
+    }
+    writeJson(response, 200, confirmation);
+    return;
+  }
+
+  const targetRunEvidenceMatch = method === 'GET'
+    ? /^\/targets\/([^/]+)\/runs\/([^/]+)\/evidence(?:\/([^/]+))?$/u.exec(parsed.pathname) : null;
+  if (targetRunEvidenceMatch?.[1] !== undefined && targetRunEvidenceMatch[2] !== undefined) {
+    if (options.targetWebQueries === undefined) throw unavailable();
+    const targetId = decodePath(targetRunEvidenceMatch[1]);
+    const runId = decodePath(targetRunEvidenceMatch[2]);
+    if (targetRunEvidenceMatch[3] !== undefined) {
+      if (parsed.searchParams.size > 0) throw Object.assign(new Error('Evidence detail query parameters are not supported.'), { statusCode: 400 });
+      const evidence = await options.targetWebQueries.getEvidence(targetId, runId, decodePath(targetRunEvidenceMatch[3]));
+      if (evidence === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Evidence not found.' }); return; }
+      writeJson(response, 200, evidence);
+      return;
+    }
+    queryKeys(parsed, ['cursor', 'limit']);
+    const page = await options.targetWebQueries.listEvidence(targetId, runId, {
+      ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
+      ...(parsed.searchParams.get('limit') === null ? {} : { limit: parseWebPageLimit(parsed.searchParams.get('limit')!) }),
+    });
+    if (page === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return; }
+    writeJson(response, 200, page);
+    return;
+  }
+
   const targetEventsMatch = method === 'GET'
     ? /^\/targets\/([^/]+)\/runs\/([^/]+)\/events$/u.exec(parsed.pathname)
     : null;
@@ -219,22 +286,14 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     : null;
   if (targetRunDetailMatch?.[1] !== undefined && targetRunDetailMatch[2] !== undefined) {
     if (options.targetRuns === undefined) throw unavailable();
-    const run = await options.targetRuns.getRun(decodePath(targetRunDetailMatch[1]), decodePath(targetRunDetailMatch[2]));
+    const targetId = decodePath(targetRunDetailMatch[1]);
+    const runId = decodePath(targetRunDetailMatch[2]);
+    const run = options.targetWebQueries === undefined
+      ? await options.targetRuns.getRun(targetId, runId)
+      : await options.targetWebQueries.getRun(targetId, runId);
     if (run === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return; }
     writeJson(response, 200, run);
     return;
-  }
-
-  const legacyBindingStore = options.targetBindings ?? (options.targetRuns === undefined
-    ? undefined
-    : { getBinding: (runId: string) => options.targetRuns!.bindingForRun(runId) });
-  const legacyRunPath = /^\/runs\/([^/]+)(?:\/|$)/u.exec(parsed.pathname);
-  if (legacyRunPath?.[1] !== undefined && legacyBindingStore !== undefined) {
-    const runId = decodePath(legacyRunPath[1]);
-    if (await legacyBindingStore.getBinding(runId) !== null) {
-      writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' });
-      return;
-    }
   }
 
   const eventMatch = method === 'GET' ? /^\/runs\/([^/]+)\/events$/u.exec(parsed.pathname) : null;
@@ -258,6 +317,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   if (method === 'POST' && parsed.pathname === '/runs') {
     const body = await readJson(request, maxBodyBytes);
     const run = toReplyOptions(body);
+    if (options.targetRuns?.isTargetProfileId(run.profileId)) {
+      throw Object.assign(new Error('Target-owned Profiles require the Target Run route.'), { code: 'PROFILE_NOT_ALLOWED', statusCode: 400 });
+    }
     if (options.allowedProfileIds !== undefined && !options.allowedProfileIds.includes(run.profileId)) {
       throw Object.assign(new Error('profileId is not enabled.'), { code: 'PROFILE_NOT_ALLOWED', statusCode: 400 });
     }
@@ -295,17 +357,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
       ...(parsed.searchParams.get('limit') === null ? {} : { limit: parsePageLimit(parsed.searchParams.get('limit')!, 'limit') }),
     };
-    const page = await queries.listRuns(query);
-    if (legacyBindingStore === undefined) writeJson(response, 200, page);
-    else {
-      const items = await Promise.all(page.items.map(async item => (
-        await legacyBindingStore.getBinding(item.runId) === null ? item : null
-      )));
-      writeJson(response, 200, {
-        items: items.filter((item): item is typeof page.items[number] => item !== null),
-        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
-      });
-    }
+    const page = await queries.listRuns({ ...query, ...(legacyBindingStore === undefined ? {} : { excludeTargetBound: true }) });
+    writeJson(response, 200, page);
     return;
   }
 
@@ -472,6 +525,14 @@ function parseWebPageLimit(value: string): number {
   return parsed;
 }
 
+function queryKeys(url: URL, allowed: readonly string[]): void {
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) {
+      throw Object.assign(new Error('Query parameters are invalid.'), { statusCode: 400 });
+    }
+  }
+}
+
 function parsePageLimit(value: string, name: string): number {
   if (!/^\d+$/u.test(value)) throw Object.assign(new Error(`${name} must be a positive integer.`), { statusCode: 400 });
   const parsed = Number(value);
@@ -572,6 +633,19 @@ function toConfirmationInput(body: Record<string, unknown>): WebConfirmationDeci
     expectedRevision: body.expectedRevision,
     ...(body.reason === undefined ? {} : { reason: body.reason }),
   };
+}
+
+function targetMemoryPreferences(value: unknown): { capture?: 'profile' | 'manual' | 'automatic' | 'skip';
+  recall?: 'profile' | 'enabled' | 'disabled' } | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const parsed = parseMemoryPreferences(value);
+    if (parsed.semantic !== undefined || parsed.procedural !== undefined) throw new Error('Unsupported preference.');
+    return { ...(parsed.capture === undefined ? {} : { capture: parsed.capture }),
+      ...(parsed.recall === undefined ? {} : { recall: parsed.recall }) };
+  } catch {
+    throw Object.assign(new Error('Memory preferences are invalid.'), { code: 'MEMORY_DATA_INVALID', statusCode: 400 });
+  }
 }
 
 function writeJson(response: ServerResponse, status: number, value: unknown): void {

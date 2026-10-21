@@ -1,8 +1,10 @@
 import type { Clock, IdGenerator, InspectionQueryService, PublicRunDetail, PublicRunSummary } from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import type { ReplyOptions } from '../agent/types.js';
+import type { MemoryPreferences } from '../contracts/diagnostic-memory.js';
+import { parseMemoryPreferences } from '../contracts/diagnostic-memory-schema.js';
 import type { TargetResolver, TargetRunBindingPage, TargetBindingStore, TargetRunRequestRecord, TrustedTargetBinding,
-  TargetReadinessDto } from '../contracts/target.js';
+  TargetReadinessDto, VersionedResolvedTargetSnapshot } from '../contracts/target.js';
 import type { TargetRecoveryGate } from '../contracts/target.js';
 import { TargetConfigurationError } from '../contracts/target.js';
 import { checkpointChecksum } from '../contracts/stable-json.js';
@@ -23,6 +25,7 @@ export interface TargetRunStartInput {
   targetId: string;
   requestId: string;
   message: string;
+  memoryPreferences?: Pick<MemoryPreferences, 'capture' | 'recall'>;
 }
 
 export interface TargetRunStartResult {
@@ -49,6 +52,7 @@ export class TargetRunService {
   private readonly inFlightStarts = new Map<string, {
     targetId: string;
     message: string;
+    memoryPreferences?: Pick<MemoryPreferences, 'capture' | 'recall'>;
     promise: Promise<TargetRunStartResult>;
   }>();
 
@@ -62,6 +66,10 @@ export class TargetRunService {
       ...target,
       canStart: target.enabled && this.options.start !== undefined,
     }));
+  }
+
+  public isTargetProfileId(profileId: string): boolean {
+    return this.options.resolver.ownsProfileId?.(profileId) ?? false;
   }
 
   /** Re-resolves one Target against current host knowledge policy/capabilities for UI readiness only. */
@@ -87,15 +95,18 @@ export class TargetRunService {
   public async start(input: TargetRunStartInput): Promise<TargetRunStartResult> {
     validateStartInput(input);
     const inFlight = this.inFlightStarts.get(input.requestId);
+    const memoryPreferences = parseTargetMemoryPreferences(input.memoryPreferences);
+    const normalizedInput = { ...input, ...(memoryPreferences === undefined ? {} : { memoryPreferences }) };
     if (inFlight !== undefined) {
-      if (inFlight.targetId !== input.targetId || inFlight.message !== input.message) {
+      if (inFlight.targetId !== input.targetId || inFlight.message !== input.message
+        || JSON.stringify(inFlight.memoryPreferences ?? {}) !== JSON.stringify(memoryPreferences ?? {})) {
         throw new TargetConfigurationError('TARGET_REQUEST_CONFLICT');
       }
       const result = await inFlight.promise;
       return { runId: result.runId, status: 'reused' };
     }
-    const promise = this.startOnce(input);
-    const entry = { targetId: input.targetId, message: input.message, promise };
+    const promise = this.startOnce(normalizedInput);
+    const entry = { targetId: input.targetId, message: input.message, ...(memoryPreferences === undefined ? {} : { memoryPreferences }), promise };
     this.inFlightStarts.set(input.requestId, entry);
     try {
       return await promise;
@@ -120,7 +131,7 @@ export class TargetRunService {
       capturedAt,
       signal: new AbortController().signal,
     });
-    const requestDigest = digestRequest(snapshot, input.message);
+    const requestDigest = digestRequest(snapshot, input.message, input.memoryPreferences);
     const reservation = existingRequest === null
       ? await this.options.bindings.reserveRequest({
         requestId: input.requestId,
@@ -155,6 +166,7 @@ export class TargetRunService {
       runId,
       profileId: snapshot.profile.profileId,
       message: input.message,
+      ...(input.memoryPreferences === undefined ? {} : { memoryPreferences: input.memoryPreferences }),
       trustedTargetBinding,
     });
     const committed = await this.options.bindings.getBinding(runId);
@@ -165,7 +177,7 @@ export class TargetRunService {
       || committed.targetId !== input.targetId || committed.requestId !== input.requestId
       || committed.requestDigest !== requestDigest || committedSnapshot === null
       || committed.snapshotDigest !== committedSnapshot.digest
-      || digestRequest(committedSnapshot, input.message) !== requestDigest) {
+      || digestRequest(committedSnapshot, input.message, input.memoryPreferences) !== requestDigest) {
       throw new TargetConfigurationError('TARGET_BINDING_INVALID');
     }
     return { runId, status: reservation.created ? 'accepted' : 'reused' };
@@ -177,21 +189,60 @@ export class TargetRunService {
   ): Promise<{ items: readonly PublicRunSummary[]; nextCursor?: string }> {
     validateTargetListInput(targetId, input.limit);
     this.assertKnownTarget(targetId);
+    const afterRunId = input.cursor === undefined ? undefined : decodeTargetRunCursor(input.cursor, targetId);
     const bindings: TargetRunBindingPage = await this.options.bindings.listByTarget({
       targetId,
-      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(afterRunId === undefined ? {} : { cursor: afterRunId }),
       limit: input.limit,
     });
-    const items = (await Promise.all(bindings.items.map(record => this.options.queries.getRun(record.runId))))
-      .filter((run): run is PublicRunDetail => run !== null);
-    return { items, ...(bindings.nextCursor === undefined ? {} : { nextCursor: bindings.nextCursor }) };
+    const items = await Promise.all(bindings.items.map(async record => {
+      const run = await this.options.queries.getRun(record.runId);
+      return run === null ? null : this.withTargetScope(run, record);
+    }));
+    return { items: items.filter((run): run is PublicRunDetail => run !== null),
+      ...(bindings.nextCursor === undefined ? {} : { nextCursor: encodeTargetRunCursor(targetId, bindings.nextCursor) }) };
   }
 
   public async getRun(targetId: string, runId: string) {
     if (!isIdentifier(targetId) || !isIdentifier(runId)) return null;
     const binding = await this.options.bindings.getBinding(runId);
     if (binding === null || binding.targetId !== targetId) return null;
-    return this.options.queries.getRun(runId);
+    const run = await this.options.queries.getRun(runId);
+    return run === null ? null : this.withTargetScope(run, binding);
+  }
+
+  public async snapshotForRun(targetId: string, runId: string): Promise<VersionedResolvedTargetSnapshot | null> {
+    if (!isIdentifier(targetId) || !isIdentifier(runId)) return null;
+    const binding = await this.options.bindings.getBinding(runId);
+    if (binding === null || binding.targetId !== targetId) return null;
+    const snapshot = await this.options.bindings.getSnapshot(binding.bindingId);
+    if (snapshot === null || snapshot.digest !== binding.snapshotDigest || snapshot.targetId !== targetId) return null;
+    return snapshot;
+  }
+
+  public async profileIdForTarget(targetId: string): Promise<string | null> {
+    const snapshot = await this.snapshotForTarget(targetId);
+    return snapshot?.profile.profileId ?? null;
+  }
+
+  public async snapshotForTarget(targetId: string): Promise<VersionedResolvedTargetSnapshot | null> {
+    if (!isIdentifier(targetId)) return null;
+    const catalog = this.options.resolver.listCatalog().find(item => item.targetId === targetId);
+    if (catalog === undefined) return null;
+    try {
+      const snapshot = await this.options.resolver.resolve({ targetId, capturedAt: this.clock.now().toISOString(),
+        signal: new AbortController().signal });
+      return snapshot.targetId === targetId ? snapshot : null;
+    } catch { return null; }
+  }
+
+  private async withTargetScope(run: PublicRunDetail, binding: { targetId: string; bindingId: string;
+    snapshotDigest: string }): Promise<PublicRunDetail> {
+    const snapshot = await this.options.bindings.getSnapshot(binding.bindingId);
+    if (snapshot === null || snapshot.digest !== binding.snapshotDigest || snapshot.targetId !== binding.targetId) {
+      throw new TargetConfigurationError('TARGET_SNAPSHOT_UNAVAILABLE');
+    }
+    return { ...run, targetScope: targetScope(snapshot) };
   }
 
   public async ownsRun(targetId: string, runId: string): Promise<boolean> {
@@ -268,7 +319,7 @@ export class TargetRunService {
     }
     const snapshot = await this.options.bindings.getSnapshot(binding.bindingId);
     if (snapshot === null || snapshot.digest !== binding.snapshotDigest
-      || digestRequest(snapshot, input.message) !== request.requestDigest) {
+      || digestRequest(snapshot, input.message, input.memoryPreferences) !== request.requestDigest) {
       throw new TargetConfigurationError('TARGET_REQUEST_CONFLICT');
     }
     if (await this.getRun(input.targetId, request.runId) === null) {
@@ -292,7 +343,47 @@ function validateTargetListInput(targetId: string, limit: number): void {
   }
 }
 
-function digestRequest(snapshot: TrustedTargetBinding['snapshot'], message: string): string {
+function targetScope(snapshot: VersionedResolvedTargetSnapshot): NonNullable<PublicRunDetail['targetScope']> {
+  return {
+    targetId: snapshot.targetId,
+    projectId: snapshot.projectId,
+    deploymentId: snapshot.deploymentId,
+    deploymentGeneration: snapshot.deploymentGeneration,
+    environment: snapshot.environment,
+    scenarioId: snapshot.scenario.id,
+    scenarioVersion: snapshot.scenario.version,
+    serviceId: snapshot.scenario.serviceId,
+    profileRevision: snapshot.profile.revision,
+    snapshotDigest: snapshot.digest,
+  };
+}
+
+interface TargetRunCursor { targetId: string; afterRunId: string }
+
+/** Wrap the durable-store seek key so it cannot be replayed across Target routes. */
+function encodeTargetRunCursor(targetId: string, afterRunId: string): string {
+  return Buffer.from(JSON.stringify({ version: 1, targetId, afterRunId }), 'utf8').toString('base64url');
+}
+
+function decodeTargetRunCursor(value: string, targetId: string): string {
+  if (value.length > 2_048 || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+    throw new RangeError('Target Run cursor is invalid.');
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as unknown; }
+  catch { throw new RangeError('Target Run cursor is invalid.'); }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new RangeError('Target Run cursor is invalid.');
+  }
+  const cursor = parsed as Partial<TargetRunCursor> & { version?: unknown };
+  if (cursor.version !== 1 || cursor.targetId !== targetId || !isIdentifier(cursor.afterRunId ?? '')) {
+    throw new RangeError('Target Run cursor does not belong to this Target.');
+  }
+  return cursor.afterRunId!;
+}
+
+function digestRequest(snapshot: TrustedTargetBinding['snapshot'], message: string,
+  memoryPreferences?: Pick<MemoryPreferences, 'capture' | 'recall'>): string {
   const targetConfiguration: Record<string, unknown> = { ...snapshot };
   delete targetConfiguration.capturedAt;
   delete targetConfiguration.digest;
@@ -302,10 +393,22 @@ function digestRequest(snapshot: TrustedTargetBinding['snapshot'], message: stri
   const checksum = checkpointChecksum({
     algorithm: 'sha256',
     version: 1,
-    request: { targetId: snapshot.targetId, message },
+    request: { targetId: snapshot.targetId, message, ...(memoryPreferences === undefined ? {} : { memoryPreferences }) },
     targetConfiguration,
   });
   return `sha256:v1:${checksum}`;
+}
+
+function parseTargetMemoryPreferences(value: TargetRunStartInput['memoryPreferences']): TargetRunStartInput['memoryPreferences'] {
+  if (value === undefined) return undefined;
+  let parsed: MemoryPreferences;
+  try { parsed = parseMemoryPreferences(value); }
+  catch { throw new TargetConfigurationError('TARGET_BINDING_INVALID'); }
+  if (parsed.semantic !== undefined || parsed.procedural !== undefined) throw new TargetConfigurationError('TARGET_BINDING_INVALID');
+  return {
+    ...(parsed.capture === undefined ? {} : { capture: parsed.capture }),
+    ...(parsed.recall === undefined ? {} : { recall: parsed.recall }),
+  };
 }
 
 function isIdentifier(value: string): boolean {

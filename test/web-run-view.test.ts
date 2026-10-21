@@ -35,6 +35,24 @@ function page(...items: PublicMessageItem[]): PublicMessagePage {
 }
 
 describe('browser run view state', () => {
+  it('opens the server-assigned Run ID returned by a Target start', async () => {
+    const detail = runDetail('server-assigned-run', 0);
+    const client = viewClient(detail);
+    let requestedRunId = '';
+    client.startRun = input => {
+      requestedRunId = input.runId;
+      return Promise.resolve({ runId: detail.runId, status: 'started', eventsUrl: `/targets/target-a/runs/${detail.runId}/events` });
+    };
+    const controller = new RunViewController(client);
+    try {
+      await controller.startRun('inspect', 'target-a');
+
+      expect(requestedRunId).not.toBe(detail.runId);
+      expect(controller.getState().runId).toBe(detail.runId);
+      expect(controller.getState().detail?.runId).toBe(detail.runId);
+    } finally { controller.close(); }
+  });
+
   it('keeps an accepted cancel pending while the latest Run snapshot is active', async () => {
     const initial: PublicRunDetail = { ...runDetail('cancel-run', 0), status: 'running' };
     const client = viewClient(initial);

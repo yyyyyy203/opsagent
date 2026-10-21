@@ -3,7 +3,7 @@
 - 日期：2026-10-20
 - 依据：[多项目适配设计 Spec](../specs/2026-10-11-multi-project-adaptation-design.md) §4.2、§7–§13
 - 前置：M1/M2a/R0、M3 已实现的契约和安全门；执行前重新核对分支、`AGENTS.md`、Spec、当前测试与 Git 状态。
-- 状态：待实施。本计划是文件和验收清单，不表示功能已完成。
+- 状态：已完成。实现、全仓质量门及双 Target 浏览器验收通过；真实业务目标接入不属于本阶段验收。
 
 ## 目标与现状
 
@@ -65,3 +65,17 @@
 按 M4.1 → M4.2 → M4.3 顺序实施；每段先写关键失败用例，再修改对应文件，防止 UI 绕开未补齐的归属门。完成后执行仓库要求的 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`、Web typecheck/build 和相关浏览器验收，记录运行环境、通过/跳过项。M4 的完成条件是所有公开 Target 入口可按归属使用，旧入口不能访问 Target 资源，两个模拟 Target 可在主工作台切换，且没有原始连接或证据内容进入公共投影。
 
 M5 的联合浏览器/容量验收见 [M5 计划](2026-10-20-multi-project-m5.md)。可选旧 Run 迁移见 [M2b 计划](2026-10-20-multi-project-m2b.md)，不是 M4 前置条件。真实 `group-buy-market` 数据源、Counter 场景、多人 ACL 与真实动作不属于本阶段。
+
+## 本轮逐文件执行结果（2026-10-21）
+
+| 计划文件/文件组 | 执行结果 |
+| --- | --- |
+| `src/contracts/target.ts`、`src/contracts/read-model.ts` | 已调整 Target 安全投影与旧列表过滤输入；`web-read-model.ts` 现有 DTO 足够，未改。 |
+| `src/application/target-run-service.ts`、`src/application/target-web-query-service.ts` | 已实现 Target 游标范围校验、冻结 Snapshot 标签，以及消息/证据/确认查询前的 Target 与父子 lineage 校验。 |
+| `src/infrastructure/sqlite/inspection-query-service.ts`、`src/storage/in-memory-inspection-query.ts`、`src/application/create-runtime.ts`、`src/api/http-server.ts` | 已在 legacy 列表排序分页前排除 Target-bound Run，并接入 Target 查询门与旧入口拒绝。持久化 Target 列表本身已由现有按 Target 查询端口过滤，未需改 `durable-state-store.ts`。 |
+| `src/api/memory-routes.ts`、`src/bootstrap/memory-policy.ts`、`src/bootstrap/agent-web-runtime.ts` | 已接入 Target-scoped Episodic API、冻结 MemoryScope 校验和可选 capture/recall 偏好；偏好合同及幂等兼容记录在[决策文档](../decisions/2026-10-21-target-memory-preferences.md)。 |
+| `apps/agent-web/src/api/{client,types}.ts`、`apps/agent-web/src/state/run-view.ts`、`apps/agent-web/src/App.tsx`、`apps/agent-web/src/components/TargetWorkspace.tsx`、`TaskComposer.tsx`、`RunList.tsx`、`RunStatus.tsx`、`MemoryPanel.tsx`、`apps/agent-web/src/styles.css` | 已完成 Target/simulation 双模式与工作台接线；复用现有消息、证据、确认、子 Run 面板。Run View 现以服务端 accepted `runId` 打开新 Run，覆盖了此前浏览器临时 ID 与服务端 ID 不一致的问题。 |
+| `test/target-http-routes.test.ts`、`test/memory-policy.test.ts`、`test/web-api-client.test.ts`、`test/web-run-view.test.ts`、`test/e2e/multi-target-web.spec.ts` 及既有 Target 回归 | 全仓回归和新增双 Target 浏览器用例通过；浏览器覆盖 A/B 阈值结果、冻结标签、跨 Target/legacy 404、切换迟到响应隔离、历史和旧 simulation。 |
+| `docs/guides/agent-web-local.md`、`docs/implementation-status.md`、`docs/verification/2026-10-21-multi-project-m5-acceptance.md` | 已补充本地使用方式、验收证据和真实目标限制。 |
+
+未改动的消息游标、证据存储与知识治理实现继续复用已有 run-bound 查询、Target 知识门和投影；本轮在 Target 查询服务及路由层先做归属校验，没有新增第二套存储或知识 CRUD。验证：根 lint/typecheck/build、全仓测试、Web typecheck/build 与 `pnpm e2e:multi-target` 均通过；运行环境、测试计数和外部请求边界详见 [M5 验收记录](../../verification/2026-10-21-multi-project-m5-acceptance.md)。

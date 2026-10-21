@@ -66,6 +66,27 @@ pnpm web:dev
 - 数据源状态在当前 Run 的状态卡中展示：重试、熔断打开及冷却截止；冷却时间到后显示“恢复探测待触发”，仅表示后续请求可竞争单一探测，探测成功后才显示“数据源已恢复”。半开状态事件只供审计，不作为 Public SSE 推送。
 - 当前宿主为单进程本地 MVP；协调器和消息游标不是分布式锁/跨进程认证方案，不得直接公网暴露。
 
+## 多项目 Target 工作台（M4）
+
+页面默认进入 Target 项目巡检，可在项目、部署和场景间切换；Target 历史、消息、证据、确认、SSE、恢复/取消及 Episodic 记忆请求均通过 `/targets/:targetId/...` 路由。Run 卡片和状态区展示启动时冻结的项目/部署世代、环境、场景/服务、Profile 规则版本和 Snapshot 摘要。旧 `/runs` 分页在存储查询时排除 Target Run，旧 `/memory` Profile 入口也拒绝 Target-owned Profile；“模拟巡检”保留原 simulation 页面。
+
+Target 工作台需要宿主显式注入 Target Runtime、Scope-aware Starter 与当前策略门。默认 `apps/agent-server/index.mjs` 仍只提供 `simulation` Profile，因此未配置 Target Runtime 时页面会显示没有可用 Target；它不会从 `group-buy-market` 目录或配置中自动推导 Target。Target Memory 只有宿主注册的完整 Snapshot MemoryScope 与当前记忆策略相符时才可用。Target Run POST 可选提交现有 `capture`/`recall` 偏好，不能提交 Profile 身份、Scope 或可信策略。
+
+双 Target 的本地浏览器验收使用独立临时 SQLite、固定模型和模拟 Catalog，不连接 Prometheus、ELK、模型服务或 `group-buy-market`：
+
+```powershell
+pnpm e2e:multi-target
+```
+
+验收在同为 4% 的模拟数据上对比 A 的 5% 与 B 的 2% 阈值、切换历史、跨 Target 404、延迟 Run 响应隔离和旧 simulation 入口。指标计算与不同映射的来源端隔离另由 `test/target-metrics-m3.integration.test.ts` 覆盖。固定环境的容量与十个并发父 Run 使用 opt-in 命令：
+
+```powershell
+pnpm acceptance:multi-target-capacity
+pnpm acceptance:multi-target-load
+```
+
+命令输出 Node、CPU、样本数和 p50/p95/p99 或 p95；只有记录对应运行结果的本地环境才构成容量/负载验收证据。测试夹具结果不能代表真实 `group-buy-market` 数据源或生产部署。
+
 ## 数据源熔断故障演练
 
 熔断器状态属于 Agent Web 宿主进程；Metrics Lab 的独立 loopback 管理 API 只注入故障，不经过 Agent 工具调用。先按上文启动 Metrics Lab 和 Agent Web。在一个 PowerShell 窗口为后续来源查询注入故障并核对计数：

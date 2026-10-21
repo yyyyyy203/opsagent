@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { RunExecutionCoordinator } from '../src/application/run-execution-coordinator.js';
 import { TargetRunService } from '../src/application/target-run-service.js';
+import { TargetWebQueryService } from '../src/application/target-web-query-service.js';
+import { OpaqueMessageCursorCodec } from '../src/application/message-cursor-codec.js';
 import { startInspectionHttpServer } from '../src/api/http-server.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import { createStaticTargetResolver } from '../src/profiles/target-resolver.js';
@@ -24,7 +26,7 @@ afterEach(async () => {
 
 describe('Target-scoped HTTP routes', () => {
   it('starts only through a Target route and denies Target Runs through legacy or cross-Target reads', async () => {
-    const model = new ScriptedModel([{ text: 'Completed', toolCalls: [] }]);
+    const model = new ScriptedModel([{ text: 'Completed', toolCalls: [] }, { text: 'Completed second', toolCalls: [] }]);
     const identityPorts = createTargetIdentityTestPorts();
     const runtime = createAgentRuntime({
       model,
@@ -107,9 +109,13 @@ describe('Target-scoped HTTP routes', () => {
         },
       },
     });
+    const targetWebQueries = new TargetWebQueryService({ targetRuns, queries: runtime.queries,
+      messages: runtime.webMessages(new OpaqueMessageCursorCodec(() => Date.parse(now))),
+      getConfirmation: async () => null });
     const server = await startInspectionHttpServer({
       agent: runtime.agent, events: runtime.eventStreamV2, queries: runtime.queries,
-      targetRuns, targetBindings: runtime.durableState.targetBindings,
+      targetRuns, targetWebQueries, targetBindings: runtime.durableState.targetBindings,
+      memory: { clock, schedule: async () => {}, targetRuns },
     });
     servers.push(server);
 
@@ -146,8 +152,29 @@ describe('Target-scoped HTTP routes', () => {
     await reader.cancel();
     expect(text).toContain('event: RUN_STARTED');
     expect(text).toContain('event: RUN_FINISHED');
+    const secondResponse = await fetch(`${server.url}/targets/market-a-sim/runs`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'target-http-2' },
+      body: JSON.stringify({ message: 'inspect another window' }),
+    });
+    expect(secondResponse.status).toBe(202);
+    const firstPage = await fetch(`${server.url}/targets/market-a-sim/runs?limit=1`);
+    const firstPageBody = await firstPage.json() as { items: unknown[]; nextCursor?: string };
+    expect(firstPageBody.items).toHaveLength(1);
+    expect(firstPageBody.nextCursor).toBeTruthy();
+    const wrongTargetCursor = await fetch(`${server.url}/targets/market-b-sim/runs?limit=1&cursor=${encodeURIComponent(firstPageBody.nextCursor!)}`);
+    expect(wrongTargetCursor.status).toBe(400);
+    const nextPage = await fetch(`${server.url}/targets/market-a-sim/runs?limit=1&cursor=${encodeURIComponent(firstPageBody.nextCursor!)}`);
+    expect((await nextPage.json() as { items: unknown[] }).items).toHaveLength(1);
     expect((await fetch(`${server.url}/targets/market-a-sim/runs/${encodeURIComponent(accepted.runId)}`)).status).toBe(200);
     expect((await fetch(`${server.url}/targets/market-a-sim/runs?limit=10`)).status).toBe(200);
+    const targetMessages = await fetch(`${server.url}/targets/market-a-sim/runs/${encodeURIComponent(accepted.runId)}/messages`);
+    expect(targetMessages.status).toBe(200);
+    expect(Array.isArray((await targetMessages.json() as { items: unknown[] }).items)).toBe(true);
+    expect((await fetch(`${server.url}/targets/market-a-sim/runs/${encodeURIComponent(accepted.runId)}/evidence`)).status).toBe(200);
+    expect((await fetch(`${server.url}/targets/market-a-sim/runs/${encodeURIComponent(accepted.runId)}/confirmation`)).status).toBe(200);
+    expect((await fetch(`${server.url}/targets/market-b-sim/runs/${encodeURIComponent(accepted.runId)}/messages`)).status).toBe(404);
+    expect((await fetch(`${server.url}/runs/${encodeURIComponent(accepted.runId)}/memory`)).status).toBe(404);
+    expect((await fetch(`${server.url}/memory/capabilities?profileId=market-a.lab.settlement`)).status).toBe(404);
 
     expect((await fetch(`${server.url}/runs/${encodeURIComponent(accepted.runId)}/resume`, { method: 'POST' })).status).toBe(404);
     expect((await fetch(`${server.url}/runs/${encodeURIComponent(accepted.runId)}/cancel`, { method: 'POST' })).status).toBe(404);

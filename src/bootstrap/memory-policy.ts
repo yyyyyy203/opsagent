@@ -3,6 +3,7 @@ import type { DiagnosticMemoryConfig, MemoryPolicyPort, MemoryPreferences, RunMe
 import { memoryScopeSchema, parseMemoryPreferences, parseRunMemoryControl } from '../contracts/diagnostic-memory-schema.js';
 import { sameMemoryScope } from '../memory/memory-scope.js';
 import { MemoryError } from '../memory/memory-error.js';
+import type { MemoryScope } from '../contracts/diagnostic-memory.js';
 
 const identifier = z.string().min(1).max(256).regex(/^[\p{L}\p{N}][\p{L}\p{N}._-]*$/u);
 const profile = z.object({
@@ -61,6 +62,18 @@ export function resolveMemoryControl(config: DiagnosticMemoryConfig, profileId: 
   if ((capture === 'automatic' && !item.allowAutomaticCapture) || (recall && !item.allowRecall)) throw new MemoryError('MEMORY_POLICY_DENIED');
   return parseRunMemoryControl({ schemaVersion: 1, scope: item.scope,
     profilePolicyRevision: item.profilePolicyRevision, capture, recall });
+}
+
+/** Resolve Target memory from its frozen host snapshot, never from caller-supplied profile scope. */
+export function resolveTargetMemoryControl(config: DiagnosticMemoryConfig, scope: MemoryScope,
+  preferences?: Pick<MemoryPreferences, 'capture' | 'recall'>): RunMemoryControl | undefined {
+  const item = config.enabled ? config.profiles.find(profile => sameMemoryScope(profile.scope, scope)) : undefined;
+  if (item === undefined) {
+    const selected = preferences ?? {};
+    if (selected.capture === 'automatic' || selected.recall === 'enabled') throw new MemoryError('MEMORY_POLICY_DENIED');
+    return undefined;
+  }
+  return resolveMemoryControl(config, item.scope.profileId, preferences);
 }
 
 /** Rechecks current host authorization; persisted snapshots are never upgraded. */

@@ -5,6 +5,8 @@ import { USER_RUN_CANCELLATION_REASON } from '../agent/types.js';
 import type { DiagnosisAgent, ReplyOptions } from '../agent/types.js';
 
 export type RunExecutionErrorCode = 'RUN_ID_REQUIRED' | 'RUN_NOT_FOUND' | 'RUN_CONFLICT' | 'RUN_START_STATE_UNKNOWN';
+export const DEFAULT_MAX_CONCURRENT_RUNS = 2;
+const DEFAULT_MAX_QUEUED_RUNS = 32;
 
 export interface RunExecutionCoordinatorOptions {
   prepareStart?: (options: ReplyOptions) => ReplyOptions;
@@ -13,6 +15,10 @@ export interface RunExecutionCoordinatorOptions {
   clock?: Clock;
   ids?: IdGenerator;
   targetStartLeaseMs?: number;
+  maxConcurrentRuns?: number;
+  maxQueuedRuns?: number;
+  /** Local host instrumentation for queue and first-event scheduling acceptance. */
+  onRunAdmitted?: (runId: string, queueWaitMs: number) => void;
 }
 
 /** Stable command error exposed by the local HTTP adapter. */
@@ -39,6 +45,7 @@ export class RunExecutionCoordinator {
   private readonly ids: IdGenerator;
   private ownerId: string | undefined;
   private readonly targetStartLeaseMs: number;
+  private readonly executionSlots: RunExecutionSlots;
   private closing = false;
 
   public constructor(
@@ -49,6 +56,8 @@ export class RunExecutionCoordinator {
     this.clock = options.clock ?? systemClock;
     this.ids = options.ids ?? randomIdGenerator;
     this.targetStartLeaseMs = options.targetStartLeaseMs ?? 60_000;
+    this.executionSlots = new RunExecutionSlots(options.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS,
+      options.maxQueuedRuns ?? DEFAULT_MAX_QUEUED_RUNS);
   }
 
   public start(options: ReplyOptions): Promise<void> {
@@ -137,7 +146,11 @@ export class RunExecutionCoordinator {
     this.startAcceptance.set(runId, acceptance);
 
     const work = (async (): Promise<void> => {
+      let releaseExecutionSlot: (() => void) | undefined;
       try {
+        // Reserve capacity before taking the durable start lease, so queued
+        // Targets do not hold an expiring owner claim while waiting for a slot.
+        releaseExecutionSlot = await this.acquireExecutionSlot(runId, options.signal);
         const now = this.clock.now();
         if (!Number.isSafeInteger(this.targetStartLeaseMs) || this.targetStartLeaseMs <= 0) {
           throw new RunExecutionError('RUN_START_STATE_UNKNOWN', 'Target Run start state is unavailable.', 409);
@@ -168,7 +181,7 @@ export class RunExecutionCoordinator {
           settled = true;
           rememberBounded(this.startedRuns, runId);
           resolveAcceptance();
-        });
+        }, true);
         if (!settled) await this.rejectAfterTargetStartFailure(identity, claim, runId, resolveAcceptance, rejectAcceptance);
       } catch (error) {
         if (!settled) {
@@ -180,6 +193,7 @@ export class RunExecutionCoordinator {
           }
         }
       } finally {
+        releaseExecutionSlot?.();
         if (this.startAcceptance.get(runId) === acceptance) this.startAcceptance.delete(runId);
       }
     })();
@@ -225,7 +239,8 @@ export class RunExecutionCoordinator {
     rejectAcceptance(new RunExecutionError('RUN_START_STATE_UNKNOWN', 'Target Run start state is unknown; do not retry with a new request ID.', 409));
   }
 
-  private startInternal(options: ReplyOptions, onFirstEvent?: (event: AgentEvent) => void): Promise<void> {
+  private startInternal(options: ReplyOptions, onFirstEvent?: (event: AgentEvent) => void,
+    hasExecutionSlot = false): Promise<void> {
     if (this.closing) return Promise.reject(new RunExecutionError('RUN_CONFLICT', 'Runtime is shutting down.', 409));
     const runId = options.runId;
     if (runId === undefined || runId.length === 0) {
@@ -237,14 +252,23 @@ export class RunExecutionCoordinator {
       return Promise.reject(new RunExecutionError('RUN_CONFLICT', 'Run ID has already been accepted.', 409));
     }
     rememberBounded(this.accepted, runId);
-    return this.claim(runId, async (signal) => {
-      const checkpoint = await this.checkpoints.load(runId);
-      if (checkpoint !== null) {
-        throw new RunExecutionError('RUN_CONFLICT', 'Run already exists and cannot be started again.', 409);
-      }
-      const preparedOptions = this.prepareStart(options);
-      await this.drain(this.agent.replyStream({ ...preparedOptions, signal }), onFirstEvent);
-      await this.afterTerminal(runId);
+    return this.claim(runId, (signal) => {
+      const execute = async (release?: () => void): Promise<void> => {
+        try {
+          const checkpoint = await this.checkpoints.load(runId);
+          if (checkpoint !== null) {
+            throw new RunExecutionError('RUN_CONFLICT', 'Run already exists and cannot be started again.', 409);
+          }
+          const preparedOptions = this.prepareStart(options);
+          await this.drain(this.agent.replyStream({ ...preparedOptions, signal }), onFirstEvent);
+          await this.afterTerminal(runId);
+        } finally {
+          release?.();
+        }
+      };
+      if (hasExecutionSlot) return execute();
+      const acquired = this.acquireExecutionSlot(runId, signal);
+      return typeof acquired === 'function' ? execute(acquired) : acquired.then(execute);
     }, options.signal);
   }
 
@@ -252,17 +276,25 @@ export class RunExecutionCoordinator {
     if (this.closing) return Promise.reject(new RunExecutionError('RUN_CONFLICT', 'Runtime is shutting down.', 409));
     const existing = this.active.get(runId);
     if (existing !== undefined) return existing;
-    return this.claim(runId, async (runSignal) => {
-      const checkpoint = await this.checkpoints.load(runId);
-      if (checkpoint === null) throw new RunExecutionError('RUN_NOT_FOUND', 'Run not found.', 404);
-      if (isTerminal(checkpoint.status)) {
-        throw new RunExecutionError('RUN_CONFLICT', 'Terminal Runs cannot be resumed.', 409);
-      }
-      if (checkpoint.status === 'awaiting_confirmation') {
-        throw new RunExecutionError('RUN_CONFLICT', 'Resolve the pending confirmation before resuming.', 409);
-      }
-      await this.drain(this.agent.resumeStream(runId, runSignal));
-      await this.afterTerminal(runId);
+    return this.claim(runId, (runSignal) => {
+      const execute = async (release: () => void): Promise<void> => {
+        try {
+          const checkpoint = await this.checkpoints.load(runId);
+          if (checkpoint === null) throw new RunExecutionError('RUN_NOT_FOUND', 'Run not found.', 404);
+          if (isTerminal(checkpoint.status)) {
+            throw new RunExecutionError('RUN_CONFLICT', 'Terminal Runs cannot be resumed.', 409);
+          }
+          if (checkpoint.status === 'awaiting_confirmation') {
+            throw new RunExecutionError('RUN_CONFLICT', 'Resolve the pending confirmation before resuming.', 409);
+          }
+          await this.drain(this.agent.resumeStream(runId, runSignal));
+          await this.afterTerminal(runId);
+        } finally {
+          release();
+        }
+      };
+      const acquired = this.acquireExecutionSlot(runId, runSignal);
+      return typeof acquired === 'function' ? execute(acquired) : acquired.then(execute);
     }, signal);
   }
 
@@ -305,6 +337,10 @@ export class RunExecutionCoordinator {
       throw new RunExecutionError('RUN_CONFLICT', 'prepareStart cannot change Run identity.', 409);
     }
     return prepared;
+  }
+
+  private acquireExecutionSlot(runId: string, signal?: AbortSignal): ExecutionSlotAcquisition {
+    return this.executionSlots.acquire(runId, signal, this.options.onRunAdmitted);
   }
 
   private claim(runId: string, action: (signal: AbortSignal) => Promise<void>, upstreamSignal?: AbortSignal): Promise<void> {
@@ -357,6 +393,92 @@ export class RunExecutionCoordinator {
     const checkpoint = await this.checkpoints.load(runId);
     if (checkpoint !== null && isTerminal(checkpoint.status)) await this.options.afterTerminal(runId);
   }
+}
+
+type ExecutionSlotAcquisition = (() => void) | Promise<() => void>;
+
+interface ExecutionSlotWaiter {
+  runId: string;
+  signal?: AbortSignal;
+  resolve: (release: () => void) => void;
+  reject: (error: unknown) => void;
+  onAbort: () => void;
+  onAdmitted?: (runId: string, queueWaitMs: number) => void;
+  queuedAt: number;
+}
+
+/** FIFO, bounded admission control for top-level executions and resumptions. */
+class RunExecutionSlots {
+  private active = 0;
+  private readonly queue: ExecutionSlotWaiter[] = [];
+
+  public constructor(private readonly capacity: number, private readonly maxQueued: number) {
+    if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 200
+      || !Number.isSafeInteger(maxQueued) || maxQueued < 0 || maxQueued > 10_000) {
+      throw new RangeError('Run execution limits are outside the supported bounds.');
+    }
+  }
+
+  public acquire(runId: string, signal?: AbortSignal,
+    onAdmitted?: (runId: string, queueWaitMs: number) => void): ExecutionSlotAcquisition {
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
+    if (this.active < this.capacity) {
+      onAdmitted?.(runId, 0);
+      this.active += 1;
+      return this.releaseOnce();
+    }
+    if (this.queue.length >= this.maxQueued) {
+      return Promise.reject(new RunExecutionError('RUN_CONFLICT', 'Run execution queue is at capacity.', 409));
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: ExecutionSlotWaiter = { runId, resolve, reject, queuedAt: performance.now(),
+        ...(signal === undefined ? {} : { signal }), ...(onAdmitted === undefined ? {} : { onAdmitted }),
+        onAbort: () => {
+          const index = this.queue.indexOf(waiter);
+          if (index >= 0) this.queue.splice(index, 1);
+          signal?.removeEventListener('abort', waiter.onAbort);
+          reject(signal === undefined ? new Error('Run execution was cancelled while queued.') : abortReason(signal));
+          this.dispatch();
+        } };
+      this.queue.push(waiter);
+      signal?.addEventListener('abort', waiter.onAbort, { once: true });
+      if (signal?.aborted) waiter.onAbort();
+    });
+  }
+
+  private releaseOnce(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active -= 1;
+      this.dispatch();
+    };
+  }
+
+  private dispatch(): void {
+    while (this.active < this.capacity && this.queue.length > 0) {
+      const waiter = this.queue.shift()!;
+      waiter.signal?.removeEventListener('abort', waiter.onAbort);
+      if (waiter.signal?.aborted) {
+        waiter.reject(abortReason(waiter.signal));
+        continue;
+      }
+      try {
+        waiter.onAdmitted?.(waiter.runId, performance.now() - waiter.queuedAt);
+      } catch (error) {
+        waiter.reject(error);
+        continue;
+      }
+      this.active += 1;
+      waiter.resolve(this.releaseOnce());
+    }
+  }
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason
+    : new Error('Run execution was cancelled while queued.', { cause: signal.reason });
 }
 
 function isTerminal(status: AgentContext['status']): boolean {

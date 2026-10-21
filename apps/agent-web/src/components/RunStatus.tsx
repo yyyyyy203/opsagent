@@ -15,6 +15,15 @@ export function RunStatus({ detail, descendantUsage, subtreeUsage, connected, pe
       {toolActivity !== null && <div className="tool-block"><strong>{toolActivity.status === 'running' ? '工具执行中' : '工具结果'}</strong><code>{toolActivity.toolName} · {toolActivity.status}</code></div>}
       {datasourceActivity.length > 0 && <div className="datasource-timeline" role="list" aria-label="数据源状态变化">{datasourceActivity.map((source) => <div className="tool-block datasource-block" role="listitem" key={source.eventId}><strong>{datasourceStatusLabel(source.status)}</strong><code>{source.sourceId}{source.attempt === undefined ? '' : ` · 第 ${source.attempt} 次重试`}{source.reasonCode === undefined ? '' : ` · ${source.reasonCode}`}</code>{source.status === 'open' && source.openUntil !== undefined && <small>冷却至 {new Date(source.openUntil).toLocaleTimeString()}，期间不会再次查询。</small>}{source.status === 'probe_waiting' && <small>冷却已结束，下一次请求只放行一个恢复探测。</small>}</div>)}</div>}
       <dl className="detail-list"><div><dt>Run ID</dt><dd><code>{detail.runId}</code></dd></div><div><dt>上下文版本</dt><dd>{detail.contextVersion}</dd></div><div><dt>证据数量</dt><dd>{detail.evidenceIds.length}</dd></div></dl>
+      {detail.targetScope !== undefined && <div className="target-frozen-scope" aria-label="Run 冻结的 Target 配置">
+        <strong>启动时 Target 配置</strong>
+        <dl className="detail-list">
+          <div><dt>项目 / 部署</dt><dd>{detail.targetScope.projectId} / {detail.targetScope.deploymentId}#{detail.targetScope.deploymentGeneration}</dd></div>
+          <div><dt>环境 / 场景</dt><dd>{detail.targetScope.environment} · {detail.targetScope.scenarioId}@{detail.targetScope.scenarioVersion}</dd></div>
+          <div><dt>服务 / Profile 规则</dt><dd>{detail.targetScope.serviceId} · {detail.targetScope.profileRevision}</dd></div>
+          <div><dt>Snapshot</dt><dd><code>{detail.targetScope.snapshotDigest.slice(0, 24)}…</code></dd></div>
+        </dl>
+      </div>}
       <div className="token-usage"><strong>模型用量</strong><dl className="detail-list"><div><dt>本 Run</dt><dd>{formatUsage(detail.usage)}</dd></div><div><dt>子 Run 合计</dt><dd>{descendantUsage === null ? '无子 Run' : formatUsage(descendantUsage)}</dd></div><div><dt>整棵调用链</dt><dd>{formatUsage(subtreeUsage)}</dd></div></dl><small>显示 token 数量，不等同于账单金额；实际费用需结合模型价格和供应商账单核对。</small></div>
       {(resumeAvailable || detail.status === 'paused' || detail.status === 'awaiting_confirmation') && <button className="secondary-button full-width" onClick={onResume} disabled={pending}>{pending ? '恢复中…' : resumeAvailable ? '继续调查' : '显式恢复 Run'}</button>}
       {detail.status === 'running' && <button className="secondary-button full-width" onClick={onCancel} disabled={cancelPending}>{cancelPending ? '正在取消…' : '取消运行'}</button>}

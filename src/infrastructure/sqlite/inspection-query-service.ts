@@ -60,11 +60,13 @@ export class SqliteInspectionQueryService implements InspectionQueryService {
   public listRuns(options: RunListOptions = {}): Promise<PublicRunPage> {
     const limit = pageLimit(options.limit);
     const cursor = options.cursor === undefined ? undefined : decodeRunCursor(options.cursor);
-    if (cursor !== undefined && (cursor.profileId !== options.profileId || cursor.status !== options.status)) throw new Error('run cursor does not match its filters');
+    if (cursor !== undefined && (cursor.profileId !== options.profileId || cursor.status !== options.status
+      || (cursor.excludeTargetBound === true) !== (options.excludeTargetBound === true))) throw new Error('run cursor does not match its filters');
     const conditions = ['1 = 1'];
     const values: unknown[] = [];
     if (options.profileId !== undefined) { conditions.push('profile_id = ?'); values.push(options.profileId); }
     if (options.status !== undefined) { conditions.push('status = ?'); values.push(options.status); }
+    if (options.excludeTargetBound === true) conditions.push('NOT EXISTS (SELECT 1 FROM run_target_bindings target_binding WHERE target_binding.run_id = agent_checkpoints.run_id)');
     if (cursor !== undefined) {
       conditions.push('(updated_at < ? OR (updated_at = ? AND run_id < ?))');
       values.push(cursor.updatedAt, cursor.updatedAt, cursor.runId);
@@ -237,17 +239,17 @@ function pageLimit(value: number | undefined): number {
   return value;
 }
 
-interface RunCursor { updatedAt: string; runId: string; profileId?: string; status?: string }
+interface RunCursor { updatedAt: string; runId: string; profileId?: string; status?: string; excludeTargetBound?: boolean }
 interface EvidenceCursor { runId: string; capturedAt: string; evidenceId: string }
 
 function encodeRunCursor(item: PublicRunSummary, options: RunListOptions): string {
-  return encode({ updatedAt: item.updatedAt, runId: item.runId, ...(options.profileId === undefined ? {} : { profileId: options.profileId }), ...(options.status === undefined ? {} : { status: options.status }) });
+  return encode({ updatedAt: item.updatedAt, runId: item.runId, ...(options.profileId === undefined ? {} : { profileId: options.profileId }), ...(options.status === undefined ? {} : { status: options.status }), ...(options.excludeTargetBound === true ? { excludeTargetBound: true } : {}) });
 }
 
 function decodeRunCursor(value: string): RunCursor {
   const parsed = decode(value);
   if (!isRecord(parsed) || typeof parsed.updatedAt !== 'string' || typeof parsed.runId !== 'string') throw new Error('run cursor is invalid');
-  return { updatedAt: parsed.updatedAt, runId: parsed.runId, ...(typeof parsed.profileId === 'string' ? { profileId: parsed.profileId } : {}), ...(typeof parsed.status === 'string' ? { status: parsed.status } : {}) };
+  return { updatedAt: parsed.updatedAt, runId: parsed.runId, ...(typeof parsed.profileId === 'string' ? { profileId: parsed.profileId } : {}), ...(typeof parsed.status === 'string' ? { status: parsed.status } : {}), ...(parsed.excludeTargetBound === true ? { excludeTargetBound: true } : {}) };
 }
 
 function encodeEvidenceCursor(runId: string, capturedAt: string, evidenceId: string): string {

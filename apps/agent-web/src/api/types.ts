@@ -76,6 +76,13 @@ export interface PublicRunSummary {
   createdAt: string;
   updatedAt: string;
   parentRunId?: string;
+  targetScope?: PublicTargetRunScope;
+}
+
+export interface PublicTargetRunScope {
+  targetId: string; projectId: string; deploymentId: string; deploymentGeneration: number;
+  environment: string; scenarioId: string; scenarioVersion: string; serviceId: string;
+  profileRevision: string; snapshotDigest: string;
 }
 
 export interface RunUsageSummary {

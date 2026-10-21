@@ -1,5 +1,15 @@
 # 实现进度与验证记录
 
+## 2026-10-21：多项目 M4/M5 与 M2b 盘点执行
+
+按 [M4 逐文件实施计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 联合验收计划](./superpowers/plans/2026-10-20-multi-project-m5.md) 和 [M2b 条件迁移计划](./superpowers/plans/2026-10-20-multi-project-m2b.md) 执行。M4 已接入 Target 范围游标、冻结 Snapshot 安全标签、legacy `/runs` 分页前过滤、Target 消息/证据/确认与父子归属查询门、legacy 入口拒绝、Target Episodic 路由和冻结 MemoryScope 校验。Target 创建偏好只接收 capture/recall，进入幂等摘要，未提供偏好的旧请求保持摘要兼容；合同记录在 [Target Memory Preferences 决定](./superpowers/decisions/2026-10-21-target-memory-preferences.md)。
+
+Web 增加 Target 与 simulation 双模式，Target 模式按宿主目录选择目标并使用 Target-scoped Run、SSE、消息、证据、确认和记忆 API；报告显示冻结 Snapshot 身份。浏览器回归验证 A/B 阈值、跨 Target/legacy 访问拒绝、迟到响应隔离、历史和 simulation。新增双 Target Playwright fixture、200 Target/50 来源分区容量验收和十个并发父 Run 负载验收；M5 另增加单进程 FIFO 根 Run 上限，决策见 [Root Run 准入上限](./superpowers/decisions/2026-10-21-root-run-admission-limit.md)。固定 fixture 使用 ScriptedModel/本地模拟数据，不代表真实 `group-buy-market` 数据源或生产验收。
+
+M2b 只读盘点未找到工作树内 SQLite/DB 文件，`AGENTOPS_DATA_DIR` 未配置，且宿主启动要求显式提供数据目录；候选旧 Run 数为零。M2b.1 按阶段门完成，M2b.2 未触发；没有新增历史绑定或迁移写路径。证据记录在[盘点报告](./verification/2026-10-21-m2b-inventory.md)。
+
+**验收结果：**根 lint/typecheck/build、全仓测试、Web typecheck/build、`e2e:multi-target`、容量和负载验收均通过。Vitest 215 个文件通过、5 个 opt-in 文件跳过；2241 项通过、9 项跳过。双 Target 浏览器 1/1 通过；容量和负载分位数与剩余限制见 [M5 验收记录](./verification/2026-10-21-multi-project-m5-acceptance.md)。M4/M5 的模拟验收完成；真实业务目标未接入。逐文件实施和未改计划文件的原因见 [M4 计划执行记录](./superpowers/plans/2026-10-20-multi-project-m4.md)。
+
 ## 2026-10-10：Prometheus + 熔断前端联合验收
 
 新增独立 `pnpm e2e:circuit:prometheus` 验收入口，复用真实 Agent Web Runtime、MCP、熔断器、V2 SSE 和前端流程，但将 Metrics Lab 的恢复查询连接到本地 Docker Prometheus。模拟器在 MCP 来源边界注入 9 次失败；熔断期间 Prometheus 查询数保持 0。经过第一次失败的半开探测、重新熔断及第二轮冷却后，唯一成功探测实际调用 `PrometheusSettlementSource`，读回模拟窗口 100 笔/15 次失败。Public Evidence/UI 只保留摘要和引用，不暴露 Prometheus 原始指标名。

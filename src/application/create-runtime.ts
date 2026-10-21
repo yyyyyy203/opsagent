@@ -326,7 +326,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const queries: InspectionQueryService | undefined = persistence?.queries
     ?? (evidenceQuery === undefined
       ? undefined
-      : new InMemoryInspectionQueryService(eventStoreV2, checkpoints, evidenceQuery, evidenceManifests));
+      : new InMemoryInspectionQueryService(eventStoreV2, checkpoints, evidenceQuery, evidenceManifests,
+        durableState?.targetBindings));
   let memory: DiagnosticMemoryRuntime | undefined;
   const cleanupInitialization = (): void => {
     void runShutdownHooks().finally(() => memory?.close()).finally(() => persistence?.close()).catch(() => undefined);

@@ -224,7 +224,7 @@ describe('local Agent web runtime', () => {
   it('requires an explicit absolute data directory and keeps the host loopback-only', async () => {
     await expect(startAgentWebRuntime({ dataDirectory: 'relative-data', workspaceRoots: [], model: new ScriptedModel([]) }))
       .rejects.toThrow('dataDirectory must be an absolute path');
-    await expect(startAgentWebRuntime({ dataDirectory: 'C:\\agentops-data', workspaceRoots: [], model: new ScriptedModel([]), host: '0.0.0.0' }))
+    await expect(startAgentWebRuntime({ dataDirectory: join(tmpdir(), 'agentops-host-check'), workspaceRoots: [], model: new ScriptedModel([]), host: '0.0.0.0' }))
       .rejects.toThrow('bind to loopback');
   });
 

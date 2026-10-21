@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { ReactElement } from 'react';
 import { ApiClient } from './api/client.js';
 import type { MemoryPreferences } from './api/types.js';
@@ -11,6 +11,7 @@ import { RunList } from './components/RunList.js';
 import { RunStatus } from './components/RunStatus.js';
 import { SubagentPanel } from './components/SubagentPanel.js';
 import { TaskComposer } from './components/TaskComposer.js';
+import { TargetWorkspace } from './components/TargetWorkspace.js';
 
 export default function App(): ReactElement {
   const apiClient = useMemo(() => new ApiClient({
@@ -22,6 +23,8 @@ export default function App(): ReactElement {
   const state = useSyncExternalStore(controller.subscribe.bind(controller), controller.getState.bind(controller), controller.getState.bind(controller));
   const [selectedProfile, setSelectedProfile] = useState('');
   const [memoryPreferences, setMemoryPreferences] = useState<MemoryPreferences>({ capture: 'manual', recall: 'disabled' });
+  const [mode, setMode] = useState<'target' | 'simulation'>('target');
+  const handleTargetUnavailable = useCallback(() => setMode('simulation'), []);
 
   useEffect(() => {
     void controller.loadIndex();
@@ -55,14 +58,19 @@ export default function App(): ReactElement {
           <p className="eyebrow">AGENTOPS / LOCAL WORKSPACE</p>
           <h1>巡检 Agent 工作台</h1>
         </div>
-        <div className={`connection-pill ${state.connected ? 'is-live' : ''}`}>
+        {mode === 'simulation' && <div className={`connection-pill ${state.connected ? 'is-live' : ''}`}>
           <span className="connection-dot" />
           {state.connected ? '实时连接中' : '未连接'}
-        </div>
+        </div>}
       </header>
 
-      {state.notice !== null && <div className="notice" role="status">{state.notice}</div>}
+      <nav className="workspace-mode-switch" aria-label="巡检模式">
+        <button type="button" aria-current={mode === 'target' ? 'page' : undefined} onClick={() => setMode('target')}>Target 项目巡检</button>
+        <button type="button" aria-current={mode === 'simulation' ? 'page' : undefined} onClick={() => setMode('simulation')}>模拟巡检</button>
+      </nav>
 
+      {mode === 'target' ? <TargetWorkspace api={apiClient} onUnavailable={handleTargetUnavailable} /> : <>
+      {state.notice !== null && <div className="notice" role="status">{state.notice}</div>}
       <section className="workspace-grid">
         <aside className="panel run-history">
           <div className="panel-heading"><div><p className="eyebrow">RUNS</p><h2>巡检历史</h2></div><span className="count-badge">{state.runs.length}</span></div>
@@ -97,6 +105,7 @@ export default function App(): ReactElement {
           <SubagentPanel childRunIds={state.detail?.childRunIds ?? []} onOpen={(runId) => void selectRun(runId)} />
         </aside>
       </section>
+      </>}
     </main>
   );
 }

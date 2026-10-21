@@ -237,6 +237,10 @@ export class StaticTargetResolver implements TargetResolver, TargetKnowledgePubl
     }));
   }
 
+  public ownsProfileId(profileId: string): boolean {
+    return [...this.entries.values()].some(entry => entry.definition.profileId === profileId);
+  }
+
   public async resolvePublicationContext(input: { targetId: string; capturedAt: string; signal: AbortSignal }) {
     throwIfAborted(input.signal);
     await this.assertRegistryCurrent();

@@ -161,8 +161,9 @@ export class RunViewController {
     const runId = globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}`;
     this.patch({ pendingCommand: 'start', notice: null });
     try {
-      await this.client.startRun({ runId, message, profileId, ...(memoryPreferences === undefined ? {} : { memoryPreferences }) });
-      await this.openRun(runId);
+      const accepted = await this.client.startRun({ runId, message, profileId,
+        ...(memoryPreferences === undefined ? {} : { memoryPreferences }) });
+      await this.openRun(accepted.runId);
     } catch (error) {
       this.patch({ notice: errorMessage(error), status: 'error' });
     } finally {

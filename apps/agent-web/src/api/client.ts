@@ -82,6 +82,85 @@ export class ApiClient {
     return this.request<TargetReadinessDto>(`${this.targetPath(targetId)}/readiness`);
   }
 
+  public async listTargetRuns(targetId: string, input: { cursor?: string; limit?: number } = {}): Promise<PublicRunPage> {
+    const query = new URLSearchParams();
+    if (input.cursor !== undefined) query.set('cursor', input.cursor);
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    const path = `${this.targetRunPath(targetId)}${query.size === 0 ? '' : `?${query.toString()}`}`;
+    return this.request<PublicRunPage>(path);
+  }
+
+  public async getTargetRun(targetId: string, runId: string): Promise<PublicRunDetail> {
+    return this.request<PublicRunDetail>(this.targetRunPath(targetId, runId));
+  }
+
+  public async getTargetMessages(targetId: string, runId: string, options: { cursor?: string; limit?: number } = {}): Promise<PublicMessagePage> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    const path = `${this.targetRunPath(targetId, runId)}/messages${query.size === 0 ? '' : `?${query.toString()}`}`;
+    return this.request<PublicMessagePage>(path);
+  }
+
+  public async listTargetEvidence(targetId: string, runId: string, options: { cursor?: string; limit?: number } = {}): Promise<PublicEvidencePage> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    const path = `${this.targetRunPath(targetId, runId)}/evidence${query.size === 0 ? '' : `?${query.toString()}`}`;
+    return this.request<PublicEvidencePage>(path);
+  }
+
+  public async getTargetConfirmation(targetId: string, runId: string): Promise<PublicConfirmation | null> {
+    return this.request<PublicConfirmation | null>(`${this.targetRunPath(targetId, runId)}/confirmation`);
+  }
+
+  public async startTargetRun(targetId: string, input: { requestId: string; message: string; memoryPreferences?: MemoryPreferences }): Promise<{ runId: string; status: string; eventsUrl: string }> {
+    return this.request(this.targetRunPath(targetId), { method: 'POST', body: {
+      message: input.message,
+      ...(input.memoryPreferences === undefined ? {} : { memoryPreferences: input.memoryPreferences }),
+    }, headers: { 'idempotency-key': input.requestId } });
+  }
+
+  public async resumeTargetRun(targetId: string, runId: string): Promise<{ runId: string; status: string; eventsUrl: string }> {
+    return this.request(`${this.targetRunPath(targetId, runId)}/resume`, { method: 'POST' });
+  }
+
+  public async cancelTargetRun(targetId: string, runId: string): Promise<{ runId: string; status: string }> {
+    return this.request(`${this.targetRunPath(targetId, runId)}/cancel`, { method: 'POST' });
+  }
+
+  public async decideTargetConfirmation(targetId: string, runId: string, input: ConfirmationDecisionInput): Promise<ConfirmationDecisionResult> {
+    return this.request(`${this.targetRunPath(targetId, runId)}/confirmation`, { method: 'POST', body: input });
+  }
+
+  public async targetMemoryCapabilities(targetId: string): Promise<MemoryCapabilities> {
+    return this.request(`${this.targetPath(targetId)}/memory/capabilities`);
+  }
+
+  public async listTargetMemoryCases(targetId: string, input: { status?: MemoryStatus; afterId?: string; limit?: number } = {}): Promise<readonly DiagnosticMemoryCase[]> {
+    const query = new URLSearchParams();
+    if (input.status !== undefined) query.set('status', input.status);
+    if (input.afterId !== undefined) query.set('afterId', input.afterId);
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    return this.request(`${this.targetPath(targetId)}/memory/cases${query.size === 0 ? '' : `?${query.toString()}`}`);
+  }
+
+  public async getTargetRunMemory(targetId: string, runId: string): Promise<RunMemoryState | null> {
+    return this.request(`${this.targetRunPath(targetId, runId)}/memory`);
+  }
+
+  public async getTargetRunMemoryCapture(targetId: string, runId: string): Promise<MemoryCaptureTicket> {
+    return this.request(`${this.targetRunPath(targetId, runId)}/memory/capture`);
+  }
+
+  public async captureTargetRunMemory(targetId: string, runId: string, command: { requestId: string; expectedCheckpointRevision: number }): Promise<MemoryCaptureTicket> {
+    return this.request(`${this.targetRunPath(targetId, runId)}/memory/capture`, { method: 'POST', body: command });
+  }
+
+  public async reviewTargetMemory(targetId: string, id: string, command: { requestId: string; expectedRevision: number; decision: 'approved' | 'rejected'; claimCheck: 'supported' | 'unsupported' }): Promise<DiagnosticMemoryCase> {
+    return this.request(`${this.targetPath(targetId)}/memory/cases/${encodeURIComponent(id)}/review`, { method: 'POST', body: command });
+  }
+
   public async getTargetKnowledgeStatus(targetId: string): Promise<PublicTargetKnowledgeStatus> {
     return this.request<PublicTargetKnowledgeStatus>(`${this.targetKnowledgePath(targetId)}/status`);
   }
@@ -220,9 +299,19 @@ export class ApiClient {
   }
 
   public openRunEvents(runId: string, lastEventId: string | undefined, onEvent: (frame: PublicEventFrame) => void, onError: (error: Error) => void = () => undefined): EventSubscription {
+    return this.openEvents(`${this.runPath(runId)}/events`, lastEventId, onEvent, onError);
+  }
+
+  public openTargetRunEvents(targetId: string, runId: string, lastEventId: string | undefined,
+    onEvent: (frame: PublicEventFrame) => void, onError: (error: Error) => void = () => undefined): EventSubscription {
+    return this.openEvents(`${this.targetRunPath(targetId, runId)}/events`, lastEventId, onEvent, onError);
+  }
+
+  private openEvents(path: string, lastEventId: string | undefined, onEvent: (frame: PublicEventFrame) => void,
+    onError: (error: Error) => void): EventSubscription {
     const query = new URLSearchParams({ snapshots: 'none' });
     if (lastEventId !== undefined) query.set('lastEventId', lastEventId);
-    const url = `${this.baseUrl}${this.runPath(runId)}/events?${query.toString()}`;
+    const url = `${this.baseUrl}${path}?${query.toString()}`;
     this.lastEventSourceUrl = url;
     const source = this.eventSourceFactory(url);
     const listeners: Array<[string, (event: MessageEvent<string>) => void]> = [];
@@ -256,12 +345,17 @@ export class ApiClient {
 
   private targetPath(targetId: string): string { return `/targets/${encodeURIComponent(targetId)}`; }
 
+  private targetRunPath(targetId: string, runId?: string): string {
+    return `${this.targetPath(targetId)}/runs${runId === undefined ? '' : `/${encodeURIComponent(runId)}`}`;
+  }
+
   private targetKnowledgePath(targetId: string): string { return `${this.targetPath(targetId)}/knowledge`; }
 
-  private async request<T>(path: string, options: { method?: 'GET' | 'POST'; body?: unknown } = {}): Promise<T> {
+  private async request<T>(path: string, options: { method?: 'GET' | 'POST'; body?: unknown; headers?: Record<string, string> } = {}): Promise<T> {
     const init: RequestInit = { method: options.method ?? 'GET' };
+    if (options.headers !== undefined) init.headers = options.headers;
     if (options.body !== undefined) {
-      init.headers = { 'content-type': 'application/json' };
+      init.headers = { ...(options.headers ?? {}), 'content-type': 'application/json' };
       init.body = JSON.stringify(options.body);
     }
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, init);

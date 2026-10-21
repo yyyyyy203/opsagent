@@ -5,7 +5,9 @@ export function RunList({ runs, selectedRunId, onSelect }: { runs: readonly Publ
   if (runs.length === 0) return <div className="list-empty">还没有巡检记录。</div>;
   return <div className="run-list">{runs.map((run) => <button className={`run-card ${run.runId === selectedRunId ? 'selected' : ''}`} key={run.runId} onClick={() => onSelect(run.runId)}>
     <span className={`status-dot status-${run.status}`} />
-    <span className="run-card-body"><strong>{run.profileId}</strong><small>{run.stage} · {formatDate(run.updatedAt)}</small><code>{run.runId}</code></span>
+    <span className="run-card-body"><strong>{run.targetScope?.projectId ?? run.profileId}</strong>
+      {run.targetScope !== undefined && <small className="target-scope-line">{run.targetScope.deploymentId}#{run.targetScope.deploymentGeneration} · {run.targetScope.environment} · {run.targetScope.scenarioId}@{run.targetScope.scenarioVersion}</small>}
+      <small>{run.stage} · {formatDate(run.updatedAt)}</small><code>{run.runId}</code></span>
   </button>)}</div>;
 }
 

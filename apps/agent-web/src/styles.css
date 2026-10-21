@@ -149,5 +149,17 @@ textarea { resize: vertical; line-height: 1.5; }
 .child-list button > span:nth-child(2) { display: grid; min-width: 0; gap: 3px; }
 .child-list small { color: #8092ac; overflow: hidden; text-overflow: ellipsis; }
 .child-list button > span:last-child { margin-left: auto; color: #7eaccd; }
+.workspace-mode-switch { display: flex; gap: 8px; margin: 0 0 14px; padding: 4px; width: fit-content; border: 1px solid #29364a; border-radius: 10px; background: #111a27; }
+.workspace-mode-switch button { border: 0; border-radius: 7px; padding: 8px 12px; color: #aebbd0; background: transparent; font-size: .76rem; cursor: pointer; }
+.workspace-mode-switch button[aria-current="page"] { color: #e3f5ef; background: #21483f; }
+.target-workspace-heading { margin-bottom: 14px; }
+.target-picker { display: grid; gap: 5px; min-width: min(440px, 62vw); color: #98abc3; font-size: .7rem; }
+.target-selection-summary { display: grid; gap: 4px; margin-top: 10px; padding: 9px 10px; border: 1px solid #315a51; border-radius: 9px; background: #122720; color: #a8e0cb; font-size: .75rem; }
+.target-selection-summary span, .target-scope-line { color: #98abc3; font-size: .67rem; overflow-wrap: anywhere; }
+.target-frozen-scope { margin-top: 12px; padding: 10px; border: 1px solid #315a51; border-radius: 9px; background: #122720; }
+.target-frozen-scope > strong { color: #a8e0cb; font-size: .75rem; }
+.target-frozen-scope .detail-list { margin-top: 8px; }
+.target-frozen-scope .detail-list div { align-items: flex-start; }
+.target-workspace-grid .side-column { align-content: start; }
 @media (max-width: 1150px) { .workspace-grid { grid-template-columns: 220px minmax(0, 1fr); } .side-column { grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@media (max-width: 760px) { .app-shell { padding: 16px; } .topbar { align-items: flex-start; flex-direction: column; } .workspace-grid, .side-column { grid-template-columns: 1fr; } .side-column { grid-column: auto; } .run-history { min-height: 0; } .composer-footer { align-items: flex-start; flex-direction: column; } .primary-button { width: 100%; } }
+@media (max-width: 760px) { .app-shell { padding: 16px; } .topbar { align-items: flex-start; flex-direction: column; } .workspace-grid, .side-column { grid-template-columns: 1fr; } .side-column { grid-column: auto; } .run-history { min-height: 0; } .composer-footer { align-items: flex-start; flex-direction: column; } .primary-button { width: 100%; } .target-workspace-heading .panel-heading { align-items: flex-start; flex-direction: column; } .target-picker { width: 100%; min-width: 0; } .workspace-mode-switch { width: 100%; } .workspace-mode-switch button { flex: 1; } }

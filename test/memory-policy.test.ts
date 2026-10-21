@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DiagnosticMemoryConfig } from '../src/contracts/diagnostic-memory.js';
-import { HostMemoryPolicy, parseDiagnosticMemoryConfig, resolveMemoryControl } from '../src/bootstrap/memory-policy.js';
+import { HostMemoryPolicy, parseDiagnosticMemoryConfig, resolveMemoryControl, resolveTargetMemoryControl } from '../src/bootstrap/memory-policy.js';
 import { readDiagnosticMemoryConfig } from '../src/bootstrap/diagnostic-memory.js';
 import { simulationMemoryScope } from './fixtures/diagnostic-memory.js';
 
@@ -71,6 +71,18 @@ describe('host memory policy', () => {
         profileId: 'project-199.profile', targetFingerprint: 'fingerprint-199', datasetId: 'dataset-199',
       });
     }
+  });
+
+  it('derives Target memory from the exact frozen MemoryScope and fails closed on scope drift', () => {
+    const scope = { ...simulationMemoryScope(), profileId: 'market-a.lab.settlement',
+      targetFingerprint: 'market-a-lab-dataset-a', datasetId: 'dataset-a-v1' };
+    const config = parseDiagnosticMemoryConfig({ ...deployment(), profiles: [{ scope, profilePolicyRevision: 'profile-v1' }] });
+    expect(resolveTargetMemoryControl(config, scope, { capture: 'manual', recall: 'enabled' }))
+      .toMatchObject({ scope, capture: 'manual', recall: true, profilePolicyRevision: 'profile-v1' });
+    expect(resolveTargetMemoryControl(config, { ...scope, targetFingerprint: 'market-b-lab-dataset-b' },
+      { capture: 'manual', recall: 'disabled' })).toBeUndefined();
+    expectPolicyDenied(() => resolveTargetMemoryControl(config,
+      { ...scope, targetFingerprint: 'market-b-lab-dataset-b' }, { recall: 'enabled' }));
   });
 
   it.each([

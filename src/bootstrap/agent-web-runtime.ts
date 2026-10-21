@@ -17,11 +17,12 @@ import { OpaqueMessageCursorCodec } from '../application/message-cursor-codec.js
 import { WebQueryService, type ConfiguredWebProfile } from '../application/web-query-service.js';
 import { RunExecutionCoordinator } from '../application/run-execution-coordinator.js';
 import { TargetRunService, type TargetRunStarter } from '../application/target-run-service.js';
+import { TargetWebQueryService } from '../application/target-web-query-service.js';
 import { WebConfirmationService } from '../application/web-confirmation-service.js';
 import { startInspectionHttpServer, type InspectionHttpServer } from '../api/http-server.js';
 import { SourceInvocationLimiter } from '../tool/source-invocation-limiter.js';
 import type { DiagnosticMemoryConfig } from '../contracts/diagnostic-memory.js';
-import { parseDiagnosticMemoryConfig, resolveMemoryControl } from './memory-policy.js';
+import { parseDiagnosticMemoryConfig, resolveMemoryControl, resolveTargetMemoryControl } from './memory-policy.js';
 import { TargetRecoveryService } from '../application/target-recovery-service.js';
 import type { KnowledgeManagementApi } from '../api/knowledge-memory-routes.js';
 import { createTargetKnowledgeManagementService, type TargetKnowledgeManagementHostOptions } from './diagnostic-memory.js';
@@ -102,6 +103,8 @@ export interface AgentWebRuntimeOptions {
   port?: number;
   allowedOrigins?: readonly string[];
   maxBodyBytes?: number;
+  /** In-process root Run admission bounds; defaults to two active Runs and 32 queued Runs. */
+  runExecutionLimits?: { maxConcurrentRuns?: number; maxQueuedRuns?: number };
   clock?: Clock;
   ids?: IdGenerator;
   observability?: Observability;
@@ -239,7 +242,13 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     const webQueries = new WebQueryService(runtime.durableState.checkpoints, profiles, () => clock.now());
     const simulationPreparation = metrics === undefined ? undefined : createSimulationStartPreparation(clock, logs !== undefined, sourceWindow);
     const prepareStart = (request: ReplyOptions): ReplyOptions => {
-      const prepared = simulationPreparation?.(request) ?? request;
+      const prepared = request.trustedTargetBinding === undefined
+        ? simulationPreparation?.(request) ?? request : request;
+      if (request.trustedTargetBinding !== undefined) {
+        const trustedMemoryControl = resolveTargetMemoryControl(memoryConfig,
+          request.trustedTargetBinding.snapshot.memoryScope, request.memoryPreferences);
+        return { ...prepared, ...(trustedMemoryControl === undefined ? {} : { trustedMemoryControl }) };
+      }
       const trustedMemoryControl = resolveMemoryControl(memoryConfig, request.profileId, request.memoryPreferences);
       return { ...prepared, ...(trustedMemoryControl === undefined ? {} : { trustedMemoryControl }) };
     };
@@ -248,6 +257,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       runtime.agent,
       runtime.checkpoints,
       { prepareStart, ...(runtime.durableState.targetStarts === undefined ? {} : { targetStarts: runtime.durableState.targetStarts }), clock, ids,
+        ...(options.runExecutionLimits ?? {}),
         ...(runtime.memory === undefined ? {} : { afterTerminal: scheduleMemory }) },
     );
     let targetResolver: TargetResolver | undefined;
@@ -340,6 +350,12 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       ...(targetRecoveryGate === undefined ? {} : { targetRecoveryGate }),
       ...(targetStarter === undefined ? {} : { start: targetStarter }),
     });
+    const targetWebQueries = targetRuns === undefined ? undefined : new TargetWebQueryService({
+      targetRuns,
+      queries: runtime.queries,
+      messages: runtime.webMessages(cursorCodec),
+      getConfirmation: runId => webQueries.getConfirmation(runId),
+    });
     const server = await startInspectionHttpServer({
       agent: runtime.agent,
       events: runtime.eventStreamV2,
@@ -362,10 +378,12 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
         }
       },
       memory: { ...(runtime.memory === undefined ? {} : { runtime: runtime.memory }),
-        checkpoints: runtime.durableState.checkpoints, runQueries: runtime.queries, clock, schedule: scheduleMemory },
+        checkpoints: runtime.durableState.checkpoints, runQueries: runtime.queries, clock, schedule: scheduleMemory,
+        ...(targetRuns === undefined ? {} : { targetRuns }) },
       ...(knowledgeManagement === undefined ? {} : { knowledgeManagement }),
       targetBindings: runtime.durableState.targetBindings,
       ...(targetRuns === undefined ? {} : { targetRuns }),
+      ...(targetWebQueries === undefined ? {} : { targetWebQueries }),
     });
     let closed = false;
     return {
