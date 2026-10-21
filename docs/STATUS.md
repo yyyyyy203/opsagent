@@ -16,7 +16,7 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 ## 本次重排后的下一步（2026-10-21）
 
-1. **此前在途提交收尾：已完成。** fetch 后确认远端无独有提交，普通 push 将远端更新到 `a004da1`。文档中的仓库路径 `/Users/yumohan/Documents/ChatGPT/巡检项目/opsagent` 与当前实际路径一致，无需改写。**本次重排文档提交 `32a7259` 和其后的状态收尾提交尚未同步**：之后显式 fetch 遇到 HTTP/2 错误，`ls-remote` 和普通 push 因连接 `github.com:443` 超时失败；远端当前 SHA 未能核实，禁止据陈旧跟踪引用推断同步状态。
+1. **在途提交收尾：已完成。** GitHub 分支经 `ls-remote` 核对原为 `a004da1`，确认该提交是本地 HEAD 祖先后普通 push；推送后远端 HEAD 核对为 `18f2753`，包含此前重排、阻塞记录及本次方案修订。文档中的仓库路径 `/Users/yumohan/Documents/ChatGPT/巡检项目/opsagent` 与实际路径一致，无需改写。
 2. **多来源计划：R08、R09 已完成，不再列作缺口。** R08 到期边界和过期 UI、R09 A 采集/批准/召回及切换 B 后隔离已有浏览器证据。新一轮审阅发现 B 尚缺真实计时器超时取消、异常案例直接请求后端批准的组合验收；A/R12 尚缺多来源业务 Clock 和独立用例状态隔离。请求观测当前覆盖 Node `fetch` 与浏览器请求，其他入口按实际调用链界定。修订的逐文件方案见[实施计划 §7](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。
 3. **Semantic/Procedural 运行时接线：暂缓。** 普通 `apps/agent-server` 目前不组装 Target Runtime/知识治理 Host；这两类 Target 知识流程尚未接入常规运行时。本阶段继续以 simulation Profile 的 Episodic 记忆和本地模拟来源为验收范围，接线另立 Spec/Plan 后再做。
 4. **认证授权：外部开放前的发布门槛。** 当前本地单操作员模拟验收不以此为阻塞；若将记忆审核 API 暴露给其他用户或网络边界，须先为 `/memory/cases/:id/review` 等审核入口定义并验证身份、角色和审计归属。
@@ -26,7 +26,8 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - 目标：把前次审阅指出的真实超时、后端审核拒绝、Clock 与用例隔离缺口形成可执行的逐文件方案；本轮只修改方案文档，不把计划项记为已实施。
 - 范围：修订[Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)、[Plan](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)、`docs/PROJECT.md` 和本文件。修改分类为测试基础设施/适配器组合验收方案；不涉及公共契约、持久化 Schema、HITL、写动作或依赖方向，故本轮无新增设计决策和迁移。
 - 本次检查：开始时 `git status --short` 干净；`git diff --check` 通过；四份修订文档的 29 个本地 Markdown 链接均可解析。未运行 lint、typecheck、test、build 或浏览器测试，因为本轮没有实现代码改动；前次测试结果仍只属于前次代码基线。
-- 当前待办：核对远端后将此前本地提交和本次方案提交普通推送；若 GitHub 仍不可达，保留本地提交并记录失败。随后按 Plan §7 分阶段实施、重新执行质量门和更新验收报告。本轮涉及的未提交文件在提交前仅为上述四份文档。
+- Git 交付：本次方案提交 `18f2753` 与此前两项待推送提交已通过普通 push，同步后再次 `ls-remote` 核对远端 HEAD 为 `18f2753`。本次状态订正作为独立提交交付，其远端结果以最新 Git 状态为准。
+- 下一步：按 Plan §7 分阶段实施、重新执行质量门并更新验收报告。本轮提交前的未提交文件仅为上述四份方案文档；本次状态订正只修改本文件。
 
 ## 持续模拟验证与记忆接线（2026-10-21）
 
