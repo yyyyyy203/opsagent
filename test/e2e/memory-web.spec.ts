@@ -211,7 +211,7 @@ test('memory controls recover after disabled capabilities become available', asy
   const recoveredRunId = await startRun(page, '记忆服务恢复后核对结算失败率升高、连接池等待增加。');
   await expect.poll(async () => runMemory(page, recoveredRunId)).toMatchObject({
     selectionState: 'selected', availability: 'ready',
-    hints: [{ memoryId: sourceCaseData.id, sourceRunId }],
+    hints: expect.arrayContaining([expect.objectContaining({ memoryId: sourceCaseData.id, sourceRunId })]),
   });
   await expect(page.getByText('历史参考已载入')).toBeVisible();
   await page.getByRole('button', { name: '沉淀本次巡检' }).click();

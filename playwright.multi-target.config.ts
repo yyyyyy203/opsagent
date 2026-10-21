@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -7,6 +8,9 @@ const agentPort = process.env.AGENTOPS_MULTI_TARGET_AGENT_PORT ?? '45600';
 const webPort = process.env.AGENTOPS_MULTI_TARGET_WEB_PORT ?? '45673';
 const env = { ...process.env, AGENTOPS_MULTI_TARGET_AGENT_PORT: agentPort, AGENTOPS_MULTI_TARGET_WEB_PORT: webPort };
 const quote = (value: string) => `"${value}"`;
+const systemChrome = process.env.AGENTOPS_MULTI_TARGET_CHROME_PATH
+  ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const launchOptions = existsSync(systemChrome) ? { executablePath: systemChrome } : undefined;
 
 export default defineConfig({
   testDir: './test/e2e',
@@ -17,7 +21,8 @@ export default defineConfig({
   fullyParallel: false,
   reporter: 'list',
   outputDir: 'test-results/multi-target-web',
-  use: { baseURL: `http://127.0.0.1:${webPort}`, trace: 'retain-on-failure', screenshot: 'only-on-failure' },
+  use: { ...(launchOptions === undefined ? {} : { launchOptions }), baseURL: `http://127.0.0.1:${webPort}`,
+    trace: 'retain-on-failure', screenshot: 'only-on-failure' },
   webServer: [
     { command: `${quote(process.execPath)} ${quote(resolve(root, 'test/e2e/multi-target-fixture-server.mjs'))}`,
       url: `http://127.0.0.1:${agentPort}/health`, env, timeout: 120_000, reuseExistingServer: false },

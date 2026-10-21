@@ -39,9 +39,9 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 ## 下一步
 
-下一任务已落为[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[阶段 A–D 实施计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。实施尚未开始，下一步从 A 的可信夹具与请求观测开始，再覆盖来源失败/超时/partial、审核资格/过期及同库跨 scope 不召回。所有验收使用本地模拟服务，不需要重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据。
+正在实施[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[阶段 A–D 计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。阶段 B 来源异常矩阵已通过；阶段 A、C 尚有计划项未覆盖，R09 Target 切换与记忆召回组合浏览器场景未完成。逐项结果、命令和限制见[验收记录](./verification/2026-10-21-multisource-memory-resilience-acceptance.md)。所有验收使用本地模拟服务，不需要重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据。
 
-## 本次文档任务（2026-10-21）
+## 前次方案文档任务（2026-10-21）
 
 - 已新增 Spec 和 Plan，关联 PROJECT 与本状态文件；新增行为均标为待实施，没有产品代码或测试代码变更。
 - 本任务涉及四份文件：上述 Spec、Plan、`docs/PROJECT.md`、`docs/STATUS.md`。开始时工作区干净；阶段 A–D 未启动。
@@ -49,5 +49,18 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - 未触发契约、Schema、审核/晋级语义变更，不新增设计决策；后续实施若触发门槛，先补决策。
 - 四份方案文档已独立提交为 `74c9bdb`；GitHub 同步受阻，文档交付尚未满足推送完成条件。首次推送返回 `Error in the HTTP2 framing layer`；仅对重试命令改用 HTTP/1.1 后，仍在约 75 秒后无法连接 `github.com:443`。未修改全局 Git 配置，不能宣称远端已同步。
 - 待办：网络恢复后核对远端分支，再推送当前 `codex/event-message-v2`（包含本条阻塞记录）并核对远端提交；如远端已变化，先处理差异，禁止强推。下一步实施不包含在本次文档交付内。
+
+## 当前实施任务（2026-10-21）
+
+- 用户授权按 Spec/Plan 实施，并补充 AGENTS 规则。本轮范围仍是本地模拟验证。
+- 更新 AGENTS.md §18，明确多模块/核心/分阶段任务需先检查并维护 `docs/superpowers/specs/`、`plans/`，STATUS 链接必须准确区分方案、实施和验收；既有授权决定是否实施。
+- 阶段 A 部分完成：ScriptedModel 根据真实 ToolResult 有界分支；本地 `fetch` 请求统计与禁止目的地拦截自测、来源 Abort 已验证。Clock 注入、用例级状态重置以及全传输栈观测未完整覆盖。
+- 阶段 B 完成：Metrics/Logs 单侧失败、Metrics 超时、Logs partial 的浏览器矩阵通过；不足案例保持 observation 且不可批准。
+- 阶段 C 部分完成：共享 SQLite 的两个 Target scope 各自正向召回、反向隔离及 service/dataset 阻断测试通过；Target 切换+Episodic 记忆采集/批准/召回的组合浏览器场景未建立。R08 到期 UI 展示亦未覆盖。
+- 阶段 D 质量门：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build` 通过；`TMPDIR=/private/tmp pnpm test` 通过（215 文件通过、5 个 opt-in 文件跳过；2247 项通过、9 项跳过）；`TMPDIR=/private/tmp pnpm acceptance:memory` 通过（13 checks、6 策略行）；多来源 E2E 3/3、多 Target E2E 1/1、记忆 Web E2E 10 通过/1 跳过、禁用模式 1/1 通过。明细见验收报告。
+- 测试环境 Node.js v24.19.0，pnpm v11.25.0（与仓库声明的 v11.19.0 不同）。全量测试/验收使用 `/private/tmp` 规避 macOS 临时目录符号链接问题；浏览器测试需本机 loopback 权限。
+- 当前工作树相关未提交文件：`AGENTS.md`、`docs/PROJECT.md`、`docs/STATUS.md`、Spec、Plan、两份 Playwright 配置、multi-source fixture/web spec、memory web spec、memory recall test，以及本次验收报告。此前已有本地文档提交 `74c9bdb`、`af8d9fe`。本轮 `git fetch origin codex/event-message-v2` 成功；刷新后 `HEAD...origin/codex/event-message-v2` 为 `11 0`，即当前本地分支领先 11 个提交、远端无独有提交。尚未提交本轮改动。
+- 未触发公共契约、Schema、Harness 顺序、Guard/Hook/HITL 或晋级语义变更，无需新增 DECISIONS 记录。`git diff --check` 当前通过。
+- 下一步：完成最终文档/差异校验，核对当前远端；只提交本轮文件并尝试推送。R09、R08、阶段 A 的缺口仍是后续实施项，本计划不能标记整体完成。
 
 此前逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。

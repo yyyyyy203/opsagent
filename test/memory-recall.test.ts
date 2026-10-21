@@ -55,6 +55,27 @@ describe.each(['memory', 'sqlite'] as const)('%s scoped lexical search', (backen
       expect((await h.store.search({ scope, text: '连接池 timeout', excludeRunIds: ['current'], limit: 1, now: memoryNow })).map(c => c.id)).toEqual(['allowed']);
     } finally { h.close(); }
   });
+  it('isolates two Target scopes in one SQLite database while preserving the matching recall', async () => {
+    const h = makeStore('sqlite');
+    const targetA: MemoryScope = { ...scope, profileId: 'market-a.profile',
+      targetFingerprint: 'target-a-fingerprint', datasetId: 'dataset-a' };
+    const targetB: MemoryScope = { ...scope, profileId: 'market-b.profile',
+      targetFingerprint: 'target-b-fingerprint', datasetId: 'dataset-b' };
+    try {
+      h.insert(candidate('target-a-case', { scope: targetA }));
+      h.insert(candidate('target-b-case', { scope: targetB }));
+      h.insert(candidate('target-a-other-dataset', { scope: { ...targetA, datasetId: 'dataset-a-holdout' } }));
+      h.insert(candidate('target-a-other-service', { scope: { ...targetA, serviceId: 'payment' } }));
+
+      const recall = new BoundedMemoryRecall({ queries: h.store, evidence });
+      const recalledA = await recall.prepare({ runId: 'current-a', text: '连接池 timeout', state: state(targetA) }, operation);
+      const recalledB = await recall.prepare({ runId: 'current-b', text: '连接池 timeout', state: state(targetB) }, operation);
+      expect(recalledA.hints.map((item) => item.memoryId)).toEqual(['target-a-case']);
+      expect(recalledB.hints.map((item) => item.memoryId)).toEqual(['target-b-case']);
+      expect((await h.store.get('target-a-other-dataset', targetA))).toBeNull();
+      expect((await h.store.get('target-a-other-service', targetA))).toBeNull();
+    } finally { h.close(); }
+  });
   it('ranks by BM25 frequency/length and resolves ties by time then binary ID', async () => {
     const h = makeStore(backend);
     try {

@@ -54,10 +54,17 @@ test('simulated Metrics+Logs memory capture, review, recall, and Trace limitatio
 
   const sourceCase = page.getByRole('article').filter({ hasText: sourceRunId });
   await expect(sourceCase.getByText('仅模拟环境可用，不可晋级')).toBeVisible();
+
+  await page.getByLabel('使用已审核历史参考').check();
+  const unreviewedRunId = await startRun(page, repeatedQuestion);
+  await expect.poll(async () => getRunMemory(page, unreviewedRunId)).toMatchObject({
+    selectionState: 'selected', hints: [],
+  });
+  expect((await getFixtureState(page)).recalledRuns).not.toContain(unreviewedRunId);
+
   await sourceCase.getByRole('button', { name: '批准历史参考' }).click();
   await expect(sourceCase.getByText('已批准', { exact: true })).toBeVisible();
 
-  await page.getByLabel('使用已审核历史参考').check();
   const recallRunRequest = page.waitForRequest(isRunStartRequest);
   const recallRunId = await startRun(page, repeatedQuestion);
   expect((await recallRunRequest).postDataJSON()).toMatchObject({
@@ -73,19 +80,87 @@ test('simulated Metrics+Logs memory capture, review, recall, and Trace limitatio
   expect(recallRun.status).toBe('completed');
   expect(recallRun.childRunIds).toHaveLength(2);
   expect(recallRun.missingEvidence).toContain('traces');
+
+  await sourceCase.getByRole('button', { name: '撤销历史参考' }).click();
+  await expect(sourceCase.getByText('已拒绝', { exact: true })).toBeVisible();
+  const revokedRunId = await startRun(page, repeatedQuestion);
+  await expect.poll(async () => getRunMemory(page, revokedRunId)).toMatchObject({
+    selectionState: 'selected', hints: [],
+  });
+  expect((await getFixtureState(page)).recalledRuns).not.toContain(revokedRunId);
+
   const fixtureState = await getFixtureState(page);
   expect(fixtureState).toMatchObject({
     runtimeReady: true,
     sourceMode: 'deterministic-local-simulation',
-    externalRequestsSent: 0,
+    blockedExternalRequests: 1,
   });
-  expect(fixtureState.metricQueries).toBe(2);
-  expect(fixtureState.logPages).toBeGreaterThanOrEqual(8);
+  expect(fixtureState.metricQueries).toBe(4);
+  expect(fixtureState.logPages).toBeGreaterThanOrEqual(16);
   expect(fixtureState.recalledRuns).toContain(recallRunId);
   expect(fixtureState.scriptedModelCalls.parent).toBeGreaterThan(0);
   expect(fixtureState.scriptedModelCalls.metrics).toBeGreaterThan(0);
   expect(fixtureState.scriptedModelCalls.logs).toBeGreaterThan(0);
+  expect(new Set(fixtureState.backendRequests.map(({ origin }) => origin)))
+    .toEqual(new Set(fixtureState.allowedBackendOrigins));
   expect([...requestOrigins].sort()).toEqual([`http://127.0.0.1:${webPort}`, agentUrl].sort());
+});
+
+test('source failures and partial logs retain the available evidence and cannot become recallable cases', async ({ page }) => {
+  await page.goto('/');
+  const scenarios = [
+    { name: 'metrics_failure', missing: 'metrics' },
+    { name: 'metrics_timeout', missing: 'metrics' },
+    { name: 'logs_failure', missing: 'logs' },
+    { name: 'logs_partial', missing: 'logs' },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const before = await getFixtureState(page);
+    const runId = await startRun(page,
+      `E2E_SCENARIO=${scenario.name} SETTLEMENT_FAILURE_HIGH：模拟结算失败率升高；核验当前指标与日志。`);
+    const run = await getRun(page, runId);
+    if (scenario.name !== 'logs_partial') {
+      expect(run.missingEvidence.some((item) => item.includes(scenario.missing)),
+        `${scenario.name}: ${JSON.stringify(run.missingEvidence)}`).toBe(true);
+    }
+    const evidence = (await Promise.all(run.childRunIds.map((childRunId) => getEvidence(page, childRunId))))
+      .flat();
+    expect(evidence.some((item) => item.source === (scenario.missing === 'metrics' ? 'log' : 'metric'))).toBe(true);
+    if (scenario.name === 'logs_partial') {
+      expect(evidence.find((item) => item.source === 'log')).toMatchObject({ state: 'partial' });
+    }
+
+    await page.getByRole('button', { name: '沉淀本次巡检' }).click();
+    await expect(page.getByText('已保存候选')).toBeVisible();
+    const response = await page.request.get(`${agentUrl}/memory/cases?profileId=simulation&limit=50`);
+    expect(response.ok()).toBe(true);
+    const cases = await response.json() as MemoryCase[];
+    const candidate = cases.find((item) => item.sourceRunId === runId);
+    expect(candidate).toBeDefined();
+    expect(candidate).toMatchObject({ quality: 'insufficient', status: 'observation', eligibleForPromotion: false });
+    await expect(page.getByRole('article').filter({ hasText: runId })
+      .getByRole('button', { name: '批准历史参考' })).toBeDisabled();
+
+    const after = await getFixtureState(page);
+    const metricAttempts = after.metricQueries - before.metricQueries;
+    expect(metricAttempts).toBeGreaterThan(0);
+    expect(metricAttempts).toBeLessThanOrEqual(3);
+    expect(after.logPages).toBeGreaterThan(before.logPages);
+  }
+});
+
+test('cancelling an active source request aborts the local Metrics query', async ({ page }) => {
+  await page.goto('/');
+  const before = await getFixtureState(page);
+  const runId = await startUnfinishedRun(page,
+    'E2E_SCENARIO=metrics_hang SETTLEMENT_FAILURE_HIGH：等待模拟指标响应以验证取消传播。');
+  await expect.poll(async () => (await getFixtureState(page)).metricQueries).toBeGreaterThan(before.metricQueries);
+
+  const cancel = await page.request.post(`${agentUrl}/runs/${encodeURIComponent(runId)}/cancel`);
+  expect(cancel.status()).toBe(202);
+  await expect.poll(async () => (await getRun(page, runId)).status).toBe('cancelled');
+  await expect.poll(async () => (await getFixtureState(page)).metricAborts).toBeGreaterThan(before.metricAborts);
 });
 
 interface RunDetail {
@@ -95,7 +170,7 @@ interface RunDetail {
   missingEvidence: string[];
 }
 
-interface EvidenceView { runId: string; source: string; evidenceId: string }
+interface EvidenceView { runId: string; source: string; evidenceId: string; state?: string }
 interface MemoryCase {
   id: string;
   sourceRunId: string;
@@ -109,22 +184,30 @@ interface FixtureState {
   runtimeReady: boolean;
   sourceMode: string;
   metricQueries: number;
+  metricAborts: number;
   logPages: number;
-  externalRequestsSent: number;
   recalledRuns: string[];
   scriptedModelCalls: { parent: number; metrics: number; logs: number };
+  backendRequests: { origin: string; method: string }[];
+  allowedBackendOrigins: string[];
+  blockedExternalRequests: number;
 }
 
 async function startRun(page: Page, message: string): Promise<string> {
+  const runId = await startUnfinishedRun(page, message);
+  await expect.poll(async () => (await getRun(page, runId)).status).toBe('completed');
+  await expect(page.locator('.run-card.selected code')).toHaveText(runId);
+  await expect(page.locator('.status-hero strong')).toHaveText('已完成');
+  return runId;
+}
+
+async function startUnfinishedRun(page: Page, message: string): Promise<string> {
   await page.getByLabel('巡检问题').fill(message);
   const requestPromise = page.waitForRequest(isRunStartRequest);
   await page.getByRole('button', { name: '开始巡检' }).click();
   const request = await requestPromise;
   const body = request.postDataJSON() as { runId?: unknown };
   if (typeof body.runId !== 'string') throw new Error('Run start request omitted its runId.');
-  await expect.poll(async () => (await getRun(page, body.runId as string)).status).toBe('completed');
-  await expect(page.locator('.run-card.selected code')).toHaveText(body.runId);
-  await expect(page.locator('.status-hero strong')).toHaveText('已完成');
   return body.runId;
 }
 
