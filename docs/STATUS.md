@@ -28,4 +28,4 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 如继续推进业务项目巡检，下一阶段应为 `group-buy-market` 配置只读 Target 和指标映射，完成连接权限及数据窗口核对，再单独进行真实 Prometheus 只读验收。历史 Run 迁移只有在宿主提供可证明身份的旧数据后才继续。
 
-逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。实现与验收已提交到本地分支；推送尚未完成：GitHub HTTPS 443 连接超时，SSH 返回 `Permission denied (publickey)`。远端分支仍指向此前的 `2a7f99b`；本地本轮提交及本状态更新待推送。需要接通 GitHub 后再同步 `codex/event-message-v2`。
+逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。本轮代码与文档已推送到 `origin/codex/event-message-v2`；GitHub 返回并核实远端 HEAD 为 `0910da9`。后续提交也按同一分支推送。
