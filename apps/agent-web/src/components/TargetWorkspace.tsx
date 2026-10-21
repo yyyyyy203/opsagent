@@ -112,6 +112,7 @@ function TargetRunWorkspace({ api, target, canStart }: { api: ApiClient; target:
     </section>
     <aside className="side-column">
       <MemoryPanel profileId={target.targetId} targetId={target.targetId} {...(state.runId === null ? {} : { runId: state.runId })}
+        runTerminal={state.detail !== null && ['completed', 'failed', 'cancelled'].includes(state.detail.status)}
         preferences={memoryPreferences} onPreferencesChange={setMemoryPreferences}
         onOpenEvidence={(ownerRunId) => void openEvidence(ownerRunId)} client={api} />
       <RunStatus detail={state.detail} descendantUsage={state.descendantUsage} subtreeUsage={state.subtreeUsage} connected={state.connected}

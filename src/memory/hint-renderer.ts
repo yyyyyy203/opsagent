@@ -1,4 +1,4 @@
-import type { MemoryHintRenderer, MemoryOperation, RunMemoryState } from '../contracts/diagnostic-memory.js';
+import type { MemoryHint, MemoryHintRenderer, MemoryOperation, RunMemoryState } from '../contracts/diagnostic-memory.js';
 import type { AgentMessage } from '../contracts/message.js';
 import { parseRunMemoryState } from '../contracts/diagnostic-memory-schema.js';
 import { createHash } from 'node:crypto';
@@ -12,6 +12,11 @@ const PREFIX = '历史案例，非本轮事实；只能形成待验证假设；�
 
 type RenderedCase = Pick<RunMemoryState['hints'][number],
   'memoryId' | 'revision' | 'digest' | 'sourceRunId' | 'summary' | 'limitations'>;
+
+/** The recall byte budget covers only fields that reach the model prompt. */
+export function renderedMemoryHintBytes(hints: readonly MemoryHint[]): number {
+  return Buffer.byteLength(renderedMemoryHintText(hints.map(projectHint)), 'utf8');
+}
 
 export class BoundedMemoryHintRenderer implements MemoryHintRenderer {
   private readonly maxBytes: number;
@@ -70,8 +75,8 @@ export class BoundedMemoryHintRenderer implements MemoryHintRenderer {
   }
 
   private toMessage(cases: readonly RenderedCase[], createdAt: string): AgentMessage {
-    const content = JSON.stringify({ schemaVersion: 1, cases });
-    const text = PREFIX + content;
+    const text = renderedMemoryHintText(cases);
+    const content = text.slice(PREFIX.length);
     const digest = createHash('sha256').update(content, 'utf8').digest('hex');
     return {
       id: `memory-hint-${digest}`,
@@ -80,6 +85,15 @@ export class BoundedMemoryHintRenderer implements MemoryHintRenderer {
       blocks: [{ type: 'text', text }],
     };
   }
+}
+
+function projectHint(hint: MemoryHint): RenderedCase {
+  return { memoryId: hint.memoryId, revision: hint.revision, digest: hint.digest,
+    sourceRunId: hint.sourceRunId, summary: hint.summary, limitations: [...hint.limitations] };
+}
+
+function renderedMemoryHintText(cases: readonly RenderedCase[]): string {
+  return PREFIX + JSON.stringify({ schemaVersion: 1, cases });
 }
 
 function boundedLimit(value: number, maximum: number): number {

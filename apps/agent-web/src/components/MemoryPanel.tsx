@@ -26,6 +26,7 @@ export interface MemoryPanelProps {
   profileId: string;
   targetId?: string;
   runId?: string;
+  runTerminal?: boolean;
   preferences: MemoryPreferences;
   onPreferencesChange: (preferences: MemoryPreferences) => void;
   onOpenEvidence?: (runId: string, evidenceId: string) => void;
@@ -34,7 +35,7 @@ export interface MemoryPanelProps {
 
 type MemoryTab = 'cases' | 'semantic' | 'procedural';
 
-export function MemoryPanel({ profileId, targetId, runId, preferences, onPreferencesChange, onOpenEvidence, client }: MemoryPanelProps): ReactElement {
+export function MemoryPanel({ profileId, targetId, runId, runTerminal, preferences, onPreferencesChange, onOpenEvidence, client }: MemoryPanelProps): ReactElement {
   const api = useMemo(() => client ?? new ApiClient({ baseUrl: apiBaseUrl() }), [client]);
   const [capabilities, setCapabilities] = useState<MemoryCapabilities | null>(null);
   const [cases, setCases] = useState<readonly DiagnosticMemoryCase[]>([]);
@@ -98,7 +99,7 @@ export function MemoryPanel({ profileId, targetId, runId, preferences, onPrefere
       })
       .catch((error: unknown) => { if (active) setNotice(errorMessage(error)); });
     return () => { active = false; };
-  }, [api, capabilities?.enabled, runId, refresh, targetId]);
+  }, [api, capabilities?.enabled, runId, runTerminal, refresh, targetId]);
 
   async function capture(): Promise<void> {
     if (runId === undefined || !canCapture(capabilities, run) || pendingRef.current) return;
@@ -461,7 +462,7 @@ export function captureTicketLabel(state: MemoryCaptureTicket['state']): string 
 
 export function canApproveMemoryCase(item: DiagnosticMemoryCase): boolean {
   return item.status === 'observation' && item.quality === 'sufficient' && item.sourceRunStatus === 'completed'
-    && item.evidenceRefs.length > 0 && item.evidenceRefs.every((reference) => reference.ownerRunId === item.sourceRunId
+    && item.evidenceRefs.length > 0 && item.evidenceRefs.every((reference) => reference.ownerRunId.trim().length > 0
       && reference.evidenceId.trim().length > 0 && /^[a-f\d]{64}$/iu.test(reference.rawSha256));
 }
 

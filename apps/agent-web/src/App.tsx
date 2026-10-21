@@ -94,6 +94,7 @@ export default function App(): ReactElement {
 
         <aside className="side-column">
           {selectedProfile !== '' && <MemoryPanel profileId={selectedProfile} {...(state.runId === null ? {} : { runId: state.runId })}
+            runTerminal={state.detail !== null && ['completed', 'failed', 'cancelled'].includes(state.detail.status)}
             preferences={memoryPreferences} onPreferencesChange={setMemoryPreferences}
             onOpenEvidence={(ownerRunId) => void openEvidence(ownerRunId)} client={apiClient} />}
           <RunStatus detail={state.detail} descendantUsage={state.descendantUsage} subtreeUsage={state.subtreeUsage} connected={state.connected} pending={state.pendingCommand === 'resume'} cancelPending={state.pendingCommand === 'cancel'} resumeAvailable={state.resumeRequired} toolActivity={state.toolActivity} datasourceActivity={state.datasourceActivity} onResume={() => void controller.resumeRun()} onCancel={() => void controller.cancelRun()} />

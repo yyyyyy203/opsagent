@@ -1,6 +1,7 @@
 import type { DiagnosticMemoryCase, MemoryEvidenceValidator, MemoryHint, MemoryOperation, MemoryQueryStore, MemoryRecallPort, MemorySelection, RunMemoryState } from '../contracts/diagnostic-memory.js';
 import { parseDiagnosticMemoryCase, parseRunMemoryState } from '../contracts/diagnostic-memory-schema.js';
 import { isRecallableMemory } from './lexical-search.js';
+import { renderedMemoryHintBytes } from './hint-renderer.js';
 import { memoryInstant, memoryLimit } from './diagnostic-memory-state.js';
 import { memoryScopeKey } from './memory-scope.js';
 import { MemoryError } from './memory-error.js';
@@ -82,8 +83,10 @@ export class BoundedMemoryRecall implements MemoryRecallPort {
           refs: value.evidenceRefs, scope: previous.scope }, deadline.operation));
         if (!valid) continue;
         const hint = hintOf(value);
-        // UTF-8 bytes conservatively upper-bound tokens without a model tokenizer.
-        if (hints.length < this.maxHints && Buffer.byteLength(JSON.stringify([...hints, hint]), 'utf8') <= byteBudget) hints.push(hint);
+        // Evidence refs stay in Run state for audit, but the renderer never sends them to the model.
+        // Budget the exact rendered projection so multi-source references cannot hide a usable summary.
+        if (hints.length >= this.maxHints || renderedMemoryHintBytes([...hints, hint]) > byteBudget) break;
+        hints.push(hint);
       }
       if (deadline.isExpired()) return result([], 'empty');
       return parseRunMemoryState(result(hints, hints.length > 0 ? 'ready' : 'empty'));

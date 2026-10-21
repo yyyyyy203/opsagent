@@ -6,6 +6,7 @@ import { createSqliteDiagnosticMemoryRepository, SqliteDiagnosticMemoryStore } f
 import { InMemoryDiagnosticMemoryStore } from '../src/memory/in-memory-diagnostic-memory.js';
 import { createInMemoryDiagnosticRecords, createInMemoryDiagnosticRepository } from '../src/memory/diagnostic-memory-state.js';
 import { BoundedMemoryRecall } from '../src/memory/bounded-recall.js';
+import { renderedMemoryHintBytes } from '../src/memory/hint-renderer.js';
 import { memoryCase, memoryNow, simulationMemoryScope } from './fixtures/diagnostic-memory.js';
 
 const scope = simulationMemoryScope();
@@ -124,7 +125,7 @@ describe('bounded recall snapshots', () => {
     const result = await recall.prepare({ runId: 'current', text: 'timeout', state: state() }, { ...operation, availableMemoryTokens: 900 });
     expect(result.selections).toHaveLength(5);
     expect(result.hints.length).toBeGreaterThan(0);
-    expect(Buffer.byteLength(JSON.stringify(result.hints))).toBeLessThanOrEqual(900);
+    expect(renderedMemoryHintBytes(result.hints)).toBeLessThanOrEqual(900);
     expect(result.hints.length).toBeLessThanOrEqual(5);
     expect(parseRunMemoryState(result)).toEqual(result);
   });
@@ -137,6 +138,25 @@ describe('bounded recall snapshots', () => {
     expect(() => new BoundedMemoryRecall({ queries: h.store, evidence, maxHints: 6 })).toThrow();
     expect(() => new BoundedMemoryRecall({ queries: h.store, evidence, maxBytes: 4097 })).toThrow();
     expect(() => new BoundedMemoryRecall({ queries: h.store, evidence, maxTokens: 1025 })).toThrow();
+  });
+  it('budgets the rendered summary without charging hidden two-source evidence references', async () => {
+    const h = setup([candidate('two-source', {
+      summary: '连接池 timeout',
+      evidenceRefs: Array.from({ length: 5 }, (_, index) => ({
+        evidenceId: `${index % 2 === 0 ? 'metric' : 'log'}-${String(index).repeat(64)}`,
+        ownerRunId: `source-${index % 2 === 0 ? 'metrics' : 'logs'}-child-${'x'.repeat(32)}`,
+        source: index % 2 === 0 ? 'metric' as const : 'log' as const,
+        capturedAt: memoryNow, rawSha256: String.fromCharCode(97 + index).repeat(64),
+      })),
+    })]);
+    try {
+      const result = await new BoundedMemoryRecall({ queries: h.store, evidence }).prepare(
+        { runId: 'current', text: '连接池 timeout', state: state() }, operation);
+      expect(result).toMatchObject({ selectionState: 'selected', availability: 'ready', hints: [{ memoryId: 'two-source' }] });
+      expect(result.hints[0]?.evidenceRefs).toHaveLength(5);
+      expect(Buffer.byteLength(JSON.stringify(result.hints))).toBeGreaterThan(1_024);
+      expect(renderedMemoryHintBytes(result.hints)).toBeLessThanOrEqual(1_024);
+    } finally { h.close(); }
   });
   it.each([undefined, 0, -1, NaN])('fails closed for unavailable token budget %s', async (availableMemoryTokens) => {
     const h = setup();
