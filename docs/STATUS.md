@@ -28,4 +28,4 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 如继续推进业务项目巡检，下一阶段应为 `group-buy-market` 配置只读 Target 和指标映射，完成连接权限及数据窗口核对，再单独进行真实 Prometheus 只读验收。历史 Run 迁移只有在宿主提供可证明身份的旧数据后才继续。
 
-逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。本轮代码与文档已推送到 `origin/codex/event-message-v2`；GitHub 返回并核实远端 HEAD 为 `0910da9`。后续提交也按同一分支推送。
+逐文件实施记录：[M4 计划](./superpowers/plans/2026-10-20-multi-project-m4.md)、[M5 计划](./superpowers/plans/2026-10-20-multi-project-m5.md)、[M2b 计划](./superpowers/plans/2026-10-20-multi-project-m2b.md)。本轮代码与文档已推送到 `origin/codex/event-message-v2`，并核实远端分支与本地提交同步；最新 SHA 以 `git log -1` 和远端引用为准。后续提交也按同一分支推送。
