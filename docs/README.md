@@ -2,6 +2,10 @@
 
 本目录是 `agentops` 的架构事实来源（Architecture Knowledge Base）。文档描述已确认的目标设计；代码是否已经实现，以各文档的“实现状态”说明和仓库源码为准。
 
+## 新对话入口
+
+先读 [项目概览](./PROJECT.md)、[当前状态](./STATUS.md)、[重要决策](./DECISIONS.md) 和 [开发规则](../AGENTS.md)，然后核对 Git 状态及本次任务相关代码。下文包含历史阶段记录；当前进度以代码、本次检查和 `STATUS.md` 的时间戳共同判断。
+
 ## 阅读顺序
 
 1. [产品边界与迭代路线](./architecture/01-product-scope-and-roadmap.md)
@@ -22,15 +26,15 @@
 
 完整 V1 设计基线见 [巡检诊断 Agent V1 设计规格](./superpowers/specs/2026-09-06-inspection-agent-v1-design.md)。
 
-多项目适配的待审核草案见 [多项目巡检适配设计 Spec](./superpowers/specs/2026-10-11-multi-project-adaptation-design.md)。建议采用可信 Target 绑定、场景包与数据源映射、单宿主持久化所有者和严格归属校验；第一轮仅验证两个模拟项目。该草案不代表多项目运行、完整知识库或多人权限已经实现，也不改变既有 simulation 验收入口。
+多项目适配的设计与阶段边界见 [多项目巡检适配设计 Spec](./superpowers/specs/2026-10-11-multi-project-adaptation-design.md)。已有阶段和未完成阶段须分别依据代码、验收记录及 [当前状态](./STATUS.md) 核对；该 Spec 不代表所有阶段均已完成，也不改变既有 simulation 验收入口。
 
-受控诊断记忆一期见 [Spec R2](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)、[逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md) 和[本地验收指南](./guides/diagnostic-memory-local.md)。阶段 A 已实现 Episodic 保存、人工审核/撤销、同范围有界召回、SQLite 持久化与暂停恢复重新校验；部署默认关闭，保存与召回可独立设置。离线联合验收使用模拟数据，不代表真实业务诊断效果。Working 状态复用 Checkpoint；Semantic/Procedural 完整知识库、自动晋级和自动动作仍未实现；向量记忆 V3 影子检索与对照入口已实现，真实语义效果待真实包验收。
+受控诊断记忆一期见 [Spec R2](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md)、[逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md) 和[本地验收指南](./guides/diagnostic-memory-local.md)。阶段 A 已实现 Episodic 保存、人工审核/撤销、同范围有界召回、SQLite 持久化与暂停恢复重新校验；Working 状态复用 Checkpoint。2026-10-13 的 [完整治理记忆验收记录](./implementation-status.md#2026-10-13完整治理记忆系统-t5t7-收口) 记录了 Semantic/Procedural 治理、检索及只读 UI 的离线验收；自动晋级和自动动作仍未实现。向量记忆 V3 影子检索与对照入口已实现，真实语义效果待真实包验收。
 
 向量存储可用性独立按 [向量实验 Spec](./superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 与 [向量实验计划](./superpowers/plans/2026-10-10-memory-vector-feasibility.md) 推进。V1 本地 Embedding 包解析、V2 SQLite Float32 索引/隔离/重启机制已实现；V3 影子检索、BM25 故障降级和 BM25/向量/混合离线对照入口已实现。实验默认关闭且不影响案例保存；无真实 Embedding 包不能宣称真实语义检索通过，也不修改生产召回默认。
 
-下一持久化增量的已确认方案见 [Durable Run State & Evidence V1 设计](./superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)。该文档目前是设计决策，不代表代码已经实现。
+Durable Run State & Evidence 的早期设计见 [设计文档](./superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)。仓库现已有 SQLite durable state、Checkpoint 和证据实现；具体覆盖范围以相关代码与 [实现进度](./implementation-status.md) 核对，该历史设计不能直接当作当前缺口清单。
 
-后续 ELK 日志达到几十 MiB 时的已确认扩展方案见 [ELK 大体量证据流式摄取与 BlobStore 设计](./superpowers/specs/2026-09-10-elk-large-evidence-blob-storage-design.md)。该方案规定 SQLite Manifest、流式分页、BlobStore、预算截断、恢复和 LangSmith 脱敏边界，当前尚未实施。
+ELK 大体量证据的设计基线见 [流式摄取与 BlobStore 设计](./superpowers/specs/2026-09-10-elk-large-evidence-blob-storage-design.md)。仓库已有分页取证、本地 BlobStore 和 Manifest 相关实现；对象存储与生产规模验收应按当前代码和验收记录另行确认。
 
 最新已实现能力与检查结果见 [实现进度](./implementation-status.md)。
 
@@ -43,7 +47,7 @@ V2 分支文档与代码的一致性审计见 [V2 文档审计记录](./document
 ## 文档状态
 
 - 决策状态：已由项目负责人确认，可用于拆分实施计划。
-- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、OpenAI-compatible 本地流式适配器、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复、受控诊断记忆阶段 A 和 Node HTTP/SSE 入口已落地。本机 Prometheus → MCP → Metrics Subagent 与日志测试后端浏览器验收均使用模拟/验收数据，不等于目标业务或生产观测栈验收。记忆阶段 A 的复现命令为 `pnpm acceptance:memory`；在线模型、真实业务数据效果、完整 Semantic/Procedural 知识库、真实向量语义效果（待真实包验收）、托管 CI 和真实动作仍未闭环，详见[实现进度](./implementation-status.md)与[记忆本地验收指南](./guides/diagnostic-memory-local.md)。
+- 当前代码状态以 [当前状态](./STATUS.md) 和本次 Git/源码核查为准。Event/Message V2、内存/SQLite 存储、公共投影、暂停恢复、Agent Web 及治理记忆已有实现；本机 Prometheus/MCP 和日志浏览器验收使用模拟数据，不等于目标业务或生产观测栈验收。在线模型、真实业务数据效果、真实向量语义效果、托管 CI 和真实动作仍需分别核验，详见[实现进度](./implementation-status.md)。
 - 代码来源：本项目独立实现。Newton 仅用于机制参考；不得把未获授权的公司源码复制到本仓库。
 - 第一阶段：只读诊断和模拟验证，不接入真实写动作，也不读取业务仓库代码。
 - 向量记忆实验 V3 已提供独立影子检索、BM25 故障降级与离线对照入口 `pnpm acceptance:memory-vector`；默认关闭，不更改基础记忆召回。缺少经来源复核的真实 Embedding 包时只验证机制，不宣称语义效果通过。
