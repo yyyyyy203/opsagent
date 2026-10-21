@@ -1,0 +1,185 @@
+# 本地多项目只读巡检系统实施计划
+
+- 日期：2026-10-21（Asia/Shanghai）
+- 依据：[Spec 与 L01–L14](../specs/2026-10-21-local-inspection-product-design.md)
+- 状态：仅方案落盘；S0–S6 均未实施。本次请求不启动代码开发、在线验收或外发通知。
+- 分类：bootstrap/应用编排/适配器/API-Web/基础设施；不改变 Harness 顺序或真实动作边界。
+
+## 1. 顺序与工作量
+
+| 阶段 | 交付 | 前置 | 粗估有效开发工时 |
+| --- | --- | --- | --- |
+| S0 | 基线、既有提交同步、方案及验证清单 | 无 | 0.5–1 天 |
+| S1 | 普通服务的多 Target 双来源运行 | S0 | 3–5 天 |
+| S2 | 三类记忆与治理接线 | S1 | 3–5 天 |
+| S3 | 五族场景、离线质量集与在线验收工具 | S1；记忆对照依赖 S2 | 4–7 天 |
+| S4 | 持久化周期巡检 | S1、调度契约决定 | 4–6 天 |
+| S5 | 站内通知、处理状态、复查与导出 | S4、结果契约决定 | 3–5 天 |
+| S6 | 统一启动、恢复/留存、持续运行与发布 | 前述离线阶段 | 4–7 天，另加 24 小时实测 |
+
+合计约 21.5–36 天有效开发工时，仅为范围估算，不承诺日历交付日期；包含实现与回归，不含在线凭据等待、网络阻塞和独立的对外部署项目。S3 在线验证受阻时，可继续 S4–S6 离线工作，但最终仅能标“工程闭环通过”。每个阶段再按表中职责拆小提交，不把整份计划当一个大提交。
+
+## 2. 通用执行与质量门
+
+1. 开始时读取 AGENTS/PROJECT/STATUS/相关 DECISIONS，检查分支、工作区、远端差异和当前接口。保留他人修改。
+2. 下表标“拟新增”的路径是目标位置；若仓库已有等价模块，复用并在计划说明调整，不机械新建重复抽象。修改新模块时补公开入口及严格类型。
+3. 新公共契约、调度持久化、结果状态及清理/恢复规则先写详细决策并在 DECISIONS 登记，再改代码。保持旧协议和 simulation 默认行为。
+4. 先用小范围确定性测试定位行为，再运行当阶段完整质量门：
+
+```sh
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm web:typecheck
+pnpm web:build
+git diff --check
+```
+
+macOS 若命中已知临时目录符号链接限制，可用 `TMPDIR=/private/tmp pnpm test` 并记录原因；不得把变通运行写成原命令通过。Node 24、pnpm 11.19.0 为声明基线；实际版本不一致要记录。端口受沙箱限制时按工具权限流程执行，不能跳过后声称通过。
+
+5. 有关 Target/记忆的阶段增加既有 `pnpm e2e:multi-target`、`pnpm e2e:memory:multisource`、`pnpm acceptance:memory`。新增命令在首次建立时登记；后文拟新增命令不是当前已可运行的命令。
+6. 每阶段更新 STATUS 与验收记录：本次执行命令、结果、未执行项、实际版本、相关未提交文件和下一步。先满足验收再标阶段完成，只提交本任务文件并普通 push，核对远端 HEAD；网络/冲突阻塞单列，不强推。
+
+## 3. S0：基线与交付收尾
+
+- [ ] 重新检查 `bdfb20e` 之后变化，核对前轮多来源韧性通过记录，不重复实现已完成项目。
+- [ ] 核对 `origin` 与当前分支，查询远端 SHA；取得远端提交后用祖先/差异检查决定普通推送。存在远端独有修改先合并处理，不覆盖。
+- [ ] 为本计划建立 `docs/verification/2026-10-21-local-inspection-product-acceptance.md`（拟新增），L01–L14 初始为 not_run；旧测试只列历史依据。
+- [ ] 确认双模拟 Target、来源端口/数据目录、离线与在线模型模式的配置样例范围。
+
+退出：基线与远端状态可解释、后续测试目录隔离；若网络阻塞，记录事实，独立的本地实现可进行，交付状态继续待同步。
+
+## 4. S1：普通宿主与 Target 双来源
+
+| 文件 | 任务 |
+| --- | --- |
+| `src/bootstrap/target-host-config.ts`（拟新增） | 读取绝对配置文件，校验 schemaVersion、引用、预算、身份、来源与安全配置；区分配置错误与来源暂不可达 |
+| `src/profiles/target-catalog-schema.ts`、`src/profiles/target-resolver.ts` | 复用现有解析；仅为接线实际缺口做兼容扩展，不重新发明 Target Schema |
+| `src/bootstrap/target-host-runtime.ts`（拟新增） | 组装 Resolver、正式 OperationPolicy、RuntimeProvider、Starter，释放来源租约与自有资源 |
+| `src/bootstrap/target-metrics-subagent.ts`、`src/bootstrap/logs-subagent.ts` | 核对冻结窗口、指标映射、父子作用域、预算与故障隔离；Logs 不足时新增 `target-logs-subagent.ts` 适配而非复制主循环 |
+| `src/bootstrap/agent-web-runtime.ts`、`src/bootstrap/index.ts`、`apps/agent-server/index.mjs` | 注入同一 runtime/persistence，接 `AGENTOPS_TARGET_CONFIG`；保留旧 simulation 启动方式与无 Target 配置行为 |
+| `examples/local-inspection-targets.json`（拟新增） | 两套模拟 Target 配置，不含凭据；相同输入不同阈值、独立映射/数据集标识 |
+| `apps/agent-web/src/components/TargetWorkspace.tsx` | 仅补真实组装暴露的 readiness/配置缺口提示；不重写已有工作台 |
+| `test/target-host-config.test.ts`、`test/target-host-runtime.integration.test.ts`（拟新增） | 配置错误、真实组装、来源失败、取消、重启、策略撤销与隔离；现有 Target 测试继续复用 |
+| `test/e2e/local-inspection-web.spec.ts`、`playwright.local-inspection.config.ts`（拟新增） | 浏览器经正式宿主组装访问本地来源；测试依赖只在专用入口注入，不在产品入口开放任意测试开关 |
+
+- [ ] 先跑配置校验与 Target 组装集成测试，验证无配置时旧流程。
+- [ ] A/B 双来源巡检、证据回查、取消、重启恢复、配置更改后历史标签保持正确。
+- [ ] 检查测试没有复用夹具的全放行 policy 或直接伪造最终 API。
+- [ ] 完整质量门及既有双 Target/多来源 E2E。
+
+退出：L01–L03 通过。若 Logs Target 接线发现契约缺口，先补决策与本表，不把 Metrics-only 验收记为双来源通过。
+
+## 5. S2：记忆治理和模型输入
+
+| 文件 | 任务 |
+| --- | --- |
+| `src/bootstrap/diagnostic-memory.ts`、`src/bootstrap/memory-policy.ts` | 将宿主能力、发布上下文、真实审核来源与三类记忆策略组装到同一 Target |
+| `src/bootstrap/target-host-runtime.ts`、`src/bootstrap/agent-web-runtime.ts`、`src/application/create-runtime.ts` | 在正确注入边界建立 `MemoryCoordinator` 并传入既有 Harness memory 端口；不另建 SQLite 所有者 |
+| `src/memory/memory-coordinator.ts`、`src/application/knowledge-management-service.ts` | 仅修接线暴露的真实缺陷；不放宽审核、到期、冻结选择及引用资格 |
+| `src/api/knowledge-memory-routes.ts`、`apps/agent-web/src/components/knowledge-view.ts`、`MemoryPanel.tsx`（位于同 components 目录） | 沿用 API/页面，补能力关闭、必需知识缺失、发布与召回状态可见性 |
+| `test/target-host-memory.integration.test.ts`（拟新增）、`test/e2e/local-inspection-web.spec.ts` | Semantic、Procedural、Episodic 正向对照，观察实际模型输入与重启后的存储状态 |
+
+- [ ] 覆盖审核→发布→引用→召回；逐类型检查 ID/version/digest 与预算，不只看 UI。
+- [ ] 覆盖拒绝/撤销/到期/跨 Target、存储失败、超时、Abort、开关关闭和必需知识门禁。
+- [ ] 运行 `pnpm acceptance:memory`、双 Target/多来源 E2E 和全质量门。
+
+退出：L04–L05 通过，模型上下文能证明知识生效，禁用时旧诊断不回退。
+
+## 6. S3：诊断场景与质量验收
+
+| 文件 | 任务 |
+| --- | --- |
+| `src/profiles/scenarios/`、`src/profiles/index.ts` | 新增独立版本的延迟、流量、依赖与资源场景；确定性计算、阈值和缺失规则留在场景/适配器边界 |
+| `src/infrastructure/simulator/`、`src/bootstrap/metrics-lab.ts`、`src/bootstrap/logs-lab.ts` | 增加一致时间窗的指标/日志模拟输入，覆盖正常与歧义，不改业务项目 |
+| `test/fixtures/local-inspection-quality-cases.ts`（拟新增） | 至少 11 个具名样本及结构化预期；复用来源异常夹具 |
+| `src/acceptance/evaluator.ts`、`src/acceptance/real-model-runner.ts` | 增加适用场景检查与安全报告，保持现有报告版本兼容；变更 schema 先记决策 |
+| `apps/acceptance/local-inspection-quality.mjs`（拟新增）、`package.json` | 新增离线 `acceptance:local-quality`；在线路径显式 opt-in，整批预算有限且无自动重跑 |
+| `test/local-inspection-quality.test.ts`（拟新增）、既有 acceptance tests | 计算边界、引用、错误/缺失/矛盾信息、预算、Abort，以及失败报告不能人工“刷绿” |
+| `docs/guides/real-model-langsmith-acceptance.md` | 补当前版本四样本选择、整批上限和人工复核步骤，保留现有 probe 准入 |
+
+- [ ] L06 离线全部通过；报告记录模拟来源与模型模式。
+- [ ] 准备可审阅的在线运行清单、预算、输出目录和安全凭据配置方式。
+- [ ] 获得在线调用授权且配置具备时，执行四例；缺少授权/凭据/probe 未通过则将 L07 保持 not_run/blocked，继续独立阶段。
+- [ ] 逐个 Run 人工审核，unsupported claims 为 0，保存真实 usage/引用/限制，不输出凭据。
+
+退出分开登记：离线工程通过与在线质量通过。计划落盘或离线脚本成功不视为用户已授权付费调用。
+
+## 7. S4：定时巡检
+
+先新增 `docs/superpowers/decisions/2026-10-21-inspection-scheduling.md`（拟新增），确定 Spec §7 的状态图、唯一约束、事务分段、崩溃对账、增量 DDL、路由及错误码，再更新 DECISIONS。
+
+| 文件 | 任务 |
+| --- | --- |
+| `src/contracts/inspection-schedule.ts`（拟新增）及公开入口 | Schedule/Occurrence 判别联合、端口、版本化 Schema；限制间隔、模板与输入大小 |
+| `src/application/inspection-scheduler.ts`（拟新增） | 注入 Clock/Timer/Store/TargetRunService；有界 tick、去重、补偿、暂停与对账 |
+| `src/infrastructure/sqlite/inspection-schedule-store.ts`（拟新增）、`migrations.ts`、`persistence-bundle.ts`（后两者同目录） | 唯一约束、CAS revision、事务更新；遵循现有单持久化所有者 |
+| `src/api/inspection-schedule-routes.ts`（拟新增）、`src/api/http-server.ts` | Target-scoped 列表、创建、编辑、启停和发生记录；严格 DTO 与归属检查 |
+| `src/bootstrap/target-host-runtime.ts`、`src/bootstrap/agent-web-runtime.ts` | 生命周期组装，停服停止接收 tick，等待有界清理 |
+| `apps/agent-web/src/components/InspectionSchedules.tsx`（拟新增）、`apps/agent-web/src/api/client.ts` | 显示间隔、下次时间、启停、跳过原因及对应 Run；不展示内部来源配置 |
+| `test/inspection-scheduler.test.ts`、`test/inspection-scheduler-sqlite.test.ts`（拟新增） | 重复/并发 tick、回拨、重启补偿、接受后回填前崩溃、队列满、暂停/修改冲突与 Target 撤权 |
+
+- [ ] 在每个事务边界故障注入，证明稳定 requestId 恢复后只对应一个 Run。
+- [ ] 用假 Clock 测逻辑，再用真实进程重启验证磁盘状态；不只以内存测试验收。
+- [ ] 新表升级、旧数据可读、不兼容二进制拒绝启动验证通过。
+- [ ] 新增 `pnpm e2e:local-inspection`（拟建）覆盖调度 UI；跑完整质量门。
+
+退出：L08–L09 通过；运行队列有界，没有第二个 Agent 主循环。
+
+## 8. S5：通知与处理闭环
+
+先新增 `docs/superpowers/decisions/2026-10-21-inspection-result-tracking.md`（拟新增），确定独立处理状态、通知去重、复查关联、报告 DTO 和迁移；不改变 Run 或记忆审核语义。
+
+| 文件 | 任务 |
+| --- | --- |
+| `src/contracts/inspection-result.ts`（拟新增） | 通知、处理状态、复查关联、导出契约；区分终态与诊断结果 |
+| `src/application/inspection-result-service.ts`（拟新增） | 终态消费/对账、幂等站内通知、CAS 处理状态、复查发起与安全导出 |
+| `src/infrastructure/sqlite/inspection-result-store.ts`（拟新增）及既有 migrations/bundle | 去重键、关联/审计保存，与既有 durable outbox 生命周期衔接 |
+| `src/api/inspection-result-routes.ts`（拟新增）、`src/api/http-server.ts` | Target-scoped 通知/处理/复查/导出，未知和跨 Target 资源安全拒绝 |
+| `apps/agent-web/src/components/InspectionInbox.tsx`（拟新增）、`RunStatus.tsx`、`RunList.tsx`（后两者同目录）、API client | 未读、确认、解决、复查与导出；不把 resolved 显示成系统已恢复 |
+| `test/inspection-result-service.test.ts`、`test/inspection-result-sqlite.test.ts`（拟新增）、本地 E2E | 消费前后崩溃、重复终态、审核与处理状态独立、导出字段白名单、复查新窗口与跨 Target |
+
+- [ ] 确定性健康结果缺失时展示待复核，不解析自由文本推断健康。
+- [ ] 断线/重启后站内通知仍可见，重复投递不产生重复通知。
+- [ ] 全质量门与本地浏览器闭环通过。
+
+退出：L10 通过；本阶段不发送外部消息。
+
+## 9. S6：运维、持续运行与发布
+
+先记录 `docs/superpowers/decisions/2026-10-21-local-inspection-data-lifecycle.md`（拟新增），明确停服备份的一致性、引用保护、清理事务/失败补偿和 Schema 兼容；未完成引用证明前清理仅 dry-run。
+
+| 文件 | 任务 |
+| --- | --- |
+| `apps/local-inspection/index.mjs`、`src/bootstrap/local-inspection-config.ts`（拟新增） | 统一自检/启动/停止；显式路径、同目录单宿主保护、端口冲突、自有子进程管理、模型模式区分 |
+| `src/api/health-routes.ts`（拟新增）、`src/api/http-server.ts` | 最小健康/就绪安全 DTO，区分存储故障与来源降级 |
+| `src/application/inspection-maintenance-service.ts`、`src/infrastructure/local-inspection-backup.ts`（拟新增） | 停服备份、清单/校验和、恢复到新目录、引用保护与 dry-run 清理；IO 留在基础设施 |
+| `apps/local-inspection/maintenance.mjs`（拟新增）、`package.json` | 建立 `inspection:doctor`、`inspection:start`、`inspection:backup`、`inspection:restore`、`inspection:retention` 命令；帮助中注明危险参数和默认暂停 |
+| `test/local-inspection-maintenance.test.ts`（拟新增） | WAL 一致关闭、缺失/损坏 blob、Schema 不兼容、空间不足、引用保护、恢复默认停调度 |
+| `apps/acceptance/local-inspection-soak.mjs`（拟新增） | 24 小时实测、故障注入与有界统计；产物隔离，禁止自动调用在线模型 |
+| `.github/workflows/quality-gates.yml` | 保留已有质量门，加入必要的离线 E2E 与恢复检查；24 小时实测独立运行，不阻塞每次 PR |
+| `docs/guides/local-inspection-operations.md`（拟新增）、本计划验收记录 | 安装、启停、故障处理、备份恢复、升级/回退及实际支持平台 |
+
+- [ ] 在新数据目录按文档启动；端口/配置/凭据缺失可解释，停止后没有自有进程泄漏。
+- [ ] 备份恢复到另一目录后，检查历史、证据、记忆审核、处理状态及调度对账；不覆盖原数据。
+- [ ] 迁移前备份，模拟升级失败，按指南恢复旧版本可读数据；不进行未经验证的逆向迁移。
+- [ ] 按 Spec §9 运行 24 小时实际测试，保存计数与资源基线；没有实际运行则 L13 为 not_run。
+- [ ] 运行完整质量门、本地 E2E、既有 `acceptance:multi-target-capacity` 和 `acceptance:multi-target-load`，记录环境和差异。
+- [ ] 独立提交/推送、核对远端 SHA 与对应 CI；网络失败保留阻塞与待办。
+
+退出：L11–L14 通过；若 L07 未通过，只能交付“本地工程闭环通过”，不能称“真实模型诊断可用”或“生产上线完成”。
+
+## 10. 风险、暂停条件与后续工作
+
+| 风险/条件 | 处理 |
+| --- | --- |
+| 普通宿主与测试夹具组装差异 | S1 以正式 bootstrap 为验收入口；不复制 test-only policy/model 到产品 |
+| 接线要求改变既有契约 | 先记录最小兼容决定和迁移，再实施；不为满足计划破坏已发布字段 |
+| 模型质量或 LangSmith probe 失败 | 保留真实失败；不自动重跑、不放宽人工复核标准；不阻塞无依赖的离线阶段 |
+| 新调度发生重复/孤儿 Run | S4 不通过，不进入自动长期运行；先修事务边界和对账 |
+| 留存删除破坏引用 | 清理维持 dry-run；未证明安全的对象全部保留 |
+| 环境缺少持久化/端口权限 | 记录受阻检查，使用已授权测试目录/权限流程；不登记假通过 |
+| GitHub 不可达 | 本地小步提交，STATUS 写明待同步；恢复后普通 push 并核验 |
+
+对外认证授权、外部告警入口、外部通知、真实业务接入与动作执行均为后续独立里程碑，需对应 Spec/Plan。当前无可信旧数据库，不为 M2b 编造迁移数据。每完成一个阶段更新本表状态和 STATUS，不能用本方案替代实现证据。

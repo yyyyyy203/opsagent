@@ -8,13 +8,22 @@
 
 GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
+## 最新任务：本地只读巡检产品方案（2026-10-21）
+
+- 用户本次要求生成 Spec 和 Plan；已新增[产品 Spec](./superpowers/specs/2026-10-21-local-inspection-product-design.md)和[实施计划](./superpowers/plans/2026-10-21-local-inspection-product.md)，S0–S6 全部待实施，不启动代码开发或在线调用。
+- 范围：普通宿主 Target+Metrics/Logs、受治理记忆接线、五族场景与模型质量、持久化周期巡检、站内结果处理、统一运行/备份恢复/留存/发布。L01–L14 定义可观察验收条件；在线模型与离线工程结果分开记录。认证授权和真实业务接入列为后续门槛。
+- 本轮只修改五份文档：上述两份新文档、PROJECT、DECISIONS 和 STATUS。同步修正 PROJECT 中已完成的多来源韧性仍被列为未实施的过时描述；保留历史记录并标注其时间口径。没有修改产品源码、测试、公共 Schema 或数据库。
+- 基线：开始时分支 `codex/event-message-v2`、HEAD `bdfb20e`，工作区干净。首次远端查询 DNS 失败；按用户“重试/继续”要求重试后，已查询到远端分支为 `22c94aaa200f362fda2b041e0efef2b901fa5bb4`。已用祖先关系核对远端 SHA 是本地 HEAD 的祖先，本地待同步两项为 `fb8355f`、`bdfb20e`；本次文档将独立提交并普通推送后核验，不能仅据查询成功称已同步。
+- 本次文档检查通过：五份文档的 43 个本地 Markdown 链接可解析；L01–L14 验收项唯一且完整，S0–S6 均有实施章节，未将实施勾选为完成；`git diff --check` 通过。本轮没有运行代码 lint/typecheck/test/build 或浏览器测试；仅文档修改，旧检查结果不作为本轮通过依据。
+- 下一步：完成本次文档交付后，按 S0 核对实施基线，再在实施授权范围内从 S1 普通宿主接线开始。后续代码改动遵循逐阶段决策、验收、状态更新及独立提交要求。
+
 ## 当前阶段
 
 - **M4：完成。** Target 工作台、作用域读写边界、旧入口隔离、Target 记忆和双模式 Web 已实现并通过回归。
 - **M5：完成（本地模拟验收）。** Spec §13 的适用项、双 Target 浏览器、容量、负载及全仓质量门通过。结果和限制见 [M5 验收记录](./verification/2026-10-21-multi-project-m5-acceptance.md)。
 - **M2b：M2b.1 盘点完成，M2b.2 未触发。** 当前工作树未发现数据库文件，`AGENTOPS_DATA_DIR` 未配置，没有可核验候选；未创建历史绑定或迁移写路径。详见 [M2b 盘点报告](./verification/2026-10-21-m2b-inventory.md)。
 
-## 多来源记忆韧性实施结果（2026-10-21）
+## 前轮多来源记忆韧性实施结果（2026-10-21；同步状态见最新任务）
 
 - 按[实施计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)完成阶段 A/B，并回归阶段 C；没有修改产品运行时、公共契约、数据库 Schema 或审核资格语义。R01–R12 结果见[验收记录](./verification/2026-10-21-multisource-memory-resilience-acceptance.md)。
 - 多来源夹具改用进程启动时固定的场景和 `2026-10-21T12:00:00.000Z` Clock；七个浏览器用例各用新的 Agent/Web 进程、SQLite 临时目录、调用统计和模型实例。每个用例从空案例/零调用开始，退出后由启动器清理目录并核对端口已释放。
@@ -24,14 +33,14 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 - Git 基线为分支 `codex/event-message-v2`、实施提交 `fb8355f85358c61a7a0fecab5e51927b9310cab2`；Node v24.19.0、pnpm v11.25.0（声明目标 v11.19.0）。任务变更包括 E2E 配置、夹具、用例启动器、lint 配置、`package.json`、Spec、Plan、验收记录和本文件。
 - 交付阻塞：`git ls-remote origin refs/heads/codex/event-message-v2` 因 `Could not resolve host: github.com` 失败，远端 SHA 不能核对；后续重试仍未返回远端结果。实施提交已在本地，未尝试推送以免在无法确认远端分支时写入。网络恢复后先查询分支、确认无远端独有提交，再普通推送并核验远端 HEAD。目前不得称已同步。
 
-## 本次重排后的下一步（2026-10-21）
+## 历史重排快照（2026-10-21；已由最新任务及前轮实施结果更新）
 
 1. **在途提交收尾：已完成。** GitHub 分支经 `ls-remote` 核对原为 `a004da1`，确认该提交是本地 HEAD 祖先后普通 push；推送后远端 HEAD 核对为 `18f2753`，包含此前重排、阻塞记录及本次方案修订。文档中的仓库路径 `/Users/yumohan/Documents/ChatGPT/巡检项目/opsagent` 与实际路径一致，无需改写。
 2. **多来源计划：R08、R09 已完成，不再列作缺口。** R08 到期边界和过期 UI、R09 A 采集/批准/召回及切换 B 后隔离已有浏览器证据。新一轮审阅发现 B 尚缺真实计时器超时取消、异常案例直接请求后端批准的组合验收；A/R12 尚缺多来源业务 Clock 和独立用例状态隔离。请求观测当前覆盖 Node `fetch` 与浏览器请求，其他入口按实际调用链界定。修订的逐文件方案见[实施计划 §7](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。
 3. **Semantic/Procedural 运行时接线：暂缓。** 普通 `apps/agent-server` 目前不组装 Target Runtime/知识治理 Host；这两类 Target 知识流程尚未接入常规运行时。本阶段继续以 simulation Profile 的 Episodic 记忆和本地模拟来源为验收范围，接线另立 Spec/Plan 后再做。
 4. **认证授权：外部开放前的发布门槛。** 当前本地单操作员模拟验收不以此为阻塞；若将记忆审核 API 暴露给其他用户或网络边界，须先为 `/memory/cases/:id/review` 等审核入口定义并验证身份、角色和审计归属。
 
-## 本次方案修订（2026-10-21）
+## 历史方案修订快照（2026-10-21）
 
 - 目标：把前次审阅指出的真实超时、后端审核拒绝、Clock 与用例隔离缺口形成可执行的逐文件方案；本轮只修改方案文档，不把计划项记为已实施。
 - 范围：修订[Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)、[Plan](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)、`docs/PROJECT.md` 和本文件。修改分类为测试基础设施/适配器组合验收方案；不涉及公共契约、持久化 Schema、HITL、写动作或依赖方向，故本轮无新增设计决策和迁移。
@@ -62,11 +71,11 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 新增验收均使用本地模拟 Target、ScriptedModel 和模拟来源，没有连接真实 `group-buy-market`、生产 Prometheus/ELK、在线模型或 LangSmith。因此，真实业务目标接入和生产验收仍是后续阶段；M2b 若要继续，需要宿主提供旧数据库及可信历史身份元数据来源。
 
-## 下一步
+## 当前下一步
 
-1. 网络恢复后查询远端分支；确认无远端独有提交后推送包含实现提交 `fb8355f` 和本状态记录的本地分支，再核验远端 HEAD。当前分支尚未同步。
-2. 完成推送后，为普通 `apps/agent-server` 是否组装 Target Runtime 与 Semantic/Procedural 知识治理 Host 单独编写 Spec/Plan，再以本地模拟 Target 验收。不得把当前 Target 知识测试说成已接入普通运行时。
-3. 记忆审核 API 暴露到其他用户或网络边界前，先定义和验证身份、角色及审计归属。M2b 仍需可证明身份的旧数据；后续验收继续使用本地模拟服务，不重新部署 `group-buy-market`。
+1. 完成本地只读巡检 Spec/Plan 文档校验、独立提交及远端同步核验；最新结果见顶部任务记录。
+2. 产品实施按新 Plan 的 S0–S6 推进，当前尚未启动。先解决普通 `apps/agent-server` 的 Target 双来源与受治理知识接线，复用既有机制和测试。
+3. 在线模型质量单独验收；对外认证授权、真实业务接入和外部告警/通知另立方案。M2b 没有可信旧数据时不触发迁移。
 
 ## 前次方案文档任务（2026-10-21）
 

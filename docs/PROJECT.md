@@ -35,7 +35,9 @@ pnpm web:build
 
 ## 迭代方式
 
-继续[多来源记忆异常与隔离验收 Spec](./superpowers/specs/2026-10-21-multisource-memory-resilience-design.md)及[阶段 A–D 计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)。来源异常、Target A/B 同库隔离、审核与到期边界已有模拟浏览器验证；R08/R09 已完成。重审后剩余工作包括：阶段 B 的真实超时取消和不足案例后端审核拒绝组合验收，阶段 A/R12 的业务 Clock、独立用例隔离与已界定传输入口的请求观测，随后在新工作树完成阶段 D 最终回归。Semantic/Procedural Target 知识治理尚未接入普通 `apps/agent-server`，暂留后续独立任务。所有验收使用本地模拟服务，不重新部署 `group-buy-market`。M2b 仍需可证明身份的旧数据；记忆审核 API 在对外开放前须完成身份与授权设计。
+下一产品里程碑为[本地多项目只读巡检系统 Spec](./superpowers/specs/2026-10-21-local-inspection-product-design.md)与[实施计划 S0–S6](./superpowers/plans/2026-10-21-local-inspection-product.md)：普通宿主 Target 双来源接线 → 三类记忆治理接线 → 场景与模型质量 → 持久化周期巡检 → 站内结果处理 → 本地运行、恢复和发布。当前仅方案落盘，代码实施尚未启动；真实模型质量与离线工程通过分开验收，对外认证授权、真实告警/通知渠道及真实业务接入另立里程碑。
+
+前轮[多来源韧性计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)的 A–D 已有本地实现与验收记录，后续接线复用并回归这些机制，不再把 R08/R09、Clock 或独立用例隔离列为未实现。GitHub 交付结果以最新 STATUS 为准。所有常规验收继续使用本地模拟服务，不重新部署或修改 `group-buy-market`。M2b 仍需可证明身份的旧数据；记忆审核 API 对外开放前须完成身份与授权设计。
 
 每个对话推进一个可验收任务；大任务按可独立验收的阶段交接。任务说明目标、范围、验收条件和约束。每完成一个任务或阶段，先核对验收条件，更新 [STATUS.md](./STATUS.md)，将本任务改动独立提交并推送到 GitHub 工作分支，然后标记完成或转入下一项。只有目标或架构改变时更新本文件，重要设计决策记录在 [DECISIONS.md](./DECISIONS.md)，规则改变时更新根目录 `AGENTS.md`。详细历史进度保留在 [implementation-status.md](./implementation-status.md)。
 

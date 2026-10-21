@@ -40,6 +40,14 @@
 - **理由：** 多 Target 共享 Agent 进程资源，需要对单项目突发请求提供有界、FIFO 的准入。
 - **影响：** 启动和恢复共用协调器准入；父 Run 内的子调查不重复占用顶层槽。限制不跨进程。细节见 [Root Run 准入决定](./superpowers/decisions/2026-10-21-root-run-admission-limit.md)。
 
+## 待实施设计（尚未发布为运行时契约）
+
+### 2026-10-21：本地只读巡检产品化
+
+- **方案：** [Spec](./superpowers/specs/2026-10-21-local-inspection-product-design.md)与[Plan](./superpowers/plans/2026-10-21-local-inspection-product.md)提出单进程、loopback、本地模拟来源的产品交付路径；优先接通现有 Target/记忆机制，再补周期调度、站内结果处理与运维。
+- **兼容边界：** 保留旧 simulation、冻结快照、记忆晋级、HITL 和 V2 契约；不扩大真实动作或业务访问范围。在线模型验收独立 opt-in；外部通知不在本版范围。
+- **实施前门槛：** S1/S2 若需要公共端口扩展，应先记录兼容决定；S4 的 Schedule/Occurrence Schema 与事务对账、S5 的独立处理状态/报告 DTO、S6 的恢复与引用保护须分别形成详细决策和迁移验证后再实施。当前文档不是上述新增接口已发布或功能已完成的证明。
+
 ## 决策门槛
 
 公共契约、Harness 顺序、Guard/Hook/HITL 职责、自动写操作、Checkpoint/记忆资格语义、持久化后端或核心依赖方向发生变化时，必须先补充本记录及对应设计文档，再实施。日常实现选择不需要写入本文件。
