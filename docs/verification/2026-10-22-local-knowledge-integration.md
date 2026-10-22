@@ -4,7 +4,7 @@
 - 计划：[S0–S6 实施计划](../superpowers/plans/2026-10-21-local-inspection-product.md) §5 S2
 - 设计：[本地巡检产品 Spec](../superpowers/specs/2026-10-21-local-inspection-product-design.md)
 - 决策：[本地单操作员审核决策](../superpowers/decisions/2026-10-22-local-operator-knowledge-governance.md)
-- 本次范围：S2.2 普通本地宿主接线和正向模型输入验收；S2 整体及 L04–L05 保持进行中。
+- 原始验收范围：S2.2 普通本地宿主接线和正向模型输入。本文末尾追加后续 S2 组合验收；S2 整体及 L04–L05 仍进行中。
 
 ## 结果
 
@@ -31,6 +31,16 @@
 
 ## 尚未验收
 
-下列覆盖仍需完成后才可将 S2/L04–L05 标记通过：明确拒绝与撤销后模型输入移除、到期边界、来源撤销/存储故障/超时/Abort 的 Target 知识路径、必需知识缺失门禁、从 Web UI 操作草稿/审核/发布的浏览器闭环，以及正式的逐类型 token/byte 预算断言。现有基础治理测试覆盖部分拒绝/撤销/到期与故障语义，但本次尚未完成其与 Target 普通宿主的组合验收。
+截至原始验收，下列覆盖仍需完成。
 
 未调用在线模型、生产数据源或外部服务；未修改被监测项目，也未增加写动作。远端同步结果以本次 Git 状态记录为准。
+
+## 2026-10-22 后续组合验收
+
+本次继续补上普通 Target 宿主中的知识撤销与有效期边界：固定 Clock 为 `2026-10-22T12:00:00Z`，新增一条一分钟后到期的 Semantic 知识。有效期内三条知识均进入 A 的模型输入；Procedural 被撤销后下一次 Run 不再包含该条，仍保留 Semantic 和未到期条目；时钟推进两分钟并重启宿主后，过期条目不再注入，未到期 Semantic 仍可召回。随后以记忆关闭的宿主再次验证三条均不注入。测试使用真实本地 SQLite 持久化和模拟 Metrics/Logs 来源。
+
+浏览器新增治理闭环：在 A 的“系统知识”页创建 Semantic 草稿、提交、批准并发布；A 随后的 Run 将 canary 内容送入 ScriptedModel 实际输入；切换 B 后没有 A 的知识记录或发布绑定。
+
+本次验证：`pnpm exec vitest run test/local-target-runtime-host.test.ts -t 'publishes Semantic and Procedural knowledge'` 1 项通过；`pnpm e2e:local-inspection` 首次运行时双 Target 案例遇到一次模拟 Metrics 未产出证据，随即重跑 2/2 通过（知识浏览器用例两次均通过）；`pnpm lint`、`pnpm typecheck`、`pnpm web:typecheck` 通过；`TMPDIR=/private/tmp pnpm test` 全量 218 文件通过、5 个 opt-in 文件跳过，2259 项通过、9 项跳过。第一次在默认沙箱中运行全量测试因 loopback `EPERM` 造成 101 项失败，不计为代码回归；在允许本机 loopback 后完整重跑通过。E2E 同样仅访问本地模拟服务。
+
+仍待完成：Target 普通宿主中的拒绝后不注入、来源状态撤销/变化、知识存储故障和超时组合、显式取消/Abort 路径、required 知识缺失时的 Run 门禁，以及 Semantic/Procedural/Episodic 的独立输入预算边界断言。协调器层已有 required、存储失败、deadline 和 Abort 单测，但不替代宿主组合验收。S2/L04–L05 不因此标为完成。

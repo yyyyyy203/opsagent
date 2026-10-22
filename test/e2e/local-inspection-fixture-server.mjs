@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { startAgentWebRuntime } from '../../dist/bootstrap/agent-web-runtime.js';
 import { createLocalTargetRuntime, readLocalTargetHostConfig } from '../../dist/bootstrap/local-target-runtime.js';
 import { startLocalTargetSimulator } from '../../dist/bootstrap/local-target-simulator.js';
+import { parseDiagnosticMemoryConfig } from '../../dist/bootstrap/memory-policy.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const root = await mkdtemp(join(tmpdir(), 'opsagent-local-inspection-e2e-'));
@@ -24,6 +25,8 @@ try {
   await writeFile(targetConfigPath, JSON.stringify(example), { mode: 0o600 });
   const config = await readLocalTargetHostConfig(targetConfigPath);
   const local = createLocalTargetRuntime(config, cursorSecret);
+  const diagnosticMemory = parseDiagnosticMemoryConfig(JSON.parse(await readFile(
+    join(repoRoot, 'examples/local-inspection-memory.json'), 'utf8')));
   const webPort = Number(process.env.AGENTOPS_LOCAL_INSPECTION_AGENT_PORT ?? 45700);
   const frontendPort = Number(process.env.AGENTOPS_LOCAL_INSPECTION_WEB_PORT ?? 45773);
   runtime = await startAgentWebRuntime({
@@ -35,6 +38,7 @@ try {
     allowedOrigins: [`http://127.0.0.1:${frontendPort}`],
     profiles: local.profiles,
     targetRuntime: local.targetRuntime,
+    diagnosticMemory,
     metrics: { profileId: 'simulation', mcpUrl: simulator.legacyMetricsMcpUrl },
     logs: { profileId: 'simulation', mcpUrl: simulator.logsMcpUrl, cursorSecret },
   });
@@ -65,6 +69,7 @@ function createLocalInspectionModel() {
     if (names.has('metrics_subagent') && names.has('logs_subagent')) {
       const text = messages.flatMap(message => message.blocks.flatMap(block => block.type === 'text' ? [block.text] : []))
         .join('\n');
+      const knowledgeObserved = text.includes('BROWSER_KNOWLEDGE_CANARY');
       const targetId = value(text, 'targetId');
       const profileId = value(text, 'profile');
       const start = value(text, 'start');
@@ -80,7 +85,7 @@ function createLocalInspectionModel() {
           profileId, service: 'checkout', start, end, question: '检查同一窗口内的模拟日志',
         } }] };
       }
-      const textResult = `${targetId} 的本地模拟指标与日志均已取证。`;
+      const textResult = `${targetId} 的本地模拟指标与日志均已取证。${knowledgeObserved ? ' 模型输入已包含 BROWSER_KNOWLEDGE_CANARY。' : ''}`;
       yield { type: 'text_delta', delta: textResult };
       return { text: textResult, toolCalls: [] };
     }

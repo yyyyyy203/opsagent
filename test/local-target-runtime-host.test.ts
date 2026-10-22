@@ -189,6 +189,12 @@ describe('ordinary host Local Target assembly', () => {
       stopConditions: ['Stop if the required metric is unavailable.'], expectedReportFields: ['threshold', 'missingEvidence'],
       limitations: ['Guidance only; this template grants no action authority.'], sourceReferences: [source],
     });
+    const expiring = await createApprovedKnowledge(runtime.url, 'semantic', source, {
+      type: 'metric_definition', metricName: 'settlement_expiry_canary',
+      businessMeaning: 'EXPIRY_CANARY: only available before its validity deadline.',
+      unit: 'events', labels: [], allowedAggregations: ['count'], windowSemantics: ['fixed_window'],
+      sourceReferences: [source],
+    }, { requestSuffix: 'expiry-host-test', validUntil: '2026-10-22T12:01:00.000Z' });
     const publish = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/publication`, { method: 'POST',
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: 'publish-local-memory-knowledge',
         expectedPublicationVersion: 0, references: [semantic, procedural].map(revision => ({ id: revision.id,
@@ -229,14 +235,54 @@ describe('ordinary host Local Target assembly', () => {
     expect(prompts[2]).toContain('SEMANTIC_CANARY');
     expect(prompts[2]).toContain('PROCEDURAL_CANARY');
 
+    const publishExpiring = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/publication`, { method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: 'publish-expiring-knowledge',
+        expectedPublicationVersion: 1, references: [semantic, procedural, expiring].map(revision => ({ id: revision.id,
+          version: String(revision.contentRevision), digest: revision.contentDigest, approval: 'approved' })) }) });
+    expect(publishExpiring.status).toBe(200);
+    expect((await publishExpiring.json() as { publicationVersion: number }).publicationVersion).toBe(2);
+    const beforeExpiryRun = await startTargetRun(runtime.url, 'market-a-sim', 'run-before-knowledge-expiry');
+    await waitForTargetRun(runtime.url, 'market-a-sim', beforeExpiryRun);
+    expect(prompts).toHaveLength(4);
+    expect(prompts[3]).toContain('EXPIRY_CANARY');
+
+    const revoke = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/procedural/${encodeURIComponent(procedural.id)}/revoke`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+        requestId: 'revoke-procedural-host-test', contentRevision: procedural.contentRevision,
+        expectedGovernanceVersion: procedural.governanceVersion,
+      }),
+    });
+    expect(revoke.status).toBe(200);
+    const revoked = await revoke.json() as { status: string };
+    expect(revoked.status).toBe('revoked');
+    const afterRevokeRun = await startTargetRun(runtime.url, 'market-a-sim', 'run-after-knowledge-revoke');
+    await waitForTargetRun(runtime.url, 'market-a-sim', afterRevokeRun);
+    expect(prompts).toHaveLength(5);
+    expect(prompts[4]).toContain('SEMANTIC_CANARY');
+    expect(prompts[4]).toContain('EXPIRY_CANARY');
+    expect(prompts[4]).not.toContain('PROCEDURAL_CANARY');
+
     await runtime.close();
     runtime = undefined;
-    runtime = await startHost(root, local, model, fixedNow, simulator, 'local-memory-host-cursor-secret-over-32-bytes', { enabled: false });
+    runtime = await startHost(root, local, model, fixedNow + 120_000, simulator,
+      'local-memory-host-cursor-secret-over-32-bytes', memoryConfig);
+    const afterExpiryRun = await startTargetRun(runtime.url, 'market-a-sim', 'run-after-knowledge-expiry');
+    await waitForTargetRun(runtime.url, 'market-a-sim', afterExpiryRun);
+    expect(prompts).toHaveLength(6);
+    expect(prompts[5]).toContain('SEMANTIC_CANARY');
+    expect(prompts[5]).not.toContain('PROCEDURAL_CANARY');
+    expect(prompts[5]).not.toContain('EXPIRY_CANARY');
+
+    await runtime.close();
+    runtime = undefined;
+    runtime = await startHost(root, local, model, fixedNow + 120_000, simulator,
+      'local-memory-host-cursor-secret-over-32-bytes', { enabled: false });
     const disabledRun = await startTargetRun(runtime.url, 'market-a-sim', 'run-with-memory-disabled');
     await waitForTargetRun(runtime.url, 'market-a-sim', disabledRun);
-    expect(prompts).toHaveLength(4);
-    expect(prompts[3]).not.toContain('SEMANTIC_CANARY');
-    expect(prompts[3]).not.toContain('PROCEDURAL_CANARY');
+    expect(prompts).toHaveLength(7);
+    expect(prompts[6]).not.toContain('SEMANTIC_CANARY');
+    expect(prompts[6]).not.toContain('PROCEDURAL_CANARY');
+    expect(prompts[6]).not.toContain('EXPIRY_CANARY');
     } finally {
       await runtime?.close();
       await simulator.close();
@@ -536,19 +582,22 @@ async function startHost(root: string, local: ReturnType<typeof createLocalTarge
 }
 
 async function createApprovedKnowledge(url: string, kind: 'semantic' | 'procedural',
-  source: { sourceId: string; sourceVersion: string; digest: string }, content: unknown) {
+  source: { sourceId: string; sourceVersion: string; digest: string }, content: unknown,
+  options: { requestSuffix?: string; validUntil?: string } = {}) {
   const path = `${url}/targets/market-a-sim/knowledge/${kind}`;
+  const requestSuffix = options.requestSuffix ?? 'host-test';
   const request = async (route: string, requestId: string, body: Record<string, unknown>) => {
     const response = await fetch(`${path}/${route}`, { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ requestId, ...body }) });
     if (!response.ok) throw new Error(`Knowledge ${route} returned ${response.status}: ${await response.text()}`);
     return await response.json() as { id: string; contentRevision: number; governanceVersion: number; contentDigest: string };
   };
-  const draft = await request('drafts', `draft-${kind}-host-test`, { source, content });
-  const submitted = await request(`${encodeURIComponent(draft.id)}/submit`, `submit-${kind}-host-test`, {
+  const draft = await request('drafts', `draft-${kind}-${requestSuffix}`, { source, content,
+    ...(options.validUntil === undefined ? {} : { validUntil: options.validUntil }) });
+  const submitted = await request(`${encodeURIComponent(draft.id)}/submit`, `submit-${kind}-${requestSuffix}`, {
     contentRevision: draft.contentRevision, governanceVersion: draft.governanceVersion,
   });
-  return await request(`${encodeURIComponent(draft.id)}/review`, `review-${kind}-host-test`, {
+  return await request(`${encodeURIComponent(draft.id)}/review`, `review-${kind}-${requestSuffix}`, {
     contentRevision: submitted.contentRevision, governanceVersion: submitted.governanceVersion, decision: 'approve',
   });
 }

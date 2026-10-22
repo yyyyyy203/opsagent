@@ -63,6 +63,46 @@ test('ordinary Target workspace completes dual-source inspections for A and B wi
     .toContainText('"threshold":0.05');
 });
 
+test('Target knowledge can be reviewed, published, recalled by A, and stays isolated from B', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: '项目巡检' })).toBeVisible();
+  await page.getByRole('tab', { name: '系统知识' }).click();
+  const manager = page.getByRole('tabpanel', { name: '系统知识' });
+  await expect(manager.getByText('当前 Target 尚无已发布知识')).toBeVisible();
+
+  await manager.getByLabel('来源 ID').fill('local-settlement-runbook');
+  await manager.getByLabel('来源版本').fill('v1');
+  await manager.getByLabel('来源 SHA-256').fill('c'.repeat(64));
+  await manager.getByLabel('系统知识内容 JSON').fill(JSON.stringify({
+    type: 'metric_definition', metricName: 'settlement_window_requests',
+    businessMeaning: 'BROWSER_KNOWLEDGE_CANARY: local synthetic settlement request count.',
+    unit: 'requests per fixed window', labels: [], allowedAggregations: ['count'],
+    windowSemantics: ['fixed_window'], sourceReferences: [{ sourceId: 'local-settlement-runbook',
+      sourceVersion: 'v1', digest: 'c'.repeat(64) }],
+  }));
+  await manager.getByRole('button', { name: '创建草稿' }).click();
+  const revision = manager.locator('.knowledge-revision').filter({ hasText: 'BROWSER_KNOWLEDGE_CANARY' });
+  await expect(revision).toBeVisible();
+  await revision.getByRole('button', { name: '提交审核' }).click();
+  await expect(revision).toContainText('审核中');
+  await revision.getByRole('button', { name: '批准' }).click();
+  await expect(revision).toContainText('已批准');
+  await revision.getByRole('button', { name: '选入下一次发布' }).click();
+  await manager.getByRole('button', { name: '独立发布到此 Target' }).click();
+  await expect(manager.getByText('Target 已有独立发布的知识绑定')).toBeVisible();
+
+  await page.getByLabel('巡检问题').fill('Inspect settlement metric definition and failure rate.');
+  await page.getByRole('button', { name: '开始巡检' }).click();
+  await expect(page.locator('.status-hero')).toContainText('已完成');
+  await expect(page.locator('.message-text').filter({ hasText: '模型输入已包含 BROWSER_KNOWLEDGE_CANARY' })).toBeVisible();
+
+  await page.getByLabel('选择巡检 Target').selectOption('market-b-sim');
+  await page.getByRole('tab', { name: '系统知识' }).click();
+  const targetBManager = page.getByRole('tabpanel', { name: '系统知识' });
+  await expect(targetBManager.locator('.knowledge-revision').filter({ hasText: 'BROWSER_KNOWLEDGE_CANARY' })).toHaveCount(0);
+  await expect(targetBManager.getByText('当前 Target 尚无已发布知识')).toBeVisible();
+});
+
 async function selectedRunId(page: Page): Promise<string> {
   const value = await page.locator('.run-card.selected code').textContent();
   if (value === null) throw new Error('No selected Target Run card.');
