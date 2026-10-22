@@ -7,6 +7,7 @@ import type { PendingAgentEventV2 } from './event-store.js';
 import type { AgentEventPayloadMap, AgentEventTypeV2 } from './event-v2/index.js';
 import type { KnowledgeDiagnosisQualificationV1, KnowledgeKind } from './knowledge-memory.js';
 import type { ResolvedTargetSnapshotV2 } from './target.js';
+import type { KnowledgeRevisionStateQueryPort, KnowledgeScopedSearchStore } from './knowledge-memory-storage.js';
 
 export interface MemoryScopeBase {
   profileId: string;
@@ -315,6 +316,8 @@ export interface DiagnosticMemoryRuntime {
   reservedOutputTokens: number;
   recall: MemoryRecallPort;
   renderer: MemoryHintRenderer;
+  /** Optional host-assembled Target knowledge coordinator; absent preserves episodic-only behavior. */
+  coordinator?: MemoryCoordinatorPort;
   worker: MemoryCaptureWorkerPort;
   capture: MemoryCapturePort;
   reviews: MemoryReviewPort;
@@ -334,4 +337,6 @@ export interface RuntimeMemoryAssemblyPorts {
   ids: IdGenerator;
   events: MemoryEventFactory;
   dispatch: () => Promise<void>;
+  /** Present only when the host owns the complete durable SQLite persistence bundle. */
+  knowledgeStore?: KnowledgeScopedSearchStore & KnowledgeRevisionStateQueryPort;
 }

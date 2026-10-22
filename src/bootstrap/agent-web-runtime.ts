@@ -22,13 +22,15 @@ import { TargetWebQueryService } from '../application/target-web-query-service.j
 import { WebConfirmationService } from '../application/web-confirmation-service.js';
 import { startInspectionHttpServer, type InspectionHttpServer } from '../api/http-server.js';
 import { SourceInvocationLimiter } from '../tool/source-invocation-limiter.js';
-import type { DiagnosticMemoryConfig } from '../contracts/diagnostic-memory.js';
+import type { DiagnosticMemoryConfig, EpisodicMemoryCoordinatorPorts,
+  MemoryCoordinatorPort, RuntimeMemoryAssemblyPorts } from '../contracts/diagnostic-memory.js';
 import { parseDiagnosticMemoryConfig, resolveMemoryControl, resolveTargetMemoryControl } from './memory-policy.js';
 import { TargetRecoveryService } from '../application/target-recovery-service.js';
 import type { KnowledgeManagementApi } from '../api/knowledge-memory-routes.js';
 import { createTargetKnowledgeManagementService, type TargetKnowledgeManagementHostOptions } from './diagnostic-memory.js';
 import { SourceCircuitBreaker, ResilientExecutor } from '../mcp/resilience.js';
 import { TargetSourcePartitionRegistry, type TargetSourcePartitionRegistryPort } from '../infrastructure/target-source-partition-registry.js';
+import { MemoryCoordinator } from '../memory/memory-coordinator.js';
 
 const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
   id: 'group-buy-market',
@@ -191,6 +193,16 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
   const allowedToolNames = metrics === undefined
     ? directTools.map((tool) => tool.name)
     : ['metrics_subagent', ...(logs === undefined ? [] : ['logs_subagent'])];
+  const knowledgeHost = options.targetRuntime?.knowledgeManagement;
+  const knowledgeCapabilities = options.targetRuntime?.knowledgeCapabilities ?? disabledTargetKnowledgeCapabilities;
+  const createKnowledgeCoordinator = knowledgeHost === undefined ? undefined :
+    (input: { ports: RuntimeMemoryAssemblyPorts; episodic: EpisodicMemoryCoordinatorPorts }): MemoryCoordinatorPort => {
+      const store = input.ports.knowledgeStore;
+      if (store === undefined) throw new Error('Target knowledge memory requires durable governed knowledge storage.');
+      return new MemoryCoordinator({ capabilities: knowledgeCapabilities, authority: knowledgeHost.publicationContexts,
+        states: store, semantic: store, procedural: store,
+        proceduralCapabilities: knowledgeHost.proceduralCapabilities, episodic: input.episodic });
+    };
   const memoryConfig = parseDiagnosticMemoryConfig(options.diagnosticMemory ?? { enabled: false });
   if (memoryConfig.enabled && memoryConfig.profiles.some(p => !profiles.some(web => web.enabled && web.id === p.scope.profileId))) {
     throw new Error('Diagnostic memory Profiles must be in the enabled host allowlist.');
@@ -230,6 +242,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     clock,
     ids,
     diagnosticMemory: memoryConfig,
+    ...(createKnowledgeCoordinator === undefined ? {} : { createKnowledgeCoordinator }),
     ...(options.observability === undefined ? {} : { observability: options.observability }),
     ...(options.eventObservability === undefined ? {} : { eventObservability: options.eventObservability }),
     ...(options.modelIdentity === undefined ? {} : {

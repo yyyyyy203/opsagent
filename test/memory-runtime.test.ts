@@ -7,6 +7,7 @@ import { RunExecutionCoordinator } from '../src/application/run-execution-coordi
 import { createDiagnosticMemoryRuntime } from '../src/bootstrap/diagnostic-memory.js';
 import { resolveMemoryControl } from '../src/bootstrap/memory-policy.js';
 import type { DiagnosticMemoryConfig, DiagnosticMemoryRuntime, RuntimeMemoryAssemblyPorts } from '../src/contracts/diagnostic-memory.js';
+import { MemoryCoordinator } from '../src/memory/memory-coordinator.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import { memoryNow, simulationMemoryScope } from './fixtures/diagnostic-memory.js';
 import { captureContext, memoryEventFactory } from './fixtures/diagnostic-memory-capture.js';
@@ -36,6 +37,30 @@ async function runtimeFactory(text = '结算失败率升高。') {
 }
 
 describe('production memory assembly', () => {
+  it('wires an optional Target MemoryCoordinator to the same durable governed store and episodic ports', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-target-memory-assembly-'));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    let received: RuntimeMemoryAssemblyPorts | undefined;
+    const runtime = createAgentRuntime({ model: new ScriptedModel([]), workspaceRoots: [root], includeExternalBash: false,
+      sqlitePath: join(root, 'agent.sqlite'), clock,
+      memoryFactory: ports => {
+        received = ports;
+        return createDiagnosticMemoryRuntime({ config, ports, createCoordinator: ({ ports: current, episodic }) => {
+          if (current.knowledgeStore === undefined) throw new Error('Expected durable knowledge storage.');
+          return new MemoryCoordinator({ capabilities: { getForTarget: async () => ({ semanticEnabled: false, proceduralEnabled: false }) },
+            authority: { resolvePublicationContext: async () => { throw new Error('not used by assembly test'); } },
+            states: current.knowledgeStore, semantic: current.knowledgeStore, procedural: current.knowledgeStore,
+            proceduralCapabilities: { resolveForTarget: () => null }, episodic });
+        } })!;
+      } });
+    cleanup.push(() => runtime.close());
+    await runtime.ready;
+
+    expect(received?.knowledgeStore).toBe(runtime.knowledgeManagementStores?.revisions);
+    expect(runtime.memory?.coordinator).toBeInstanceOf(MemoryCoordinator);
+    expect(runtime.memory?.recall).toBeDefined();
+  });
+
   it('keeps recall state readable when automatic capture is revoked without granting capture access', async () => {
     const { runtime } = await runtimeFactory();
     const runId = 'capture-revoked-recall-remains';

@@ -349,6 +349,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
           runId, correlationId: `run:${runId}`, visibility: 'audit', durability: 'durable',
         }, payload) },
         dispatch: async () => { await durableOutboxDispatcher.drainAll(); },
+        knowledgeStore: persistence.knowledge,
       });
       if (!Number.isSafeInteger(memory.modelWindowTokens) || memory.modelWindowTokens <= 0
         || !Number.isSafeInteger(memory.reservedOutputTokens) || memory.reservedOutputTokens <= 0

@@ -5,7 +5,8 @@ import {
   type RuntimeToolPorts,
 } from '../application/create-runtime.js';
 import type { Tool } from '../contracts/index.js';
-import type { DiagnosticMemoryConfig } from '../contracts/diagnostic-memory.js';
+import type { DiagnosticMemoryConfig, EpisodicMemoryCoordinatorPorts, MemoryCoordinatorPort,
+  RuntimeMemoryAssemblyPorts } from '../contracts/diagnostic-memory.js';
 import { createDiagnosticMemoryRuntime } from './diagnostic-memory.js';
 import { parseDiagnosticMemoryConfig } from './memory-policy.js';
 
@@ -14,6 +15,9 @@ export interface InspectionRuntimeOptions extends Omit<AgentRuntimeOptions, 'inc
   includeExternalBash?: false;
   actionMode?: 'dry_run';
   diagnosticMemory?: DiagnosticMemoryConfig;
+  /** Host-owned Target knowledge ports; only used when governed memory and the durable knowledge store exist. */
+  createKnowledgeCoordinator?: (input: { ports: RuntimeMemoryAssemblyPorts;
+    episodic: EpisodicMemoryCoordinatorPorts }) => MemoryCoordinatorPort;
 }
 
 /** A local allowlist is an operator decision; remote tool annotations cannot grant access. */
@@ -41,7 +45,8 @@ export function createInspectionRuntime(options: InspectionRuntimeOptions) {
     ...(toolFactories === undefined ? {} : { toolFactories }),
     includeExternalBash: false,
     actionMode: 'dry_run',
-    ...(memoryConfig.enabled ? { memoryFactory: ports => createDiagnosticMemoryRuntime({ config: memoryConfig, ports })! } : {}),
+    ...(memoryConfig.enabled ? { memoryFactory: ports => createDiagnosticMemoryRuntime({ config: memoryConfig, ports,
+      ...(options.createKnowledgeCoordinator === undefined ? {} : { createCoordinator: options.createKnowledgeCoordinator }) })! } : {}),
   });
   runtime.toolkit.freeze();
   return runtime;

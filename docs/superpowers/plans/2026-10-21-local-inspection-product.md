@@ -75,17 +75,19 @@ macOS 若命中已知临时目录符号链接限制，可用 `TMPDIR=/private/tm
 
 | 文件 | 任务 |
 | --- | --- |
-| `src/bootstrap/diagnostic-memory.ts`、`src/bootstrap/memory-policy.ts` | 将宿主能力、发布上下文、真实审核来源与三类记忆策略组装到同一 Target |
-| `src/bootstrap/target-host-runtime.ts`、`src/bootstrap/agent-web-runtime.ts`、`src/application/create-runtime.ts` | 在正确注入边界建立 `MemoryCoordinator` 并传入既有 Harness memory 端口；不另建 SQLite 所有者 |
+| `src/contracts/diagnostic-memory.ts`、`src/application/create-runtime.ts` | 以可选、向后兼容的 late-bound port 将同一 SQLite governed knowledge store 注入记忆组装；不新增数据库所有者或表 |
+| `src/bootstrap/diagnostic-memory.ts`、`src/bootstrap/inspection-runtime.ts`、`src/bootstrap/agent-web-runtime.ts`、`src/bootstrap/memory-policy.ts` | S2.1 已完成：当宿主提供治理端口且 Episodic memory 启用时组装 `MemoryCoordinator`，共享 Episodic 召回端口；缺少配置保持旧的 Episodic-only/关闭行为 |
+| `src/bootstrap/local-target-runtime.ts`、本地 Target 知识配置 | 待完成：提供本地模拟 scope、可信来源/能力注册、人工审核与 publication context，并让普通宿主按显式配置启用 |
 | `src/memory/memory-coordinator.ts`、`src/application/knowledge-management-service.ts` | 仅修接线暴露的真实缺陷；不放宽审核、到期、冻结选择及引用资格 |
 | `src/api/knowledge-memory-routes.ts`、`apps/agent-web/src/components/knowledge-view.ts`、`MemoryPanel.tsx`（位于同 components 目录） | 沿用 API/页面，补能力关闭、必需知识缺失、发布与召回状态可见性 |
 | `test/target-host-memory.integration.test.ts`（拟新增）、`test/e2e/local-inspection-web.spec.ts` | Semantic、Procedural、Episodic 正向对照，观察实际模型输入与重启后的存储状态 |
 
+- [x] S2.1：协调器由普通运行时 memory seam 传入，使用同一 SQLite revision/search store，且接收同一 Episodic policy/recall/renderer；47 项运行时/协调器回归通过。此项只证明装配可用，不代表 Target 知识已启用或完成 L04/L05。
 - [ ] 覆盖审核→发布→引用→召回；逐类型检查 ID/version/digest 与预算，不只看 UI。
 - [ ] 覆盖拒绝/撤销/到期/跨 Target、存储失败、超时、Abort、开关关闭和必需知识门禁。
 - [ ] 运行 `pnpm acceptance:memory`、双 Target/多来源 E2E 和全质量门。
 
-退出：L04–L05 通过，模型上下文能证明知识生效，禁用时旧诊断不回退。
+退出：L04–L05 通过，模型上下文能证明知识生效，禁用时旧诊断不回退。当前 S2 仍进行中，尚未完成本地知识来源、审核/发布流程和正反向 Target Run 验收。
 
 ## 6. S3：诊断场景与质量验收
 

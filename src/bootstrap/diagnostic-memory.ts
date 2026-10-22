@@ -21,6 +21,7 @@ import type { Clock, IdGenerator } from '../contracts/common.js';
 import type { TargetKnowledgeCapabilityPort, TargetKnowledgePolicyStore } from '../contracts/target.js';
 import type { TargetKnowledgePublicationContextPort, TargetKnowledgePublicationStorage,
   TargetKnowledgeRevisionStorage } from '../contracts/knowledge-memory-storage.js';
+import type { MemoryCoordinatorPort, EpisodicMemoryCoordinatorPorts } from '../contracts/diagnostic-memory.js';
 
 export interface TargetKnowledgeManagementHostOptions {
   readonly targets: KnowledgeManagementTargetContextPort & ProceduralTargetContextPort;
@@ -86,7 +87,9 @@ export async function readDiagnosticMemoryConfig(env: Readonly<Record<string, st
 }
 
 export function createDiagnosticMemoryRuntime(input: { config: DiagnosticMemoryConfig;
-  ports: RuntimeMemoryAssemblyPorts }): DiagnosticMemoryRuntime | undefined {
+  ports: RuntimeMemoryAssemblyPorts;
+  createCoordinator?: (input: { ports: RuntimeMemoryAssemblyPorts;
+    episodic: EpisodicMemoryCoordinatorPorts }) => MemoryCoordinatorPort }): DiagnosticMemoryRuntime | undefined {
   const config = parseDiagnosticMemoryConfig(input.config);
   if (!config.enabled) return undefined;
   const ports = input.ports;
@@ -146,11 +149,13 @@ export function createDiagnosticMemoryRuntime(input: { config: DiagnosticMemoryC
     close: async () => { closing = true; await drainTail; await rawWorker.close(); },
   };
   const recall = new BoundedMemoryRecall({ queries: ports.queries, evidence });
+  const episodic = { policy, recall, renderer: new BoundedMemoryHintRenderer() } satisfies EpisodicMemoryCoordinatorPorts;
+  const coordinator = input.createCoordinator?.({ ports, episodic });
   const queries = new MemoryQueryService({ profiles: config.profiles, policy, queries: ports.queries,
     checkpoints: ports.checkpoints, evidenceQueries: ports.evidenceQueries, recall, clock: ports.clock, enabled: () => !closing });
   return { profiles: config.profiles, policy, requiredSources: config.requiredSources,
     modelWindowTokens: config.modelWindowTokens, reservedOutputTokens: config.reservedOutputTokens,
-    recall, renderer: new BoundedMemoryHintRenderer(), worker,
+    recall, renderer: episodic.renderer, ...(coordinator === undefined ? {} : { coordinator }), worker,
     capture: { capture: (command, operation) => closing ? Promise.reject(new MemoryError('MEMORY_DISABLED')) : capture.capture(command, operation) },
     reviews: { review: (command, operation) => closing ? Promise.reject(new MemoryError('MEMORY_DISABLED')) : reviews.review(command, operation) },
     queries, close: () => worker.close() };

@@ -8,13 +8,15 @@
 
 GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
-## 最新任务：本地多项目只读巡检系统 S1（2026-10-22）
+## 最新任务：本地多项目只读巡检系统 S1 / S2（2026-10-22）
 
 - 用户已授权“按照计划执行”。本轮完成 S1：普通 `apps/agent-server` 通过 `AGENTOPS_TARGET_CONFIG` 组装本地模拟 Target 的 Metrics+Logs 双来源；提供双 Target 模拟实验室、操作指南和浏览器闭环测试。没有访问 `group-buy-market`、生产遥测或在线模型，也没有增加真实写动作。
 - 验收：[S1 验收记录](./verification/2026-10-22-local-inspection-product-acceptance.md)。L01–L03 通过；L04–L14 未运行。全量测试通过（218 文件、2257 项；5 个 opt-in 文件、9 项跳过），`pnpm lint`、`pnpm typecheck`、`pnpm web:typecheck`、`pnpm e2e:local-inspection`（1/1）、`pnpm e2e:multi-target`（2/2）、`pnpm e2e:memory:multisource`（7/7）通过。具体结果与默认沙箱 loopback 限制见验收记录。
 - 基线：分支 `codex/event-message-v2`，实施前 HEAD `1aab521151a32a517cd8e11387a33a23d389e41e`，当时工作区干净；Node v24.19.0，pnpm v11.25.0（仓库声明 11.19.0）。本任务的全部源码、测试、示例、指南、Plan、验收记录和状态文档改动当前均未提交；最终文件列表以 `git status --short` 与提交内容为准。
 - 交付阻塞：S1 已独立提交到本地分支 `6bb18e5`。`git ls-remote origin refs/heads/codex/event-message-v2` 初次因 `Could not resolve host: github.com` 失败，重试持续挂起并中止，尚未获远端 SHA；网络恢复后先核验远端祖先关系，再普通推送并核对远端 HEAD。当前不宣称已推送或同步。
-- 下一步：S2 受治理记忆与模型输入接线。L04–L05 仅在实际模型上下文中验证知识 ID/version/digest、Target 隔离、撤销/到期和失败关闭后才能标通过；S1 通过不代表整套产品成熟或可生产上线。
+- S1 独立本地提交为 `7b2fc7c`，工作树在启动 S2 前干净；S1 的远端推送仍受 DNS/连接阻塞。S2.1 已完成并独立提交到本地分支：同一 SQLite knowledge store 与 Episodic policy/recall/renderer 通过现有 memory seam 组装；新增测试验证 late-bound store 和协调器实例，未改数据库 Schema 或记忆资格规则。S2.1 完成后工作树干净。
+- 本轮 S2.1 检查：`pnpm typecheck` 通过；`pnpm exec vitest run test/memory-runtime.test.ts test/memory-coordinator.test.ts` 47 项通过。`pnpm lint` 首次因已移除的未用 import 报错，修复后最终 lint 结果待本轮补跑。尚未运行完整 S2 质量门。
+- 下一步：S2.2 为本地模拟 Target 提供可信 Semantic/Procedural 来源、scope、审核与发布组装，并从普通宿主验证真实模型输入。L04–L05 只有在检查知识 ID/version/digest、预算、跨 Target、撤销/到期、故障关闭和关闭开关对照后才能通过；S2 整体仍进行中，S1 通过不代表产品成熟或可生产上线。
 
 ## 当前阶段
 
