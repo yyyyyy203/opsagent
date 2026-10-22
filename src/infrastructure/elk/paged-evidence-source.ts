@@ -1,5 +1,7 @@
 import type { McpConnection } from '../../mcp/types.js';
 import { SourceFailure, type ResilientExecutor, type RetryEvent } from '../../mcp/resilience.js';
+import type { TargetOperationGuard } from '../../contracts/target.js';
+import type { TargetSourcePartitionLease } from '../target-source-partition-registry.js';
 import {
   canonicalJson,
   type AgentErrorCode,
@@ -34,8 +36,11 @@ export interface ElkPageClient {
     networkAttemptBudget?: { remaining: number };
     requestId?: string;
     onResilienceEvent?: (event: SourceResilienceEvent) => void;
+    targetOperations?: TargetOperationGuard;
+    targetSourceId?: string;
   }): Promise<ElkPageClientResponse>;
-  closeSnapshot?(input: { sourceSnapshotId: string; signal: AbortSignal }): Promise<void>;
+  closeSnapshot?(input: { sourceSnapshotId: string; signal: AbortSignal; networkAttemptBudget?: { remaining: number };
+    targetOperations?: TargetOperationGuard }): Promise<void>;
 }
 
 export interface ElkPageRequestOptions {
@@ -44,6 +49,8 @@ export interface ElkPageRequestOptions {
   networkAttemptBudget?: { remaining: number };
   requestId?: string;
   onResilienceEvent?: (event: SourceResilienceEvent) => void;
+  targetOperations?: TargetOperationGuard;
+  targetSourceId?: string;
 }
 
 export interface PagedEvidenceSourceOptions {
@@ -116,6 +123,8 @@ export class PagedEvidenceSource {
             ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: options.networkAttemptBudget }),
             ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
             ...(options.onResilienceEvent === undefined ? {} : { onResilienceEvent: options.onResilienceEvent }),
+            ...(options.targetOperations === undefined ? {} : { targetOperations: options.targetOperations }),
+            ...(options.targetSourceId === undefined ? {} : { targetSourceId: options.targetSourceId }),
           });
         } catch (error) {
           throw normalizeSourceError(error);
@@ -150,7 +159,9 @@ export class PagedEvidenceSource {
         let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
-            this.client.closeSnapshot({ sourceSnapshotId: expectedSnapshot, signal: cleanup.signal }),
+            this.client.closeSnapshot({ sourceSnapshotId: expectedSnapshot, signal: cleanup.signal,
+              ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: options.networkAttemptBudget }),
+              ...(options.targetOperations === undefined ? {} : { targetOperations: options.targetOperations }) }),
             new Promise<never>((_, reject) => {
               timeout = setTimeout(() => {
                 cleanup.abort();
@@ -173,7 +184,8 @@ export interface McpElkPageClientOptions {
 }
 
 export interface ResilientElkPageClientOptions {
-  executor: ResilientExecutor;
+  executor?: ResilientExecutor;
+  partition?: TargetSourcePartitionLease;
   deadlineMs?: number;
   now?: () => number;
   attemptBudget?: { remaining: number };
@@ -271,8 +283,34 @@ export class ResilientElkPageClient implements ElkPageClient {
     networkAttemptBudget?: { remaining: number };
     requestId?: string;
     onResilienceEvent?: (event: SourceResilienceEvent) => void;
+    targetOperations?: TargetOperationGuard;
+    targetSourceId?: string;
   }): Promise<ElkPageClientResponse> {
-    return this.options.executor.execute(
+    const execute = this.options.partition === undefined
+      ? this.options.executor?.execute.bind(this.options.executor)
+      : this.options.partition.execute.bind(this.options.partition);
+    if (execute === undefined) return Promise.reject(new Error('ELK_PAGE_EXECUTOR_UNAVAILABLE'));
+    const callbacks = {
+      onEvent: (event: RetryEvent) => {
+        this.options.onEvent?.(event);
+        if (event.type === 'retry' && event.code !== undefined) input.onResilienceEvent?.({
+          type: 'retry_scheduled', sourceId: this.options.sourceId ?? input.targetSourceId ?? 'elk',
+          attempt: event.attempt, reasonCode: event.code, delayMs: event.delayMs ?? 0,
+        });
+      },
+      onCircuitEvent: (event: { type: 'opened'; openUntil: number; failureWindow: { failures: number; windowMs: number } }
+        | { type: 'half_opened' } | { type: 'closed' }) => {
+        const sourceId = this.options.sourceId ?? input.targetSourceId ?? 'elk';
+        if (event.type === 'opened') input.onResilienceEvent?.({
+          type: 'circuit_opened', sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil,
+        });
+        else if (event.type === 'half_opened') input.onResilienceEvent?.({
+          type: 'circuit_half_opened', sourceId, probePolicy: 'single_probe',
+        });
+        else input.onResilienceEvent?.({ type: 'circuit_closed', sourceId, recoveryEvidence: ['source_success'] });
+      },
+    };
+    return execute(
       (signal) => this.delegate.fetchPage({ ...input, signal }),
       {
         signal: input.signal,
@@ -281,32 +319,24 @@ export class ResilientElkPageClient implements ElkPageClient {
         ...((input.networkAttemptBudget ?? this.options.attemptBudget) === undefined
           ? {}
           : { attemptBudget: input.networkAttemptBudget ?? this.options.attemptBudget }),
-        onEvent: (event) => {
-          this.options.onEvent?.(event);
-          if (event.type === 'retry' && event.code !== undefined) {
-            input.onResilienceEvent?.({
-              type: 'retry_scheduled', sourceId: this.options.sourceId ?? 'elk', attempt: event.attempt,
-              reasonCode: event.code, delayMs: event.delayMs ?? 0,
-            });
-          }
-        },
-        onCircuitEvent: (event) => {
-          const sourceId = this.options.sourceId ?? 'elk';
-          if (event.type === 'opened') input.onResilienceEvent?.({
-            type: 'circuit_opened', sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil,
-          });
-          else if (event.type === 'half_opened') input.onResilienceEvent?.({
-            type: 'circuit_half_opened', sourceId, probePolicy: 'single_probe',
-          });
-          else input.onResilienceEvent?.({ type: 'circuit_closed', sourceId, recoveryEvidence: [] });
-        },
+        ...callbacks,
+        ...(input.targetOperations === undefined ? {} : { targetOperations: input.targetOperations }),
+        ...(input.targetSourceId === undefined ? {} : { targetCapability: input.targetSourceId }),
       },
     );
   }
 
-  public closeSnapshot(input: { sourceSnapshotId: string; signal: AbortSignal }): Promise<void> {
+  public closeSnapshot(input: { sourceSnapshotId: string; signal: AbortSignal; networkAttemptBudget?: { remaining: number };
+    targetOperations?: TargetOperationGuard }): Promise<void> {
     if (this.delegate.closeSnapshot === undefined) return Promise.resolve();
-    return this.delegate.closeSnapshot(input);
+    const operation = (signal: AbortSignal) => this.delegate.closeSnapshot!({ ...input, signal });
+    if (this.options.partition === undefined) return operation(input.signal);
+    return this.options.partition.execute(operation, {
+      signal: input.signal,
+      deadline: this.now() + 1_000,
+      ...(input.networkAttemptBudget === undefined ? {} : { attemptBudget: input.networkAttemptBudget }),
+      ...(input.targetOperations === undefined ? {} : { targetOperations: input.targetOperations }),
+    });
   }
 }
 

@@ -1,6 +1,7 @@
 import process from 'node:process';
 import { startAgentWebRuntime } from '../../dist/bootstrap/agent-web-runtime.js';
 import { readDiagnosticMemoryConfig } from '../../dist/bootstrap/diagnostic-memory.js';
+import { createLocalTargetRuntime, readLocalTargetHostConfig } from '../../dist/bootstrap/local-target-runtime.js';
 import {
   createLangSmithEventObservability,
   readLangSmithEventConfig,
@@ -23,8 +24,13 @@ const logs = logsMcpUrl === undefined ? undefined : {
   cursorSecret: required('AGENTOPS_EVIDENCE_CURSOR_SECRET'),
 };
 const diagnosticMemory = await readDiagnosticMemoryConfig(process.env);
+const targetConfigPath = optional('AGENTOPS_TARGET_CONFIG');
+const targetHostConfig = targetConfigPath === undefined ? undefined : await readLocalTargetHostConfig(targetConfigPath);
+const localTargetRuntime = targetHostConfig === undefined ? undefined
+  : createLocalTargetRuntime(targetHostConfig, optional('AGENTOPS_EVIDENCE_CURSOR_SECRET'));
 const runtime = await startAgentWebRuntime({
   diagnosticMemory,
+  ...(localTargetRuntime === undefined ? {} : { targetRuntime: localTargetRuntime.targetRuntime, profiles: localTargetRuntime.profiles }),
   dataDirectory,
   workspaceRoots,
   eventObservability: langSmith.eventObservability,

@@ -47,6 +47,7 @@
 - **方案：** [Spec](./superpowers/specs/2026-10-21-local-inspection-product-design.md)与[Plan](./superpowers/plans/2026-10-21-local-inspection-product.md)提出单进程、loopback、本地模拟来源的产品交付路径；优先接通现有 Target/记忆机制，再补周期调度、站内结果处理与运维。
 - **兼容边界：** 保留旧 simulation、冻结快照、记忆晋级、HITL 和 V2 契约；不扩大真实动作或业务访问范围。在线模型验收独立 opt-in；外部通知不在本版范围。
 - **实施前门槛：** S1/S2 若需要公共端口扩展，应先记录兼容决定；S4 的 Schedule/Occurrence Schema 与事务对账、S5 的独立处理状态/报告 DTO、S6 的恢复与引用保护须分别形成详细决策和迁移验证后再实施。当前文档不是上述新增接口已发布或功能已完成的证明。
+- **当前实施事实：** S1 已通过本地模拟双 Target/双来源验收（L01–L03）；没有改变公共事件、持久化 Schema、记忆晋级语义或安全动作边界，因此未触发新的设计决策。S2–S6 仍待实施，事实以[验收记录](./verification/2026-10-22-local-inspection-product-acceptance.md)为准。
 
 ## 决策门槛
 

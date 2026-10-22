@@ -13,6 +13,10 @@ export function EvidencePanel({ evidence, missingEvidence, incomplete = false }:
 }
 
 function summaryText(summary: Record<string, unknown>): string {
-  const values = Object.entries(summary).slice(0, 3).map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`);
+  const entries = Object.entries(summary);
+  const assessment = entries.find(([key]) => key === 'assessment');
+  const visible = assessment === undefined ? entries.slice(0, 3)
+    : [assessment, ...entries.filter(([key]) => key !== 'assessment').slice(0, 2)];
+  const values = visible.map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`);
   return values.join(' · ') || '已采集证据，但暂无公开摘要。';
 }

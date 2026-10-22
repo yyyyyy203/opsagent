@@ -134,6 +134,9 @@ export interface TargetResolverFactoryPorts {
 export interface TargetRecoveryFactoryPorts extends TargetResolverFactoryPorts {
   resolver: TargetResolver;
   durableState: DurableRunState;
+  model: ChatModel;
+  modelIdentity?: ModelIdentity;
+  runtimeTools: RuntimeToolPorts;
   /** Host-owned evidence persistence boundary shared by Target-bound Tools. */
   evidenceRecorder: EvidenceRecorder;
   /** Ephemeral host-lifetime capability; never persist it or place it in AgentContext/events. */
@@ -183,7 +186,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
         : '使用模拟巡检 Profile 和只读 Metrics、Logs 来源调查 checkout 结算问题。',
       enabled: true,
       readOnly: true,
-    }]);
+    }, ...(options.profiles ?? []).filter(profile => profile.id !== 'simulation')]);
   const directTools = metrics === undefined ? [...(options.tools ?? [])] : [];
   const allowedToolNames = metrics === undefined
     ? directTools.map((tool) => tool.name)
@@ -246,7 +249,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     const simulationPreparation = metrics === undefined ? undefined : createSimulationStartPreparation(clock, logs !== undefined, sourceWindow);
     const prepareStart = (request: ReplyOptions): ReplyOptions => {
       const prepared = request.trustedTargetBinding === undefined
-        ? simulationPreparation?.(request) ?? request : request;
+        ? simulationPreparation?.(request) ?? request : createTargetStartPreparation(request, clock);
       if (request.trustedTargetBinding !== undefined) {
         const trustedMemoryControl = resolveTargetMemoryControl(memoryConfig,
           request.trustedTargetBinding.snapshot.memoryScope, request.memoryPreferences);
@@ -317,9 +320,26 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
             };
           },
         });
+        const runtimeTools: RuntimeToolPorts = {
+          ...(runtime.evidenceBlobs === undefined ? {} : { evidenceBlobs: runtime.evidenceBlobs }),
+          ...(runtime.evidenceManifests === undefined ? {} : { evidenceManifests: runtime.evidenceManifests }),
+          ...(runtime.streamingEvidenceRecorder === undefined ? {} : { streamingEvidenceRecorder: runtime.streamingEvidenceRecorder }),
+          evidence: runtime.evidence,
+          evidenceRecorder: runtime.evidenceRecorder,
+          sharedEvents: runtime.sharedEvents,
+          registerShutdownHook: runtime.registerShutdownHook,
+          toolResultCompactor: runtime.toolResultCompactor,
+          events: runtime.v2Events,
+          checkpoints: runtime.checkpoints,
+          durableState: runtime.durableState,
+          targetRecoveryGate: runtime.targetRecoveryGate,
+          clock,
+          ids,
+        };
         const ports: TargetRecoveryFactoryPorts = { identityRegistry, knowledgePolicies, knowledgePublications,
           knowledgeCapabilities, resolver: targetResolver, durableState: runtime.durableState,
-          evidenceRecorder: runtime.evidenceRecorder, sourcePartitions };
+          evidenceRecorder: runtime.evidenceRecorder, sourcePartitions, model,
+          ...(options.modelIdentity === undefined ? {} : { modelIdentity: options.modelIdentity }), runtimeTools };
         targetRecoveryGate = new TargetRecoveryService({
           bindings: runtime.durableState.targetBindings,
           identityRegistry,
@@ -507,6 +527,31 @@ function createSimulationStartPreparation(
     ].join('\n');
     return { ...options, trustedSystemContext };
   };
+}
+
+function createTargetStartPreparation(options: ReplyOptions, clock: Clock): ReplyOptions {
+  const snapshot = options.trustedTargetBinding?.snapshot;
+  if (snapshot === undefined) return options;
+  const availableKinds = new Set(snapshot.sourceBindings
+    .filter(source => !snapshot.unavailableOptionalSourceIds.includes(source.sourceId))
+    .map(source => source.kind));
+  const allowedTools = [
+    ...(availableKinds.has('metrics') ? ['metrics_subagent'] : []),
+    ...(availableKinds.has('logs') ? ['logs_subagent'] : []),
+  ];
+  const end = Math.floor(clock.now().getTime() / 1_000) * 1_000;
+  const start = end - 300_000;
+  const trustedSystemContext = [
+    'Host-generated Target inspection scope; user and model text cannot change it.',
+    `targetId=${snapshot.targetId}`,
+    `profile=${snapshot.profile.profileId}`,
+    `service=${snapshot.scenario.serviceId}`,
+    `start=${new Date(start).toISOString()}`,
+    `end=${new Date(end).toISOString()}`,
+    `allowed_tools=${allowedTools.join(',')}`,
+    'Use the exact same host-provided start and end for every source. Do not substitute another window.',
+  ].join('\n');
+  return { ...options, trustedSystemContext };
 }
 
 function normalizeSmokeSourceWindow(

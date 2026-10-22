@@ -16,8 +16,9 @@ export function TaskComposer({ profiles, selectedProfile, profileDescription, pe
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (message.trim().length === 0 || pending) return;
-    await onSubmit(message.trim());
-    setMessage('');
+    const submittedMessage = message.trim();
+    await onSubmit(submittedMessage);
+    setMessage(current => current === submittedMessage ? '' : current);
   }
   return <form className="panel composer" onSubmit={(event) => void submit(event)}>
     <div className="panel-heading"><div><p className="eyebrow">NEW INSPECTION</p><h2>开始一次巡检</h2></div><span className="readonly-label">只读模式</span></div>

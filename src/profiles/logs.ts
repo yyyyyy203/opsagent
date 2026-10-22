@@ -1,5 +1,5 @@
 export interface LogsQueryPolicy {
-  service: 'checkout';
+  service: string;
   windowSeconds: 300;
   maxWindowSkewSeconds: 120;
   maxFutureSkewSeconds: 30;

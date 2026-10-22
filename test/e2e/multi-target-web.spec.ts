@@ -125,6 +125,7 @@ test('Target memory capture, approval, and recall follow the selected Target sco
     `${controlUrl}/__clock?now=${encodeURIComponent(afterExpiry.toISOString())}`);
   expect(afterExpiryClock.ok()).toBe(true);
   await page.getByLabel('巡检问题').fill(question);
+  await expect(page.getByLabel('巡检问题')).toHaveValue(question);
   const afterExpiryStart = waitForTargetStart(page, 'market-a-sim');
   await page.getByRole('button', { name: '开始巡检' }).click();
   const afterExpiryRunId = await afterExpiryStart;

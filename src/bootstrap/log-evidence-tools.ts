@@ -24,6 +24,7 @@ import {
 import { SourceFailure } from '../mcp/resilience.js';
 import type { ElkEvidenceQuery } from '../infrastructure/elk/paged-evidence-source.js';
 import { TargetConfigurationError } from '../contracts/target.js';
+import type { TargetOperationGuard } from '../contracts/target.js';
 
 const DEFAULT_MAX_MODEL_BYTES = 16 * 1024;
 const MAX_RECORD_FIELD_CHARS = 1_024;
@@ -44,12 +45,15 @@ export interface LogEvidenceToolOptions {
 
 /** Source seam used by the Tool factory; PagedEvidenceSource is only one implementation. */
 export interface LogEvidencePageSource {
+  close?(): Promise<void>;
   pages(query: ElkEvidenceQuery, options?: {
     signal?: AbortSignal;
     deadline?: number;
     networkAttemptBudget?: { remaining: number };
     requestId?: string;
     onResilienceEvent?: (event: SourceResilienceEvent) => void;
+    targetOperations?: TargetOperationGuard;
+    targetSourceId?: string;
   }): AsyncIterable<EvidenceSourcePage>;
 }
 
@@ -153,6 +157,8 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
             requestId: captureKey,
             ...(callOptions.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: callOptions.networkAttemptBudget }),
             onResilienceEvent: (event) => { resilienceEvents.push(event); wake(); },
+            ...(callOptions.targetOperations === undefined ? {} : { targetOperations: callOptions.targetOperations }),
+            ...(callOptions.targetSourceId === undefined ? {} : { targetSourceId: callOptions.targetSourceId }),
           }),
           budget: options.budget,
         }, { signal: callOptions.signal, validateBeforeCommit }).then((value) => { captured = value; }).catch((error: unknown) => {

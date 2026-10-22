@@ -35,6 +35,22 @@ function page(...items: PublicMessageItem[]): PublicMessagePage {
 }
 
 describe('browser run view state', () => {
+  it('keeps evidence page requests within the HTTP API limit', async () => {
+    const detail = runDetail('bounded-evidence-page', 0);
+    const client = viewClient(detail);
+    const requestedLimits: number[] = [];
+    client.listEvidence = (_runId, options) => {
+      requestedLimits.push(options?.limit ?? 0);
+      return Promise.resolve({ items: [] });
+    };
+    const controller = new RunViewController(client);
+    try {
+      await controller.openRun(detail.runId);
+
+      expect(requestedLimits).toEqual([50]);
+    } finally { controller.close(); }
+  });
+
   it('opens the server-assigned Run ID returned by a Target start', async () => {
     const detail = runDetail('server-assigned-run', 0);
     const client = viewClient(detail);

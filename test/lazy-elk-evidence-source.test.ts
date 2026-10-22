@@ -6,6 +6,8 @@ import type { McpToolDescriptor } from '../src/tool/adapters/mcp-tool-adapter.js
 import { logsCloseSnapshotInputJsonSchema, logsSearchPageInputJsonSchema } from '../src/mcp/logs-protocol.js';
 import { startLogsMcpServer } from '../src/infrastructure/mcp/logs-server.js';
 import { createLazyElkEvidenceSource } from '../src/bootstrap/lazy-elk-evidence-source.js';
+import type { TargetOperationGuard } from '../src/contracts/target.js';
+import type { TargetSourceExecutionOptions, TargetSourcePartitionLease } from '../src/infrastructure/target-source-partition-registry.js';
 
 const record: NormalizedLogRecord = {
   timestamp: '2026-10-03T00:04:00Z', service: 'checkout', level: 'ERROR', message: 'timeout',
@@ -139,6 +141,57 @@ describe('lazy ELK evidence source', () => {
         service: 'checkout', start: '2026-10-03T00:00:00Z', end: '2026-10-03T00:05:00Z',
       }, { deadline: 999, requestId: 'capture-expired' }))).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
     expect(expiredConnect).not.toHaveBeenCalled();
+  });
+
+  it('runs Target Logs initialization, each page, and snapshot cleanup inside the Target source partition', async () => {
+    const searchPage = vi.fn(() => Promise.resolve({ status: 'available' as const, records: [record],
+      sourceSnapshotId: 'target-snapshot-1' }));
+    const server = await startLogsMcpServer({ searchPage, closeSnapshot: vi.fn(() => Promise.resolve()),
+      close: vi.fn(() => Promise.resolve()) }, { port: 0 });
+    const authorizations: string[] = [];
+    const validations: string[] = [];
+    const guard: TargetOperationGuard = {
+      authorize: async input => {
+        authorizations.push(`${input.operation}:${input.capability}`);
+        return { bindingId: 'binding-a', runId: 'run-a', rootRunId: 'run-a', snapshotDigest: 'snapshot-digest-a',
+          operation: input.operation, capability: input.capability, policyEpoch: 1, signal: input.signal };
+      },
+      validate: async permit => { validations.push(`${permit.operation}:${permit.capability}`); },
+    };
+    const partition: TargetSourcePartitionLease = {
+      execute: async <T>(operation: (signal: AbortSignal) => Promise<T>, options: TargetSourceExecutionOptions) => {
+        const targetOperations = options.targetOperations;
+        const permit = targetOperations === undefined ? undefined
+          : await targetOperations.authorize({ operation: 'source', capability: 'market-a-logs', signal: options.signal });
+        const result = await operation(options.signal);
+        if (permit !== undefined) await targetOperations?.validate(permit, options.signal);
+        return result;
+      },
+      release: () => undefined,
+    };
+    const now = () => Date.parse('2026-10-03T00:05:00Z');
+    const source = createLazyElkEvidenceSource({
+      mcpUrl: server.url,
+      executor: executor(now),
+      partition,
+      sourceId: 'market-a-logs',
+      now,
+      registerShutdownHook: () => undefined,
+    });
+    try {
+      const pages = await consumePages(source.pages({
+        service: 'checkout', start: '2026-10-03T00:00:00Z', end: '2026-10-03T00:05:00Z',
+      }, { deadline: now() + 9_000, networkAttemptBudget: { remaining: 20 }, requestId: 'target-capture-a',
+        targetOperations: guard, targetSourceId: 'market-a-logs' }));
+      expect(pages).toHaveLength(1);
+      expect(searchPage).toHaveBeenCalledTimes(1);
+      expect(authorizations.length).toBeGreaterThanOrEqual(4);
+      expect(authorizations.every(value => value === 'source:market-a-logs')).toBe(true);
+      expect(validations).toEqual(authorizations);
+    } finally {
+      await source.close?.();
+      await server.close();
+    }
   });
 
   it('bounds concurrent waiters by each caller deadline and AbortSignal', async () => {

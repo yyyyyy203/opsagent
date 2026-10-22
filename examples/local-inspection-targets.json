@@ -1,0 +1,243 @@
+{
+  "schemaVersion": 1,
+  "catalog": {
+    "schemaVersion": 1,
+    "targets": [
+      {
+        "targetId": "market-a-sim",
+        "projectId": "market-a",
+        "projectName": "Market A",
+        "deploymentId": "local-lab",
+        "deploymentGeneration": 1,
+        "environment": "simulation",
+        "dataClass": "simulated",
+        "datasetId": "local-settlement-shared-v1",
+        "targetFingerprint": "market-a-local-settlement",
+        "profileId": "market-a.local.settlement",
+        "profileRevision": "profile/v1",
+        "displayName": "Market A settlement simulation",
+        "description": "本地合成结算指标和日志。",
+        "enabled": true,
+        "scenario": {
+          "id": "window_failure_rate.v1",
+          "version": "1.1.0",
+          "implementationDigest": "sha256:v1:626cb9cca81c4a9376723df0520e438ad9322dd44c9115f4aaf274b4d0e9310e",
+          "serviceId": "checkout",
+          "serviceName": "Checkout",
+          "metricSemantics": "integer_window_snapshot",
+          "metricMapping": {
+            "metricName": "settlement_window_requests",
+            "outcomeLabel": "outcome",
+            "successValue": "success",
+            "failureValue": "failure",
+            "serviceSelector": {
+              "label": "service",
+              "value": "checkout"
+            },
+            "staticLabels": {
+              "environment": "simulation"
+            },
+            "windowBoundaryMapping": {
+              "startMetricName": "settlement_window_start_seconds",
+              "endMetricName": "settlement_window_end_seconds",
+              "timestampUnit": "unix_seconds"
+            }
+          },
+          "threshold": 0.05,
+          "minSamples": 20
+        },
+        "sourceBindings": [
+          {
+            "sourceId": "market-a-metrics",
+            "version": "connection/v1",
+            "kind": "metrics",
+            "adapterId": "prometheus-mcp.v1",
+            "required": true,
+            "allowedServiceIds": [
+              "checkout"
+            ]
+          },
+          {
+            "sourceId": "market-a-logs",
+            "version": "connection/v1",
+            "kind": "logs",
+            "adapterId": "elasticsearch-mcp.v1",
+            "required": true,
+            "allowedServiceIds": [
+              "checkout"
+            ]
+          }
+        ],
+        "knowledgeRefs": []
+      },
+      {
+        "targetId": "market-b-sim",
+        "projectId": "market-b",
+        "projectName": "Market B",
+        "deploymentId": "local-lab",
+        "deploymentGeneration": 1,
+        "environment": "simulation",
+        "dataClass": "simulated",
+        "datasetId": "local-settlement-shared-v1",
+        "targetFingerprint": "market-b-local-settlement",
+        "profileId": "market-b.local.settlement",
+        "profileRevision": "profile/v1",
+        "displayName": "Market B settlement simulation",
+        "description": "本地合成结算指标和日志。",
+        "enabled": true,
+        "scenario": {
+          "id": "window_failure_rate.v1",
+          "version": "1.1.0",
+          "implementationDigest": "sha256:v1:626cb9cca81c4a9376723df0520e438ad9322dd44c9115f4aaf274b4d0e9310e",
+          "serviceId": "checkout",
+          "serviceName": "Checkout",
+          "metricSemantics": "integer_window_snapshot",
+          "metricMapping": {
+            "metricName": "settlement_window_requests",
+            "outcomeLabel": "outcome",
+            "successValue": "success",
+            "failureValue": "failure",
+            "serviceSelector": {
+              "label": "service",
+              "value": "checkout"
+            },
+            "staticLabels": {
+              "environment": "simulation"
+            },
+            "windowBoundaryMapping": {
+              "startMetricName": "settlement_window_start_seconds",
+              "endMetricName": "settlement_window_end_seconds",
+              "timestampUnit": "unix_seconds"
+            }
+          },
+          "threshold": 0.02,
+          "minSamples": 20
+        },
+        "sourceBindings": [
+          {
+            "sourceId": "market-b-metrics",
+            "version": "connection/v1",
+            "kind": "metrics",
+            "adapterId": "prometheus-mcp.v1",
+            "required": true,
+            "allowedServiceIds": [
+              "checkout"
+            ]
+          },
+          {
+            "sourceId": "market-b-logs",
+            "version": "connection/v1",
+            "kind": "logs",
+            "adapterId": "elasticsearch-mcp.v1",
+            "required": true,
+            "allowedServiceIds": [
+              "checkout"
+            ]
+          }
+        ],
+        "knowledgeRefs": []
+      }
+    ]
+  },
+  "connections": {
+    "schemaVersion": 2,
+    "connections": [
+      {
+        "sourceId": "market-a-metrics",
+        "version": "connection/v1",
+        "kind": "metrics",
+        "adapterId": "prometheus-mcp.v1",
+        "enabled": true,
+        "endpoint": "http://127.0.0.1:19390",
+        "allowedServiceIds": [
+          "checkout"
+        ],
+        "dataDomainId": "local-settlement-metrics",
+        "sourceGeneration": 1,
+        "permissionScopeDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "sourceId": "market-a-logs",
+        "version": "connection/v1",
+        "kind": "logs",
+        "adapterId": "elasticsearch-mcp.v1",
+        "enabled": true,
+        "endpoint": "http://127.0.0.1:19391/mcp",
+        "allowedServiceIds": [
+          "checkout"
+        ],
+        "dataDomainId": "local-settlement-logs-shared",
+        "sourceGeneration": 1,
+        "permissionScopeDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      {
+        "sourceId": "market-b-metrics",
+        "version": "connection/v1",
+        "kind": "metrics",
+        "adapterId": "prometheus-mcp.v1",
+        "enabled": true,
+        "endpoint": "http://127.0.0.1:19390",
+        "allowedServiceIds": [
+          "checkout"
+        ],
+        "dataDomainId": "local-settlement-metrics",
+        "sourceGeneration": 1,
+        "permissionScopeDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "sourceId": "market-b-logs",
+        "version": "connection/v1",
+        "kind": "logs",
+        "adapterId": "elasticsearch-mcp.v1",
+        "enabled": true,
+        "endpoint": "http://127.0.0.1:19391/mcp",
+        "allowedServiceIds": [
+          "checkout"
+        ],
+        "dataDomainId": "local-settlement-logs-shared",
+        "sourceGeneration": 1,
+        "permissionScopeDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ]
+  },
+  "profiles": [
+    {
+      "profileId": "market-a.local.settlement",
+      "revision": "profile/v1",
+      "serviceName": "Checkout",
+      "serviceLevel": "S1",
+      "timezone": "Asia/Shanghai",
+      "allowedActions": [],
+      "forbiddenActions": [],
+      "changeFreezePeriods": [],
+      "impactPolicy": {
+        "unavailable": {
+          "S0": "deny",
+          "S1": "deny",
+          "S2": "confirm",
+          "S3": "confirm"
+        }
+      },
+      "policyVersion": "local-simulation-v1"
+    },
+    {
+      "profileId": "market-b.local.settlement",
+      "revision": "profile/v1",
+      "serviceName": "Checkout",
+      "serviceLevel": "S1",
+      "timezone": "Asia/Shanghai",
+      "allowedActions": [],
+      "forbiddenActions": [],
+      "changeFreezePeriods": [],
+      "impactPolicy": {
+        "unavailable": {
+          "S0": "deny",
+          "S1": "deny",
+          "S2": "confirm",
+          "S3": "confirm"
+        }
+      },
+      "policyVersion": "local-simulation-v1"
+    }
+  ]
+}

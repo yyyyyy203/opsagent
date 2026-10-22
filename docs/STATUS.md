@@ -1,6 +1,6 @@
 # 项目状态
 
-更新时间：2026-10-21（Asia/Shanghai）
+更新时间：2026-10-22（Asia/Shanghai）
 
 当前仓库：`/Users/yumohan/Documents/ChatGPT/巡检项目/opsagent`
 
@@ -8,14 +8,13 @@
 
 GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
-## 最新任务：本地只读巡检产品方案（2026-10-21）
+## 最新任务：本地多项目只读巡检系统 S1（2026-10-22）
 
-- 用户本次要求生成 Spec 和 Plan；已新增[产品 Spec](./superpowers/specs/2026-10-21-local-inspection-product-design.md)和[实施计划](./superpowers/plans/2026-10-21-local-inspection-product.md)，S0–S6 全部待实施，不启动代码开发或在线调用。
-- 范围：普通宿主 Target+Metrics/Logs、受治理记忆接线、五族场景与模型质量、持久化周期巡检、站内结果处理、统一运行/备份恢复/留存/发布。L01–L14 定义可观察验收条件；在线模型与离线工程结果分开记录。认证授权和真实业务接入列为后续门槛。
-- 本轮只修改五份文档：上述两份新文档、PROJECT、DECISIONS 和 STATUS。同步修正 PROJECT 中已完成的多来源韧性仍被列为未实施的过时描述；保留历史记录并标注其时间口径。没有修改产品源码、测试、公共 Schema 或数据库。
-- 基线：开始时分支 `codex/event-message-v2`、HEAD `bdfb20e`，工作区干净。首次远端查询 DNS 失败；按用户“重试/继续”要求重试后，已查询到远端分支为 `22c94aaa200f362fda2b041e0efef2b901fa5bb4`。已用祖先关系核对后普通推送；本次五份文档独立提交为 `34b91af`，推送后 `ls-remote` 核对远端 HEAD 为 `34b91affd58035deb97084f047eaf769d30c7cbc`，包含此前待同步的 `fb8355f`、`bdfb20e`。前轮网络交付阻塞已解除。本条核验记录随后作为独立文档提交交付，其最终 SHA 以 Git 核对为准。
-- 本次文档检查通过：五份文档的 43 个本地 Markdown 链接可解析；L01–L14 验收项唯一且完整，S0–S6 均有实施章节，未将实施勾选为完成；`git diff --check` 通过。本轮没有运行代码 lint/typecheck/test/build 或浏览器测试；仅文档修改，旧检查结果不作为本轮通过依据。
-- 下一步：方案文档已校验并推送；按 S0 核对实施基线，再在实施授权范围内从 S1 普通宿主接线开始。后续代码改动遵循逐阶段决策、验收、状态更新及独立提交要求。
+- 用户已授权“按照计划执行”。本轮完成 S1：普通 `apps/agent-server` 通过 `AGENTOPS_TARGET_CONFIG` 组装本地模拟 Target 的 Metrics+Logs 双来源；提供双 Target 模拟实验室、操作指南和浏览器闭环测试。没有访问 `group-buy-market`、生产遥测或在线模型，也没有增加真实写动作。
+- 验收：[S1 验收记录](./verification/2026-10-22-local-inspection-product-acceptance.md)。L01–L03 通过；L04–L14 未运行。全量测试通过（218 文件、2257 项；5 个 opt-in 文件、9 项跳过），`pnpm lint`、`pnpm typecheck`、`pnpm web:typecheck`、`pnpm e2e:local-inspection`（1/1）、`pnpm e2e:multi-target`（2/2）、`pnpm e2e:memory:multisource`（7/7）通过。具体结果与默认沙箱 loopback 限制见验收记录。
+- 基线：分支 `codex/event-message-v2`，实施前 HEAD `1aab521151a32a517cd8e11387a33a23d389e41e`，当时工作区干净；Node v24.19.0，pnpm v11.25.0（仓库声明 11.19.0）。本任务的全部源码、测试、示例、指南、Plan、验收记录和状态文档改动当前均未提交；最终文件列表以 `git status --short` 与提交内容为准。
+- 交付阻塞：S1 已独立提交到本地分支 `6bb18e5`。`git ls-remote origin refs/heads/codex/event-message-v2` 初次因 `Could not resolve host: github.com` 失败，重试持续挂起并中止，尚未获远端 SHA；网络恢复后先核验远端祖先关系，再普通推送并核对远端 HEAD。当前不宣称已推送或同步。
+- 下一步：S2 受治理记忆与模型输入接线。L04–L05 仅在实际模型上下文中验证知识 ID/version/digest、Target 隔离、撤销/到期和失败关闭后才能标通过；S1 通过不代表整套产品成熟或可生产上线。
 
 ## 当前阶段
 

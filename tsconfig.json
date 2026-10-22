@@ -20,6 +20,6 @@
     "outDir": "dist",
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "apps/agent-web/src/vite-env.d.ts", "vitest.config.ts", "eslint.config.js"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "apps/agent-web/src/vite-env.d.ts", "vitest.config.ts", "playwright.local-inspection.config.ts", "eslint.config.js"],
   "exclude": ["dist", "node_modules"]
 }

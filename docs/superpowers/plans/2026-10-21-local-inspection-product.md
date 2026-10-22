@@ -2,7 +2,7 @@
 
 - 日期：2026-10-21（Asia/Shanghai）
 - 依据：[Spec 与 L01–L14](../specs/2026-10-21-local-inspection-product-design.md)
-- 状态：仅方案落盘；S0–S6 均未实施。本次请求不启动代码开发、在线验收或外发通知。
+- 状态：S1 本地实现与 L01–L03 验收通过，已独立提交到本地分支；远端 SHA 查询因 GitHub DNS/连接挂起未完成，尚未推送。S2–S6 待实施。
 - 分类：bootstrap/应用编排/适配器/API-Web/基础设施；不改变 Harness 顺序或真实动作边界。
 
 ## 1. 顺序与工作量
@@ -43,33 +43,33 @@ macOS 若命中已知临时目录符号链接限制，可用 `TMPDIR=/private/tm
 
 ## 3. S0：基线与交付收尾
 
-- [ ] 重新检查 `bdfb20e` 之后变化，核对前轮多来源韧性通过记录，不重复实现已完成项目。
-- [ ] 核对 `origin` 与当前分支，查询远端 SHA；取得远端提交后用祖先/差异检查决定普通推送。存在远端独有修改先合并处理，不覆盖。
-- [ ] 为本计划建立 `docs/verification/2026-10-21-local-inspection-product-acceptance.md`（拟新增），L01–L14 初始为 not_run；旧测试只列历史依据。
-- [ ] 确认双模拟 Target、来源端口/数据目录、离线与在线模型模式的配置样例范围。
+- [x] 重新检查 `bdfb20e` 之后变化，核对前轮多来源韧性通过记录，不重复实现已完成项目。
+- [ ] 核对 `origin` 与当前分支，查询远端 SHA；本次 `git ls-remote` 先报 `Could not resolve host: github.com`，再次读取远端时连接持续挂起并中止，待网络恢复后核对与普通推送。
+- [x] 为本计划建立 `docs/verification/2026-10-22-local-inspection-product-acceptance.md`；L01–L03 有本轮证据，L04–L14 保持 not_run。
+- [x] 确认双模拟 Target、来源端口/数据目录、离线与在线模型模式的配置样例范围。
 
-退出：基线与远端状态可解释、后续测试目录隔离；若网络阻塞，记录事实，独立的本地实现可进行，交付状态继续待同步。
+退出：本地基线、模拟配置与验收目录已核对；远端 SHA 和推送仍是交付待办。网络阻塞不妨碍独立本地实现，但不能据此宣称同步完成。
 
 ## 4. S1：普通宿主与 Target 双来源
 
 | 文件 | 任务 |
 | --- | --- |
-| `src/bootstrap/target-host-config.ts`（拟新增） | 读取绝对配置文件，校验 schemaVersion、引用、预算、身份、来源与安全配置；区分配置错误与来源暂不可达 |
+| `src/bootstrap/local-target-runtime.ts`（已新增） | 读取绝对配置文件，校验 Target/Profile/来源绑定；仅接受 simulated、只读 Profile 和 loopback HTTP 来源，拒绝 URL 凭据与查询参数 |
 | `src/profiles/target-catalog-schema.ts`、`src/profiles/target-resolver.ts` | 复用现有解析；仅为接线实际缺口做兼容扩展，不重新发明 Target Schema |
-| `src/bootstrap/target-host-runtime.ts`（拟新增） | 组装 Resolver、正式 OperationPolicy、RuntimeProvider、Starter，释放来源租约与自有资源 |
-| `src/bootstrap/target-metrics-subagent.ts`、`src/bootstrap/logs-subagent.ts` | 核对冻结窗口、指标映射、父子作用域、预算与故障隔离；Logs 不足时新增 `target-logs-subagent.ts` 适配而非复制主循环 |
-| `src/bootstrap/agent-web-runtime.ts`、`src/bootstrap/index.ts`、`apps/agent-server/index.mjs` | 注入同一 runtime/persistence，接 `AGENTOPS_TARGET_CONFIG`；保留旧 simulation 启动方式与无 Target 配置行为 |
-| `examples/local-inspection-targets.json`（拟新增） | 两套模拟 Target 配置，不含凭据；相同输入不同阈值、独立映射/数据集标识 |
-| `apps/agent-web/src/components/TargetWorkspace.tsx` | 仅补真实组装暴露的 readiness/配置缺口提示；不重写已有工作台 |
-| `test/target-host-config.test.ts`、`test/target-host-runtime.integration.test.ts`（拟新增） | 配置错误、真实组装、来源失败、取消、重启、策略撤销与隔离；现有 Target 测试继续复用 |
-| `test/e2e/local-inspection-web.spec.ts`、`playwright.local-inspection.config.ts`（拟新增） | 浏览器经正式宿主组装访问本地来源；测试依赖只在专用入口注入，不在产品入口开放任意测试开关 |
+| `src/bootstrap/agent-web-runtime.ts`、`src/application/create-runtime.ts`、`src/bootstrap/index.ts`、`apps/agent-server/index.mjs` | 接入 `AGENTOPS_TARGET_CONFIG`，在普通宿主组装同一 persistence 下的 Target Resolver、OperationPolicy、RuntimeProvider、Starter 和恢复门；保留 legacy simulation |
+| `src/bootstrap/target-metrics-subagent.ts`、`src/bootstrap/logs-web-source.ts`、`src/bootstrap/lazy-elk-evidence-source.ts`、`src/bootstrap/log-evidence-tools.ts`、`src/infrastructure/elk/paged-evidence-source.ts` | Metrics 使用冻结 300 秒窗口；Logs 分页/快照按 Target source partition 执行并重校验来源许可 |
+| `examples/local-inspection-targets.json`、`docs/guides/local-target-inspection.md` | 两个共享合成数据集的模拟 Target，阈值分别为 5%/2%；记录本地模拟器、宿主与工作台启动步骤 |
+| `src/bootstrap/local-target-simulator.ts`、`src/infrastructure/simulator/target-prometheus-server.ts`、`apps/local-target-simulator/index.mjs` | 提供动态窗口的 loopback Prometheus API、同窗口 Logs MCP 和 legacy Metrics MCP；新增 `pnpm local:target-lab` |
+| `apps/agent-web/src/components/EvidencePanel.tsx`、`TaskComposer.tsx`、`src/state/run-view.ts` | 显示确定性阈值 assessment；修正分页请求超过 API 上限及异步提交清空后续输入的竞态 |
+| `test/local-target-runtime.test.ts`、`test/local-target-runtime-host.test.ts`、`test/local-target-simulator.test.ts` | 配置边界、普通 agent-server 进程入口、双来源/阈值、主动取消、配置重启后的历史快照和隔离 |
+| `test/e2e/local-inspection-fixture-server.mjs`、`test/e2e/local-inspection-web.spec.ts`、`playwright.local-inspection.config.ts` | 浏览器经正式 Target bootstrap 访问本地来源；ScriptedModel 仅由专用测试入口注入 |
 
-- [ ] 先跑配置校验与 Target 组装集成测试，验证无配置时旧流程。
-- [ ] A/B 双来源巡检、证据回查、取消、重启恢复、配置更改后历史标签保持正确。
-- [ ] 检查测试没有复用夹具的全放行 policy 或直接伪造最终 API。
-- [ ] 完整质量门及既有双 Target/多来源 E2E。
+- [x] 配置校验和普通 `apps/agent-server` 进程组装通过；legacy simulation 浏览器路径仍可用。
+- [x] A/B 双来源巡检、确定性阈值、证据回查、活动 Run 取消/Abort、跨 Target 读写/证据拒绝、重启后历史快照和新配置生效通过。
+- [x] 测试经正式 Resolver、OperationPolicy、RuntimeProvider 和实际 loopback Metrics/Logs 服务运行；ScriptedModel 只从专用测试入口注入。
+- [x] 完整质量门及既有双 Target/多来源 E2E 通过，结果见[验收记录](../../verification/2026-10-22-local-inspection-product-acceptance.md)。
 
-退出：L01–L03 通过。若 Logs Target 接线发现契约缺口，先补决策与本表，不把 Metrics-only 验收记为双来源通过。
+退出：L01–L03 通过。S1 本地实现验收完成并已有独立本地提交；GitHub 远端核对/推送仍待网络恢复，不代表远端已同步。
 
 ## 5. S2：记忆治理和模型输入
 

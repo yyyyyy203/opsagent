@@ -374,7 +374,8 @@ function isTerminalRunStatus(status: PublicRunDetail['status']): boolean {
 
 const MAX_EVIDENCE_TREE_RUNS = 100;
 const MAX_EVIDENCE_TREE_ITEMS = 500;
-const EVIDENCE_PAGE_SIZE = 100;
+// The HTTP API caps page limits at 50; larger requests return 400 and hide the evidence tree.
+const EVIDENCE_PAGE_SIZE = 50;
 
 function mergeEvidenceSnapshot(previous: PublicEvidencePage['items'], incoming: PublicEvidencePage['items']): PublicEvidencePage['items'] {
   const byId = new Map(incoming.map((item) => [item.evidenceId, item]));

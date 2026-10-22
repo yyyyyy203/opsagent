@@ -13,6 +13,7 @@ import {
 import type { McpConnection } from '../mcp/types.js';
 import { SourceFailure } from '../mcp/resilience.js';
 import type { ExecutionDeadline, ResilientExecutor } from '../mcp/resilience.js';
+import type { TargetSourcePartitionLease } from '../infrastructure/target-source-partition-registry.js';
 import type { McpToolDescriptor } from '../tool/adapters/mcp-tool-adapter.js';
 import type { LogEvidencePageSource } from './log-evidence-tools.js';
 
@@ -21,6 +22,8 @@ const DEFAULT_INIT_DEADLINE_MS = 60_000;
 export interface LazyElkEvidenceSourceOptions {
   mcpUrl: string;
   executor: ResilientExecutor;
+  partition?: TargetSourcePartitionLease;
+  sourceId?: string;
   now: () => number;
   registerShutdownHook: (callback: () => Promise<void>) => void;
   /** Test seam and alternate transport injection; production defaults to the official HTTP MCP adapter. */
@@ -40,8 +43,9 @@ export function createLazyElkEvidenceSource(options: LazyElkEvidenceSourceOption
   let closePromise: Promise<void> | undefined;
   const pageClient = new ResilientElkPageClient(new McpElkPageClient(connection), {
     executor: options.executor,
+    ...(options.partition === undefined ? {} : { partition: options.partition }),
     now: options.now,
-    sourceId: 'elk',
+    sourceId: options.sourceId ?? 'elk',
   });
   const paged = new PagedEvidenceSource(pageClient, { now: options.now });
 
@@ -63,16 +67,16 @@ export function createLazyElkEvidenceSource(options: LazyElkEvidenceSourceOption
     if (binding !== undefined) return waitForBinding(binding, request, options.now);
     const attempt = (async (): Promise<void> => {
       try {
-        await options.executor.execute(
+        await executeSourceOperation(
           (signal) => connection.connect(signal, request.networkAttemptBudget === undefined
             ? undefined : { networkAttemptBudget: request.networkAttemptBudget }),
-          executionDeadline(request, options.now),
+          request,
         );
         if (closed) throw new SourceFailure('ABORTED');
-        const tools = await options.executor.execute(
+        const tools = await executeSourceOperation(
           (signal) => connection.listTools(signal, request.networkAttemptBudget === undefined
             ? undefined : { networkAttemptBudget: request.networkAttemptBudget }),
-          executionDeadline(request, options.now),
+          request,
         );
         validateLogsTools(tools);
         if (closed) throw new SourceFailure('ABORTED');
@@ -91,6 +95,7 @@ export function createLazyElkEvidenceSource(options: LazyElkEvidenceSourceOption
   };
 
   const source: LogEvidencePageSource = {
+    close,
     pages(query: LogEvidenceQuery, requestOptions: ElkPageRequestOptions = {}): AsyncIterable<EvidenceSourcePage> {
       return iterate(query, requestOptions);
     },
@@ -109,6 +114,8 @@ export function createLazyElkEvidenceSource(options: LazyElkEvidenceSourceOption
       ...requestOptions,
       signal,
       deadline: requestOptions.deadline ?? options.now() + DEFAULT_INIT_DEADLINE_MS,
+      ...(requestOptions.targetOperations === undefined ? {} : { targetOperations: requestOptions.targetOperations }),
+      ...(requestOptions.targetSourceId === undefined ? {} : { targetSourceId: requestOptions.targetSourceId }),
     };
     if (options.now() >= request.deadline
       || (request.networkAttemptBudget !== undefined && request.networkAttemptBudget.remaining <= 0)) {
@@ -120,24 +127,54 @@ export function createLazyElkEvidenceSource(options: LazyElkEvidenceSourceOption
 
   options.registerShutdownHook(close);
   return source;
+
+  function executeSourceOperation<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+    request: ElkPageRequestOptions & { signal: AbortSignal; deadline: number },
+  ): Promise<T> {
+    if (options.partition !== undefined) {
+      return options.partition.execute(operation, {
+        signal: request.signal,
+        deadline: request.deadline,
+        ...(request.targetOperations === undefined ? {} : { targetOperations: request.targetOperations }),
+        onEvent: event => {
+          if (event.type === 'retry' && event.code !== undefined) request.onResilienceEvent?.({
+            type: 'retry_scheduled', sourceId: options.sourceId ?? request.targetSourceId ?? 'elk',
+            attempt: event.attempt, reasonCode: event.code, delayMs: event.delayMs ?? 0,
+          });
+        },
+        onCircuitEvent: event => {
+          const sourceId = options.sourceId ?? request.targetSourceId ?? 'elk';
+          if (event.type === 'opened') request.onResilienceEvent?.({
+            type: 'circuit_opened', sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil,
+          });
+          else if (event.type === 'half_opened') request.onResilienceEvent?.({
+            type: 'circuit_half_opened', sourceId, probePolicy: 'single_probe',
+          });
+          else request.onResilienceEvent?.({ type: 'circuit_closed', sourceId, recoveryEvidence: ['source_success'] });
+        },
+      });
+    }
+    return options.executor.execute(operation, executionDeadline(request, options.now));
+  }
 }
 
 function executionDeadline(
   request: ElkPageRequestOptions & { signal: AbortSignal; deadline: number },
   now: () => number,
 ): ExecutionDeadline {
+  const sourceId = request.targetSourceId ?? 'elk';
   return {
     signal: request.signal,
     deadline: request.deadline,
     now,
     onEvent: (event) => {
       if (event.type === 'retry' && event.code !== undefined) request.onResilienceEvent?.({
-        type: 'retry_scheduled', sourceId: 'elk', attempt: event.attempt,
+        type: 'retry_scheduled', sourceId, attempt: event.attempt,
         reasonCode: event.code, delayMs: event.delayMs ?? 0,
       });
     },
     onCircuitEvent: (event) => {
-      const sourceId = 'elk';
       if (event.type === 'opened') request.onResilienceEvent?.({
         type: 'circuit_opened', sourceId, failureWindow: event.failureWindow, openUntil: event.openUntil,
       });

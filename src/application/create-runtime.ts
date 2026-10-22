@@ -579,6 +579,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   });
   return {
     agent,
+    registerShutdownHook: (callback: () => void | Promise<void>) => shutdownRegistry.register(callback),
     configureTargetRecoveryGate(gate: TargetRecoveryGate): void {
       if (configuredTargetRecoveryGate !== undefined && configuredTargetRecoveryGate !== gate) {
         throw new Error('Target Recovery Gate is already configured for this runtime.');
@@ -602,6 +603,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     toolResultCompactor,
     evidenceRecorder,
     sharedEvents,
+    targetRecoveryGate,
     hitl: new HitlService(
       checkpoints,
       clock,
@@ -629,6 +631,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     eventStoreV2,
     replayV2,
     eventPublisherV2,
+    v2Events: v2EventDependencies,
     auditProjectorV2,
     projectionFailuresV2,
     projectionCheckpointsV2,

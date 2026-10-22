@@ -1,7 +1,7 @@
 # 本地多项目只读巡检系统 Spec
 
 - 日期：2026-10-21（Asia/Shanghai）
-- 状态：方案已形成，S0–S6 待实施；不代表功能、在线模型或生产验收完成。
+- 状态：方案已形成；S1 本地模拟实现与 L01–L03 验收通过，S2–S6 待实施；不代表在线模型或生产验收完成。实施证据见[2026-10-22 验收记录](../../verification/2026-10-22-local-inspection-product-acceptance.md)。
 - 计划：[逐阶段实施计划](../plans/2026-10-21-local-inspection-product.md)
 - 约束：[AGENTS.md](../../../AGENTS.md)、[PROJECT](../../PROJECT.md)、[DECISIONS](../../DECISIONS.md)
 - 复用：[多项目设计](./2026-10-11-multi-project-adaptation-design.md)、[多来源韧性验收](../../verification/2026-10-21-multisource-memory-resilience-acceptance.md)

@@ -9,6 +9,8 @@ import { createLazyElkEvidenceSource } from './lazy-elk-evidence-source.js';
 import { createLogsSubagentTool } from './logs-subagent.js';
 import { createSharedSourceChildAgentFactory } from './shared-source-child.js';
 import type { ModelIdentity } from './model-identity.js';
+import type { ResolvedTargetSnapshotV2 } from '../contracts/target.js';
+import type { TargetSourcePartitionLease } from '../infrastructure/target-source-partition-registry.js';
 
 const MAX_QUESTION_BYTES = 2 * 1024;
 const MIN_CURSOR_SECRET_BYTES = 32;
@@ -30,11 +32,44 @@ export interface LogsWebSourceOptions {
   modelIdentity?: ModelIdentity;
 }
 
+export interface TargetLogsWebSourceOptions extends LogsWebSourceOptions {
+  targetScope: { snapshot: ResolvedTargetSnapshotV2; sourceId: string };
+  partition: TargetSourcePartitionLease;
+}
+
+export interface TargetLogsWebSourceRuntime {
+  readonly tool: Tool;
+  release(): Promise<void>;
+}
+
 /** Compose the parent-facing Logs Subagent over the Web runtime's existing data plane. */
 export function createLogsWebSource(
   ports: RuntimeToolPorts,
   options: LogsWebSourceOptions,
 ): readonly Tool[] {
+  return createLogsWebSourceRuntime(ports, options).tools;
+}
+
+/** Compose one Logs adapter against the immutable source binding of a Target. */
+export function createTargetLogsWebSource(
+  ports: RuntimeToolPorts,
+  options: TargetLogsWebSourceOptions,
+): TargetLogsWebSourceRuntime {
+  const runtime = createLogsWebSourceRuntime(ports, options, options.targetScope, options.partition);
+  const tool = runtime.tools[0];
+  if (tool === undefined) throw new Error('TARGET_LOGS_TOOL_UNAVAILABLE');
+  return { tool, release: async () => {
+    await runtime.close();
+    options.partition.release();
+  } };
+}
+
+function createLogsWebSourceRuntime(
+  ports: RuntimeToolPorts,
+  options: LogsWebSourceOptions,
+  targetScope?: TargetLogsWebSourceOptions['targetScope'],
+  partition?: TargetSourcePartitionLease,
+): { tools: readonly Tool[]; close: () => Promise<void> } {
   const { evidenceBlobs, evidenceManifests, streamingEvidenceRecorder } = ports;
   if (evidenceBlobs === undefined || evidenceManifests === undefined || streamingEvidenceRecorder === undefined) {
     throw new Error('Logs Web source requires the runtime-owned evidence data plane.');
@@ -49,6 +84,8 @@ export function createLogsWebSource(
   const source = createLazyElkEvidenceSource({
     mcpUrl: options.mcpUrl,
     executor,
+    ...(partition === undefined ? {} : { partition }),
+    ...(targetScope === undefined ? {} : { sourceId: targetScope.sourceId }),
     now,
     registerShutdownHook: (callback) => ports.registerShutdownHook(callback),
   });
@@ -72,7 +109,7 @@ export function createLogsWebSource(
     clock: ports.clock,
     ids: ports.ids,
   });
-  const logsSubagent = createLogsSubagentTool({
+  const baseLogsSubagent = createLogsSubagentTool({
     source,
     recorder: streamingEvidenceRecorder,
     manifests: evidenceManifests,
@@ -83,11 +120,18 @@ export function createLogsWebSource(
     checkpoints: ports.checkpoints,
     ...(ports.durableState === undefined ? {} : { targetBindings: ports.durableState.targetBindings }),
     lifecycle: { ...ports.events, ids: ports.ids },
-    validateRequest: (request, execution) => validateLogsRequest(request, execution, ports, options.sourceWindow),
+    validateRequest: (request, execution) => validateLogsRequest(request, execution, ports, options.sourceWindow, targetScope),
     ...(options.sourceWindow === undefined ? {} : { sourceWindow: options.sourceWindow }),
     collector: ({ request }) => new LogsSourceReportCollector({ request }),
   });
-  return Object.freeze([logsSubagent]);
+  const logsSubagent = targetScope === undefined ? baseLogsSubagent : Object.freeze({
+    ...baseLogsSubagent,
+    targetSourceId: targetScope.sourceId,
+    implementationVersion: `target-logs-subagent.v1:${targetScope.snapshot.digest}`,
+  });
+  const close = async (): Promise<void> => { await source.close?.(); };
+  if (targetScope !== undefined) ports.registerShutdownHook(close);
+  return { tools: Object.freeze([logsSubagent]), close };
 }
 
 function validateLogsRequest(
@@ -95,9 +139,15 @@ function validateLogsRequest(
   execution: Omit<SourceSubagentExecution, 'childRunId'>,
   ports: RuntimeToolPorts,
   sourceWindow?: { start: string; end: string },
+  targetScope?: TargetLogsWebSourceOptions['targetScope'],
 ): void {
-  if (request.profileId !== 'simulation' || request.service !== 'checkout') {
-    throw new SourceSubagentFailure('POLICY_DENIED', 'Logs request is outside the configured Profile.', false);
+  const targetBinding = targetScope?.snapshot.sourceBindings.find(source => source.sourceId === targetScope.sourceId
+    && source.kind === 'logs' && !targetScope.snapshot.unavailableOptionalSourceIds.includes(source.sourceId));
+  const profileId = targetScope?.snapshot.profile.profileId ?? 'simulation';
+  const serviceId = targetScope?.snapshot.scenario.serviceId ?? 'checkout';
+  if (request.profileId !== profileId || request.service !== serviceId
+    || (targetScope !== undefined && (targetBinding === undefined || !targetBinding.allowedServiceIds.includes(request.service)))) {
+    throw new SourceSubagentFailure('POLICY_DENIED', 'Logs request is outside the configured Target binding.', false);
   }
   if (request.evidenceIds.length > 0) {
     throw new SourceSubagentFailure('POLICY_DENIED', 'Logs does not accept cross-source evidence hints.', false);
@@ -113,8 +163,8 @@ function validateLogsRequest(
     throw new SourceSubagentFailure('INVALID_INPUT', 'Logs request must match the immutable source snapshot window.', false);
   }
   try {
-    validateLogsScope(request, logsLabQueryPolicy, ports.clock.now().getTime());
+    validateLogsScope(request, { ...logsLabQueryPolicy, service: serviceId }, ports.clock.now().getTime());
   } catch {
-    throw new SourceSubagentFailure('INVALID_INPUT', 'Logs request must select the current checkout Profile window.', false);
+    throw new SourceSubagentFailure('INVALID_INPUT', 'Logs request must select the current Target Profile window.', false);
   }
 }
