@@ -452,6 +452,188 @@ describe('ordinary host Local Target assembly', () => {
       await simulator.close();
     }
   }, 30_000);
+
+  it('rejects knowledge at review so it can never be published or injected', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsagent-target-reject-'));
+    roots.push(root);
+    const simulator = await startLocalTargetSimulator({ metricsPort: 0, logsPort: 0, legacyMetricsPort: 0 });
+    const original = await readLocalTargetHostConfig(examplePath);
+    const config = { ...original, connections: { ...original.connections,
+      connections: original.connections.connections.map(item => ({ ...item,
+        endpoint: item.kind === 'metrics' ? simulator.metricsUrl : simulator.logsMcpUrl })) } };
+    const local = createLocalTargetRuntime(config, 'local-reject-cursor-secret-over-32-bytes');
+    const memoryPath = fileURLToPath(new URL('../examples/local-inspection-memory.json', import.meta.url));
+    const memoryConfig = parseDiagnosticMemoryConfig(JSON.parse(await readFile(memoryPath, 'utf8')) as unknown);
+    const prompts: string[] = [];
+    const model: ChatModel = { stream: async function* (messages: AgentMessage[]): AsyncGenerator<ModelStreamEvent, ModelResponse> {
+      prompts.push(messages.flatMap(message => message.blocks.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n'));
+      const text = '受治理知识拒绝语义已读取。';
+      yield { type: 'text_delta', delta: text };
+      return { text, toolCalls: [] };
+    } };
+    const fixedNow = Date.parse('2026-10-22T12:00:00.000Z');
+    const runtime = await startHost(root, local, model, fixedNow, simulator,
+      'local-reject-cursor-secret-over-32-bytes', memoryConfig);
+    try {
+      const source = { sourceId: 'local-settlement-runbook', sourceVersion: 'v1', digest: 'c'.repeat(64) };
+      const rejected = await createRejectedKnowledge(runtime.url, 'semantic', source, {
+        type: 'metric_definition', metricName: 'rejected_canary_metric',
+        businessMeaning: 'REJECT_CANARY: this knowledge must never enter a Target model input.',
+        unit: 'events', labels: [], allowedAggregations: ['count'], windowSemantics: ['fixed_window'],
+        sourceReferences: [source],
+      });
+      expect(rejected.status).toBe('rejected');
+      const listed = await fetch(`${runtime.url}/targets/market-a-sim/knowledge?kind=semantic&status=rejected`);
+      expect(listed.status).toBe(200);
+      expect((await listed.json() as { items: Array<{ id: string; status: string }> }).items)
+        .toContainEqual(expect.objectContaining({ id: rejected.id, status: 'rejected' }));
+
+      const publish = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/publication`, { method: 'POST',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: 'publish-rejected-knowledge',
+          expectedPublicationVersion: 0, references: [{ id: rejected.id, version: String(rejected.contentRevision),
+            digest: rejected.contentDigest, approval: 'approved' }] }) });
+      expect(publish.status).toBe(422);
+
+      const runA = await startTargetRun(runtime.url, 'market-a-sim', 'run-with-rejected-knowledge');
+      await waitForTargetRun(runtime.url, 'market-a-sim', runA);
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).not.toContain('REJECT_CANARY');
+    } finally {
+      await runtime.close();
+      await simulator.close();
+    }
+  }, 20_000);
+
+  it('revokes a knowledge source through the ordinary host and excludes its knowledge', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsagent-target-source-revoke-'));
+    roots.push(root);
+    const simulator = await startLocalTargetSimulator({ metricsPort: 0, logsPort: 0, legacyMetricsPort: 0 });
+    const original = await readLocalTargetHostConfig(examplePath);
+    const config = { ...original, connections: { ...original.connections,
+      connections: original.connections.connections.map(item => ({ ...item,
+        endpoint: item.kind === 'metrics' ? simulator.metricsUrl : simulator.logsMcpUrl })) } };
+    const local = createLocalTargetRuntime(config, 'local-source-revoke-cursor-secret-over-32-bytes');
+    const memoryPath = fileURLToPath(new URL('../examples/local-inspection-memory.json', import.meta.url));
+    const memoryConfig = parseDiagnosticMemoryConfig(JSON.parse(await readFile(memoryPath, 'utf8')) as unknown);
+    const prompts: string[] = [];
+    const model: ChatModel = { stream: async function* (messages: AgentMessage[]): AsyncGenerator<ModelStreamEvent, ModelResponse> {
+      prompts.push(messages.flatMap(message => message.blocks.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n'));
+      const text = '受治理来源状态已读取。';
+      yield { type: 'text_delta', delta: text };
+      return { text, toolCalls: [] };
+    } };
+    const fixedNow = Date.parse('2026-10-22T12:00:00.000Z');
+    const runtime = await startHost(root, local, model, fixedNow, simulator,
+      'local-source-revoke-cursor-secret-over-32-bytes', memoryConfig);
+    try {
+      const source = { sourceId: 'local-settlement-runbook', sourceVersion: 'v1', digest: 'c'.repeat(64) };
+      const semantic = await createApprovedKnowledge(runtime.url, 'semantic', source, {
+        type: 'metric_definition', metricName: 'source_revoke_canary_metric',
+        businessMeaning: 'SOURCE_CANARY: this knowledge is bound to a revocable source.',
+        unit: 'events', labels: [], allowedAggregations: ['count'], windowSemantics: ['fixed_window'],
+        sourceReferences: [source],
+      });
+      const publish = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/publication`, { method: 'POST',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: 'publish-source-revoke-knowledge',
+          expectedPublicationVersion: 0, references: [{ id: semantic.id, version: String(semantic.contentRevision),
+            digest: semantic.contentDigest, approval: 'approved' }] }) });
+      expect(publish.status).toBe(200);
+
+      const runA = await startTargetRun(runtime.url, 'market-a-sim', 'run-before-source-revoke');
+      const detailA = await waitForTargetRunDetail(runtime.url, 'market-a-sim', runA);
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain('SOURCE_CANARY');
+      expect(detailA.knowledgeQualification?.diagnosisReady).toBe(true);
+
+      const revoked = await revokeKnowledgeSource(runtime.url, 'local-settlement-runbook', 'v1', 0,
+        'revoke-settlement-source');
+      expect(revoked.validity).toBe('revoked');
+
+      const runB = await startTargetRun(runtime.url, 'market-a-sim', 'run-after-source-revoke');
+      const detailB = await waitForTargetRunDetail(runtime.url, 'market-a-sim', runB);
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).not.toContain('SOURCE_CANARY');
+      expect(detailB.knowledgeQualification?.missingKnowledge
+        .some(item => item.reasonCode === 'KNOWLEDGE_SOURCE_REVOKED')).toBe(true);
+      expect(detailB.knowledgeQualification?.diagnosisReady).toBe(true);
+    } finally {
+      await runtime.close();
+      await simulator.close();
+    }
+  }, 20_000);
+
+  it('gates the diagnosis when required knowledge becomes unavailable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsagent-target-required-gate-'));
+    roots.push(root);
+    const simulator = await startLocalTargetSimulator({ metricsPort: 0, logsPort: 0, legacyMetricsPort: 0 });
+    const original = await readLocalTargetHostConfig(examplePath);
+    const config = { ...original, connections: { ...original.connections,
+      connections: original.connections.connections.map(item => ({ ...item,
+        endpoint: item.kind === 'metrics' ? simulator.metricsUrl : simulator.logsMcpUrl })) } };
+    const local = createLocalTargetRuntime(config, 'local-required-gate-cursor-secret-over-32-bytes');
+    const memoryPath = fileURLToPath(new URL('../examples/local-inspection-memory.json', import.meta.url));
+    const memoryConfig = parseDiagnosticMemoryConfig(JSON.parse(await readFile(memoryPath, 'utf8')) as unknown);
+    const prompts: string[] = [];
+    const model: ChatModel = { stream: async function* (messages: AgentMessage[]): AsyncGenerator<ModelStreamEvent, ModelResponse> {
+      prompts.push(messages.flatMap(message => message.blocks.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n'));
+      const text = '受治理必需知识门禁已读取。';
+      yield { type: 'text_delta', delta: text };
+      return { text, toolCalls: [] };
+    } };
+    const fixedNow = Date.parse('2026-10-22T12:00:00.000Z');
+    const runtime = await startHost(root, local, model, fixedNow, simulator,
+      'local-required-gate-cursor-secret-over-32-bytes', memoryConfig);
+    try {
+      const source = { sourceId: 'local-settlement-runbook', sourceVersion: 'v1', digest: 'c'.repeat(64) };
+      const semantic = await createApprovedKnowledge(runtime.url, 'semantic', source, {
+        type: 'metric_definition', metricName: 'required_canary_metric',
+        businessMeaning: 'REQUIRED_CANARY: this knowledge is required for a ready diagnosis.',
+        unit: 'events', labels: [], allowedAggregations: ['count'], windowSemantics: ['fixed_window'],
+        sourceReferences: [source],
+      });
+      const publish = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/publication`, { method: 'POST',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: 'publish-required-knowledge',
+          expectedPublicationVersion: 0, references: [{ id: semantic.id, version: String(semantic.contentRevision),
+            digest: semantic.contentDigest, approval: 'approved' }] }) });
+      expect(publish.status).toBe(200);
+
+      const policy = await setKnowledgePolicy(runtime.url, 'market-a-sim', {
+        requestId: 'require-required-canary',
+        policyVersion: 'required/v1',
+        expectedPolicyEpoch: null,
+        requirements: [{ id: semantic.id, version: String(semantic.contentRevision), digest: semantic.contentDigest,
+          requiredness: 'required', knowledgeClass: 'semantic' }],
+      });
+      expect(policy.policyEpoch).toBe(1);
+      expect(policy.requirements).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: semantic.id, requiredness: 'required' }),
+      ]));
+
+      const runA = await startTargetRun(runtime.url, 'market-a-sim', 'run-with-required-knowledge');
+      const detailA = await waitForTargetRunDetail(runtime.url, 'market-a-sim', runA);
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain('REQUIRED_CANARY');
+      expect(detailA.knowledgeQualification?.diagnosisReady).toBe(true);
+
+      const revoke = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/semantic/${encodeURIComponent(semantic.id)}/revoke`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ requestId: 'revoke-required-canary', contentRevision: semantic.contentRevision,
+          expectedGovernanceVersion: semantic.governanceVersion }),
+      });
+      expect(revoke.status).toBe(200);
+
+      const runB = await startTargetRun(runtime.url, 'market-a-sim', 'run-with-missing-required-knowledge');
+      const detailB = await waitForTargetRunDetail(runtime.url, 'market-a-sim', runB);
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).not.toContain('REQUIRED_CANARY');
+      expect(detailB.knowledgeQualification?.diagnosisReady).toBe(false);
+      expect(detailB.knowledgeQualification?.missingKnowledge
+        .some(item => item.reasonCode === 'KNOWLEDGE_REVOKED' && item.requiredness === 'required')).toBe(true);
+    } finally {
+      await runtime.close();
+      await simulator.close();
+    }
+  }, 20_000);
 });
 
 function waitForServerReady(child: ReturnType<typeof spawn>): Promise<{ url: string }> {
@@ -600,6 +782,62 @@ async function createApprovedKnowledge(url: string, kind: 'semantic' | 'procedur
   return await request(`${encodeURIComponent(draft.id)}/review`, `review-${kind}-${requestSuffix}`, {
     contentRevision: submitted.contentRevision, governanceVersion: submitted.governanceVersion, decision: 'approve',
   });
+}
+
+async function createRejectedKnowledge(url: string, kind: 'semantic' | 'procedural',
+  source: { sourceId: string; sourceVersion: string; digest: string }, content: unknown,
+  options: { requestSuffix?: string } = {}) {
+  const path = `${url}/targets/market-a-sim/knowledge/${kind}`;
+  const requestSuffix = options.requestSuffix ?? 'host-reject';
+  const request = async (route: string, requestId: string, body: Record<string, unknown>) => {
+    const response = await fetch(`${path}/${route}`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId, ...body }) });
+    if (!response.ok) throw new Error(`Knowledge ${route} returned ${response.status}: ${await response.text()}`);
+    return await response.json() as { id: string; contentRevision: number; governanceVersion: number;
+      contentDigest: string; status: string };
+  };
+  const draft = await request('drafts', `draft-${kind}-${requestSuffix}`, { source, content });
+  const submitted = await request(`${encodeURIComponent(draft.id)}/submit`, `submit-${kind}-${requestSuffix}`, {
+    contentRevision: draft.contentRevision, governanceVersion: draft.governanceVersion,
+  });
+  return request(`${encodeURIComponent(draft.id)}/review`, `review-${kind}-${requestSuffix}`, {
+    contentRevision: submitted.contentRevision, governanceVersion: submitted.governanceVersion, decision: 'reject',
+  });
+}
+
+async function revokeKnowledgeSource(url: string, sourceId: string, sourceVersion: string, expectedSourceEpoch: number,
+  requestId: string) {
+  const response = await fetch(`${url}/targets/market-a-sim/knowledge/sources/${encodeURIComponent(sourceId)}/revoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ requestId, sourceVersion, expectedSourceEpoch }),
+  });
+  if (!response.ok) throw new Error(`Source revoke returned ${response.status}: ${await response.text()}`);
+  return await response.json() as { sourceId: string; dataDomainId: string; sourceEpoch: number;
+    sourceDigest: string; validity: string };
+}
+
+async function setKnowledgePolicy(url: string, targetId: string, input: { requestId: string; policyVersion: string;
+  expectedPolicyEpoch: number | null; requirements: readonly { id: string; version: string; digest: string;
+  requiredness: 'optional' | 'required'; knowledgeClass?: 'semantic' | 'procedural' }[] }) {
+  const response = await fetch(`${url}/targets/${targetId}/knowledge/policy`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(`Policy update returned ${response.status}: ${await response.text()}`);
+  return await response.json() as { targetId: string; policyVersion: string; policyEpoch: number;
+    requirements: readonly { id: string; requiredness: string }[] };
+}
+
+async function waitForTargetRunDetail(url: string, targetId: string, runId: string) {
+  let detail: { status: string; childRunIds: readonly string[]; knowledgeQualification?: {
+    diagnosisReady: boolean; missingKnowledge: readonly { reasonCode: string; requiredness: string }[] } } | undefined;
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const response = await fetch(`${url}/targets/${targetId}/runs/${encodeURIComponent(runId)}`);
+    detail = await response.json() as typeof detail;
+    if (detail?.status === 'completed' || detail?.status === 'failed') break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  expect(detail?.status, JSON.stringify(detail)).toBe('completed');
+  return detail!;
 }
 
 async function startTargetRun(url: string, targetId: string, requestId: string): Promise<string> {

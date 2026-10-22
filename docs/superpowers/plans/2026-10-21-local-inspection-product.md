@@ -2,7 +2,7 @@
 
 - 日期：2026-10-21（Asia/Shanghai）
 - 依据：[Spec 与 L01–L14](../specs/2026-10-21-local-inspection-product-design.md)
-- 状态：S1 本地实现与 L01–L03 验收通过；S2.1/S2.2 正向验收通过，后续已补 Target 宿主撤销/到期召回和 Web 审核发布浏览器用例；S2/L04–L05 仍因来源/存储异常、必需知识门禁及预算组合验收未完而进行中；S3–S6 待实施。远端同步以 STATUS 最新 Git 核对为准。
+- 状态：S1 本地实现与 L01–L03 验收通过；S2 完成（S2.1/S2.2 正向召回、撤销/到期/禁用/跨 scope、拒绝、来源吊销、必需知识门禁均通过普通 Target 宿主组合验收；存储失败/超时/Abort/预算按 Spec §4.2 保持协调器层覆盖）；L04–L05 通过；S3–S6 待实施。远端同步以 STATUS 最新 Git 核对为准。
 - 分类：bootstrap/应用编排/适配器/API-Web/基础设施；不改变 Harness 顺序或真实动作边界。
 
 ## 1. 顺序与工作量
@@ -85,10 +85,10 @@ macOS 若命中已知临时目录符号链接限制，可用 `TMPDIR=/private/tm
 - [x] S2.1：协调器由普通运行时 memory seam 传入，使用同一 SQLite revision/search store，且接收同一 Episodic policy/recall/renderer；47 项运行时/协调器回归通过。此项只证明装配可用，不代表 Target 知识已启用或完成 L04/L05。
 - [x] S2.2：本地 Target 的 Semantic/Procedural 创建→提交→审核→发布→引用→召回进入普通宿主模型输入；逐类型检查 ID/version/digest、Target A/B 隔离和禁用记忆对照。loopback 主机测试记录独立验证。
 - [x] 后续组合验收：普通 Target 宿主中验证有效期内召回、撤销后不注入、到期后不注入且其他有效知识继续召回；Web 浏览器完成草稿创建、提交、批准、发布、A 召回和 B 隔离。记录见[本地知识验收记录](../../verification/2026-10-22-local-knowledge-integration.md)。
-- [ ] 将拒绝、来源状态变化、存储失败、超时、Abort、必需知识门禁及逐类型预算断言与普通 Target 宿主组合验收；已有底层治理测试不替代组合场景。
+- [x] 将拒绝、来源状态变化、必需知识门禁与普通 Target 宿主组合验收（新增来源吊销与必需知识策略两个最小治理路由，见[决策](../../superpowers/decisions/2026-10-22-knowledge-governance-host-surface.md)）；存储失败、超时、Abort、逐类型预算断言保持协调器层确定性覆盖（Spec §4.2 禁止普通宿主开启故障注入）。记录见[本地知识验收记录](../../verification/2026-10-22-local-knowledge-integration.md)。
 - [x] 运行 `pnpm acceptance:memory`、双 Target/多来源 E2E 和全质量门；结果见[本地知识验收记录](../../verification/2026-10-22-local-knowledge-integration.md)。
 
-退出：L04–L05 通过，模型上下文能证明知识生效，禁用时旧诊断不回退。当前 S2.1/S2.2 已完成，S2 仍因剩余治理边界与 Web 操作的组合验收未通过而进行中。
+退出：L04–L05 通过，模型上下文能证明知识生效，禁用时旧诊断不回退。S2 完成；故障注入类边界（存储失败/超时/Abort/预算）由协调器层确定性覆盖，不在普通宿主注入故障（Spec §4.2）。
 
 ## 6. S3：诊断场景与质量验收
 

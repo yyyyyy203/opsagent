@@ -292,6 +292,18 @@ function createLocalKnowledgeHost(config: NonNullable<LocalTargetHostConfig['kno
     return { actorId: 'local-operator', scope: context.scope };
   };
   const reviewAttestation = { resolveForReview: () => Promise.resolve({ sourceVerified: true, scopeVerified: true, contentReviewed: true }) };
+  const sourceGovernance = {
+    resolve: ({ targetId, sourceId, sourceVersion }: { targetId: string; sourceId: string; sourceVersion: string }) => {
+      if (!targetIds.has(targetId)) throw new KnowledgeContractError('KNOWLEDGE_SCOPE_INVALID');
+      const source = config.sources.find(item => item.sourceId === sourceId && item.sourceVersion === sourceVersion);
+      if (source === undefined) {
+        const sourceExists = config.sources.some(item => item.sourceId === sourceId);
+        throw new KnowledgeContractError(sourceExists ? 'KNOWLEDGE_DIGEST_MISMATCH' : 'KNOWLEDGE_NOT_FOUND');
+      }
+      if (!source.allowedTargetIds.includes(targetId)) throw new KnowledgeContractError('KNOWLEDGE_SCOPE_INVALID');
+      return Promise.resolve({ dataDomainId: source.dataDomainId, sourceDigest: source.sourceDigest });
+    },
+  };
   return {
     capabilities: knowledgeCapabilities,
     management: {
@@ -302,6 +314,7 @@ function createLocalKnowledgeHost(config: NonNullable<LocalTargetHostConfig['kno
       semanticReviewAttestations: reviewAttestation,
       proceduralReviewAttestations: reviewAttestation,
       publicationContexts: contextPort,
+      sourceGovernance,
     },
   } satisfies {
     capabilities: TargetKnowledgeCapabilityPort;

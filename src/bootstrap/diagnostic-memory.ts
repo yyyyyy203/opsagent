@@ -19,7 +19,7 @@ import { ProceduralTemplateService, type ProceduralReviewAttestationPort, type P
 import type { SemanticSourceRegistry } from '../memory/semantic-source-registry.js';
 import type { Clock, IdGenerator } from '../contracts/common.js';
 import type { TargetKnowledgeCapabilityPort, TargetKnowledgePolicyStore } from '../contracts/target.js';
-import type { TargetKnowledgePublicationContextPort, TargetKnowledgePublicationStorage,
+import type { KnowledgeSourceGovernanceContextPort, TargetKnowledgePublicationContextPort, TargetKnowledgePublicationStorage,
   TargetKnowledgeRevisionStorage } from '../contracts/knowledge-memory-storage.js';
 import type { MemoryCoordinatorPort, EpisodicMemoryCoordinatorPorts } from '../contracts/diagnostic-memory.js';
 
@@ -31,6 +31,7 @@ export interface TargetKnowledgeManagementHostOptions {
   readonly semanticReviewAttestations: SemanticReviewAttestationPort;
   readonly proceduralReviewAttestations: ProceduralReviewAttestationPort;
   readonly publicationContexts: TargetKnowledgePublicationContextPort;
+  readonly sourceGovernance: KnowledgeSourceGovernanceContextPort;
 }
 
 export interface TargetKnowledgeManagementAssemblyOptions extends TargetKnowledgeManagementHostOptions {
@@ -64,7 +65,8 @@ export function createTargetKnowledgeManagementService(options: TargetKnowledgeM
     ...(options.clock === undefined ? {} : { clock: options.clock }) });
   return new KnowledgeManagementService({ targets: options.targets, revisions: options.revisions,
     publications: options.publications, policies: options.policies, capabilities: options.capabilities,
-    semantic, procedural, publicationService, ...(options.clock === undefined ? {} : { clock: options.clock }),
+    semantic, procedural, publicationService, sourceGovernance: options.sourceGovernance,
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.ids === undefined ? {} : { ids: options.ids }) });
 }
 

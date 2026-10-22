@@ -72,6 +72,8 @@ describe('Target-scoped governed knowledge API', () => {
         return current;
       },
       revoke: async () => { current = { ...current, status: 'revoked', governanceVersion: current.governanceVersion + 1 }; return current; },
+      revokeSource: async () => { throw new Error('unexpected'); },
+      updatePolicy: async () => { throw new Error('unexpected'); },
       publish: async (targetId, input) => {
         publication = { targetId, publicationVersion: (publication?.publicationVersion ?? 0) + 1,
           references: input.references, policy, publishedAt: '2026-10-12T00:01:00.000Z' };

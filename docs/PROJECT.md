@@ -35,7 +35,7 @@ pnpm web:build
 
 ## 迭代方式
 
-当前产品里程碑按[本地多项目只读巡检系统 Spec](./superpowers/specs/2026-10-21-local-inspection-product-design.md)与[实施计划 S0–S6](./superpowers/plans/2026-10-21-local-inspection-product.md)推进：S1 普通宿主 Target 双来源接线已在本地模拟环境通过 L01–L03；S2.1 MemoryCoordinator 装配和 S2.2 本地 Semantic/Procedural 审核发布及实际模型输入已实现，跨 Target、重启、关闭、撤销、到期及 Web 治理闭环均有组合验收。S2 仍缺拒绝后不注入、来源状态变化、治理存储故障/超时、显式 Abort、required 知识缺失门禁及逐类型预算边界断言，L04–L05 继续进行中。详见[本地知识验收记录](./verification/2026-10-22-local-knowledge-integration.md)。S3 场景与模型质量、S4 持久化周期巡检、S5 站内结果处理、S6 本地运行/恢复/发布尚未实施。真实模型质量与离线工程通过分开验收；对外认证授权、真实告警/通知渠道及真实业务接入另立里程碑。
+当前产品里程碑按[本地多项目只读巡检系统 Spec](./superpowers/specs/2026-10-21-local-inspection-product-design.md)与[实施计划 S0–S6](./superpowers/plans/2026-10-21-local-inspection-product.md)推进：S1 普通宿主 Target 双来源接线已在本地模拟环境通过 L01–L03；S2 已完成 L04–L05——MemoryCoordinator 装配、Semantic/Procedural 审核发布与模型输入、跨 Target/重启/关闭/撤销/到期、Web 治理闭环，以及拒绝后不注入、来源吊销、必需知识门禁均在普通 Target 宿主组合验收通过；存储失败/超时/Abort/预算保持协调器层确定性覆盖（Spec §4.2 禁止普通宿主故障注入）。详见[本地知识验收记录](./verification/2026-10-22-local-knowledge-integration.md)与[治理主机面决策](./superpowers/decisions/2026-10-22-knowledge-governance-host-surface.md)。S3 场景与模型质量、S4 持久化周期巡检、S5 站内结果处理、S6 本地运行/恢复/发布尚未实施。真实模型质量与离线工程通过分开验收；对外认证授权、真实告警/通知渠道及真实业务接入另立里程碑。
 
 前轮[多来源韧性计划](./superpowers/plans/2026-10-21-multisource-memory-resilience.md)的 A–D 已有本地实现与验收记录，后续接线复用并回归这些机制，不再把 R08/R09、Clock 或独立用例隔离列为未实现。GitHub 交付结果以最新 STATUS 为准。所有常规验收继续使用本地模拟服务，不重新部署或修改 `group-buy-market`。M2b 仍需可证明身份的旧数据；记忆审核 API 对外开放前须完成身份与授权设计。
 

@@ -133,6 +133,11 @@ function setup(backend: 'memory' | 'sqlite' = 'memory') {
         semanticReviewAttestations: review,
         proceduralReviewAttestations: review,
         publicationContexts: { resolvePublicationContext: async () => ({ registryVersion: 1, scope, hostPolicy: null }) },
+        sourceGovernance: { resolve: async ({ targetId, sourceId, sourceVersion }) => {
+          const expectedDigest = sourceId === source.sourceId ? digest : secondarySource.digest;
+          const entry = sourceRegistry.resolve({ targetId, reference: { sourceId, sourceVersion, digest: expectedDigest } });
+          return { dataDomainId: entry.dataDomainId, sourceDigest: entry.sourceDigest };
+        } },
         revisions: store,
         publications: memoryStore,
         policies: { get: async () => null, compareAndSet: async () => { throw new Error('unused policy write'); } },

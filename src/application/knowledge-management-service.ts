@@ -1,9 +1,10 @@
 import type { Clock, IdGenerator } from '../contracts/common.js';
 import { randomIdGenerator, systemClock } from '../contracts/common.js';
 import { KnowledgeContractError, type KnowledgeKind, type KnowledgeRevision, type KnowledgeScope, type KnowledgeStatus } from '../contracts/knowledge-memory.js';
-import type { TargetKnowledgeReference } from '../contracts/target.js';
+import { TargetConfigurationError, type TargetKnowledgePolicy, type TargetKnowledgeReference, type TargetKnowledgeRequirement } from '../contracts/target.js';
 import type { KnowledgePublicationInspectionPort, KnowledgeGovernanceTransitionStore,
-  KnowledgeRevisionStateQueryPort, KnowledgeScopedListPort } from '../contracts/knowledge-memory-storage.js';
+  KnowledgeRevisionStateQueryPort, KnowledgeScopedListPort, KnowledgeSourceGovernanceContextPort,
+  KnowledgeSourceGovernanceStore, KnowledgeSourceState } from '../contracts/knowledge-memory-storage.js';
 import type { TargetKnowledgeCapabilityPort, TargetKnowledgePolicyStore } from '../contracts/target.js';
 import { checkpointChecksum } from '../contracts/stable-json.js';
 import type { SemanticKnowledgeService, CreateSemanticDraftRequest, ReviseSemanticDraftRequest,
@@ -21,13 +22,16 @@ export interface KnowledgeManagementTargetContextPort {
 
 export interface KnowledgeManagementServiceOptions {
   readonly targets: KnowledgeManagementTargetContextPort;
-  readonly revisions: KnowledgeScopedListPort & KnowledgeRevisionStateQueryPort & KnowledgeGovernanceTransitionStore;
+  readonly revisions: KnowledgeScopedListPort & KnowledgeRevisionStateQueryPort & KnowledgeGovernanceTransitionStore
+    & KnowledgeSourceGovernanceStore;
   readonly publications: KnowledgePublicationInspectionPort;
   readonly policies: TargetKnowledgePolicyStore;
   readonly capabilities: TargetKnowledgeCapabilityPort;
   readonly semantic: SemanticKnowledgeService;
   readonly procedural: ProceduralTemplateService;
   readonly publicationService: TargetKnowledgePublicationService;
+  /** Host-owned source identity resolution for source governance commands. */
+  readonly sourceGovernance: KnowledgeSourceGovernanceContextPort;
   readonly clock?: Clock;
   readonly ids?: IdGenerator;
 }
@@ -137,5 +141,48 @@ export class KnowledgeManagementService {
   public publish(targetId: string, input: { requestId: string; expectedPublicationVersion: number;
     references: readonly TargetKnowledgeReference[] }) {
     return this.options.publicationService.publish({ ...input, targetId });
+  }
+
+  /** Operator revokes a knowledge source; scope, actor, data domain and digest are all host-resolved. */
+  public async revokeSource(targetId: string, input: { requestId: string; sourceId: string; sourceVersion: string;
+    expectedSourceEpoch: number }): Promise<KnowledgeSourceState> {
+    const context = await this.options.targets.resolveForTarget({ targetId, requestId: input.requestId });
+    if (context.scope.targetId !== targetId) throw new KnowledgeContractError('KNOWLEDGE_SCOPE_INVALID');
+    const source = await this.options.sourceGovernance.resolve({
+      targetId, sourceId: input.sourceId, sourceVersion: input.sourceVersion });
+    return this.options.revisions.transitionSource({
+      requestId: input.requestId, actorId: context.actorId, sourceId: input.sourceId,
+      dataDomainId: source.dataDomainId, expectedSourceEpoch: input.expectedSourceEpoch,
+      transition: 'revoked', sourceDigest: source.sourceDigest, occurredAt: this.clock.now().toISOString(),
+    });
+  }
+
+  /** Operator overwrites the host knowledge policy; required entries must reference published knowledge. */
+  public async updatePolicy(targetId: string, input: { requestId: string; policyVersion: string;
+    expectedPolicyEpoch: number | null; requirements: readonly TargetKnowledgeRequirement[] }): Promise<TargetKnowledgePolicy> {
+    const context = await this.options.targets.resolveForTarget({ targetId, requestId: input.requestId });
+    if (context.scope.targetId !== targetId) throw new KnowledgeContractError('KNOWLEDGE_SCOPE_INVALID');
+    const binding = await this.options.publications.inspectBinding(targetId);
+    const published = binding.publication?.references ?? [];
+    for (const requirement of input.requirements) {
+      const matches = published.some(reference => reference.id === requirement.id
+        && reference.version === requirement.version && reference.digest === requirement.digest);
+      if (!matches) throw new KnowledgeContractError('KNOWLEDGE_NOT_FOUND');
+      if (requirement.requiredness === 'required' && requirement.knowledgeClass === undefined) {
+        throw new KnowledgeContractError('KNOWLEDGE_REQUIRED_DISABLED');
+      }
+    }
+    try {
+      return await this.options.policies.compareAndSet({
+        targetId, policyVersion: input.policyVersion, requirements: input.requirements,
+        expectedPolicyEpoch: input.expectedPolicyEpoch, publishedAt: this.clock.now().toISOString(),
+      });
+    } catch (error) {
+      if (error instanceof TargetConfigurationError) {
+        throw new KnowledgeContractError(error.code === 'TARGET_IDENTITY_CONFLICT'
+          ? 'KNOWLEDGE_PUBLICATION_CONFLICT' : 'KNOWLEDGE_RECORD_INVALID');
+      }
+      throw error;
+    }
   }
 }

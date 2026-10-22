@@ -10,6 +10,12 @@
 - **理由：** 普通本地 Target 宿主已有治理端点但没有审核者/发布者装配，导致本地批准流程无法完成。
 - **影响：** 不改变知识资格规则、公共请求 DTO 或 SQLite Schema；该模式只适用于 loopback 单操作员。对外或多用户部署前必须替换为身份/角色授权。详见[决策记录](./superpowers/decisions/2026-10-22-local-operator-knowledge-governance.md)。
 
+### 2026-10-22：普通宿主知识治理主机面（来源吊销与必需知识策略）
+
+- **选择：** 在 loopback 本地宿主新增两个最小治理路由：来源吊销 `POST /targets/:id/knowledge/sources/:sourceId/revoke` 与必需知识策略 `PUT /targets/:id/knowledge/policy`；scope、actor、来源 dataDomainId/digest 全部由宿主可信配置解析，调用方只提供选择器与 epoch。
+- **理由：** 持久化层已具备 `transitionSource` 与 `compareAndSet`（含 CAS、审计、outbox），但普通宿主没有触发入口，导致来源状态变化与必需知识门禁无法与正式 bootstrap 组合验收。
+- **影响：** 不改变发布/审核/召回语义、持久化 Schema、事件契约或 Harness 顺序；故障注入仍按 Spec §4.2 禁止在普通宿主开启。详见[决策记录](./superpowers/decisions/2026-10-22-knowledge-governance-host-surface.md)。
+
 ### 2026-10-21：持续使用本地模拟 Metrics+Logs 验收
 
 - **选择：** 后续常规开发和验收始终使用本地模拟指标与日志；不为验证 Agent 重新部署或更改 `group-buy-market`，也不把真实业务数据源接入作为验收前提。

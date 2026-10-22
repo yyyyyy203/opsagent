@@ -12,6 +12,10 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 ### 后续推进记录（2026-10-22）
 
+- S2 收尾完成：按用户确认的“完整闭环”方案，新增两个最小治理路由（来源吊销 `POST /targets/:id/knowledge/sources/:sourceId/revoke`、必需知识策略 `PUT /targets/:id/knowledge/policy`）并落[设计决策](./superpowers/decisions/2026-10-22-knowledge-governance-host-surface.md)，补齐普通 Target 宿主的拒绝后不注入、来源吊销后不注入、必需知识缺失门禁三条组合验收。存储失败/超时/Abort/预算按 Spec §4.2 保持协调器层确定性覆盖，不在普通宿主注入故障。
+- 本轮实际检查（使用 DSH 运行时 Node 的 ad-hoc 副本规避 macOS 代码签名 Team ID 不匹配，`/tmp/dsh-node-unsigned`，不污染仓库）：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build` 通过；`pnpm exec vitest run test/local-target-runtime-host.test.ts` 8/8 通过（含 3 条新组合用例）；`test/knowledge-memory-api.test.ts test/procedural-template-service.test.ts test/memory-coordinator.test.ts test/target-knowledge-publication.test.ts test/knowledge-memory-contract.test.ts` 125/125 通过；全量 `TMPDIR=/private/tmp pnpm test` 218 文件通过、5 个 opt-in 文件跳过，2262 项通过、9 项跳过。
+- 改动包括 `src/contracts/knowledge-memory-storage.ts`、`src/application/knowledge-management-service.ts`、`src/bootstrap/diagnostic-memory.ts`、`src/bootstrap/local-target-runtime.ts`、`src/api/knowledge-memory-routes.ts`、`test/local-target-runtime-host.test.ts`、`test/knowledge-memory-api.test.ts`、`test/procedural-template-service.test.ts`，以及计划/验收/决策/状态文档。
+
 - 按 S2 计划继续补普通 Target 宿主生命周期组合验收：有效期内 A 召回三条已发布知识；撤销 Procedural 后不再注入；推进固定 Clock 并重启后过期 Semantic 不再注入、未过期 Semantic 仍可召回；记忆关闭后所有三条均不注入。新增的 Web 浏览器闭环通过草稿、提交审核、批准、发布、A 模型输入确认及 B 隔离。
 - 本轮实际检查：`pnpm lint`、`pnpm typecheck`、`pnpm web:typecheck` 通过；`pnpm e2e:local-inspection` 重跑 2/2 通过（首次双 Target 案例有一次模拟 Metrics 瞬态未产出证据）；`TMPDIR=/private/tmp pnpm test` 全量 218 文件通过、5 个 opt-in 文件跳过，2259 项通过、9 项跳过。全量测试在默认沙箱第一次运行受 loopback `EPERM` 影响，提升本机回环权限后重跑通过。详细结果见[验收记录](./verification/2026-10-22-local-knowledge-integration.md)。
 - 本轮改动包括宿主生命周期测试、Web 测试夹具/用例、S2 Plan 与验收/状态文档，已独立提交为 `de1c6424da635cf4a5e3a9d757b1690a3da48776` 并推送。推送前远端为 `db6b719b7796ca9f6969c4bdebcf1f8d7f69fdd5`；推送后 `git ls-remote` 与本地 HEAD 均为 `de1c6424da635cf4a5e3a9d757b1690a3da48776`，工作区干净。

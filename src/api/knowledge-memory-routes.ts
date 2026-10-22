@@ -8,7 +8,7 @@ import type { KnowledgeManagementService } from '../application/knowledge-manage
 
 export type KnowledgeManagementApi = Pick<KnowledgeManagementService,
   'list' | 'targetStatus' | 'createSemanticDraft' | 'reviseSemanticDraft' | 'createProceduralDraft'
-  | 'reviseProceduralDraft' | 'submitForReview' | 'review' | 'revoke' | 'publish'>;
+  | 'reviseProceduralDraft' | 'submitForReview' | 'review' | 'revoke' | 'publish' | 'revokeSource' | 'updatePolicy'>;
 
 const id = safeKnowledgeIdentifierSchema;
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -29,6 +29,14 @@ const revokeBody = z.object({ requestId: id, contentRevision: z.number().int().p
   expectedGovernanceVersion: z.number().int().positive().safe() }).strict();
 const publishBody = z.object({ requestId: id, expectedPublicationVersion: z.number().int().nonnegative().safe(),
   references: z.array(reference).max(20) }).strict();
+const sourceRevokeBody = z.object({ requestId: id, sourceVersion: id,
+  expectedSourceEpoch: z.number().int().nonnegative().safe() }).strict();
+const policyVersion = z.string().min(1).max(128).regex(/^[\p{L}\p{N}][\p{L}\p{N}._:/-]*$/u)
+  .refine(value => !value.includes('://'));
+const policyRequirement = z.object({ id, version: z.string().regex(/^[1-9]\d*$/u), digest,
+  requiredness: z.enum(['optional', 'required']), knowledgeClass: z.enum(['semantic', 'procedural']).optional() }).strict();
+const policyBody = z.object({ requestId: id, policyVersion, expectedPolicyEpoch: z.number().int().nonnegative().safe().nullable(),
+  requirements: z.array(policyRequirement).max(20) }).strict();
 const statuses = ['draft', 'review_pending', 'approved', 'rejected', 'revoked', 'expired', 'conflict', 'superseded'] as const;
 const knowledgePath = /^\/targets\/([^/]+)\/knowledge(?:\/(.*))?$/u;
 
@@ -68,6 +76,24 @@ export async function handleKnowledgeMemoryRoute(request: IncomingMessage, respo
     if (method === 'GET' && action === 'publication') {
       queryKeys(url, []);
       json(response, 200, await api.targetStatus(targetId));
+      return true;
+    }
+    if (method === 'PUT' && action === 'policy') {
+      queryKeys(url, []);
+      const body = await readRequestBody();
+      const input = policyBody.parse(body);
+      json(response, 200, await api.updatePolicy(targetId, {
+        requestId: input.requestId,
+        policyVersion: input.policyVersion,
+        expectedPolicyEpoch: input.expectedPolicyEpoch,
+        requirements: input.requirements.map(requirement => ({
+          id: requirement.id,
+          version: requirement.version,
+          digest: requirement.digest,
+          requiredness: requirement.requiredness,
+          ...(requirement.knowledgeClass === undefined ? {} : { knowledgeClass: requirement.knowledgeClass }),
+        })),
+      }));
       return true;
     }
     if (method !== 'POST') throw fail('NOT_FOUND', 404);
@@ -141,6 +167,13 @@ export async function handleKnowledgeMemoryRoute(request: IncomingMessage, respo
     if (action === 'publication') {
       const input = publishBody.parse(body);
       json(response, 200, await api.publish(targetId, input));
+      return true;
+    }
+    const sourceRevokeMatch = /^sources\/([^/]+)\/revoke$/u.exec(action);
+    if (sourceRevokeMatch !== null) {
+      const sourceId = pathId(sourceRevokeMatch[1]!);
+      const input = sourceRevokeBody.parse(body);
+      json(response, 200, await api.revokeSource(targetId, { ...input, sourceId }));
       return true;
     }
     throw fail('NOT_FOUND', 404);

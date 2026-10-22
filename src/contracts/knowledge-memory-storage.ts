@@ -108,6 +108,11 @@ export interface KnowledgeSourceGovernanceStore {
   transitionSource(command: KnowledgeSourceTransitionCommand): Promise<KnowledgeSourceState>;
 }
 
+/** Host-owned source identity resolution for governance transitions; never accepts a caller-built digest or scope. */
+export interface KnowledgeSourceGovernanceContextPort {
+  resolve(input: { targetId: string; sourceId: string; sourceVersion: string }): Promise<{ dataDomainId: string; sourceDigest: string }>;
+}
+
 export interface KnowledgeScopedSearchRequest {
   readonly kind: KnowledgeKind;
   readonly scope: KnowledgeScope;

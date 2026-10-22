@@ -44,3 +44,17 @@
 本次验证：`pnpm exec vitest run test/local-target-runtime-host.test.ts -t 'publishes Semantic and Procedural knowledge'` 1 项通过；`pnpm e2e:local-inspection` 首次运行时双 Target 案例遇到一次模拟 Metrics 未产出证据，随即重跑 2/2 通过（知识浏览器用例两次均通过）；`pnpm lint`、`pnpm typecheck`、`pnpm web:typecheck` 通过；`TMPDIR=/private/tmp pnpm test` 全量 218 文件通过、5 个 opt-in 文件跳过，2259 项通过、9 项跳过。第一次在默认沙箱中运行全量测试因 loopback `EPERM` 造成 101 项失败，不计为代码回归；在允许本机 loopback 后完整重跑通过。E2E 同样仅访问本地模拟服务。
 
 仍待完成：Target 普通宿主中的拒绝后不注入、来源状态撤销/变化、知识存储故障和超时组合、显式取消/Abort 路径、required 知识缺失时的 Run 门禁，以及 Semantic/Procedural/Episodic 的独立输入预算边界断言。协调器层已有 required、存储失败、deadline 和 Abort 单测，但不替代宿主组合验收。S2/L04–L05 不因此标为完成。
+
+## 2026-10-22 治理边界组合验收（拒绝 / 来源吊销 / 必需知识门禁）
+
+本次补齐普通 Target 宿主剩余的治理边界组合验收，并为此新增两个最小治理路由（见[设计决策](../../superpowers/decisions/2026-10-22-knowledge-governance-host-surface.md)）：
+
+1. **拒绝后不注入**：Semantic 草稿提交后以 `decision:'reject'` 审核，状态为 `rejected`；用该引用发布返回 422（`KNOWLEDGE_APPROVAL_DENIED`）；随后 A 的 Run 模型输入不含该 canary。
+2. **来源状态变化**：发布一条绑定 `local-settlement-runbook` 的 Semantic 知识并验证注入；通过 `POST /targets/market-a-sim/knowledge/sources/local-settlement-runbook/revoke`（`expectedSourceEpoch:0`）吊销来源后，下一次 Run 不再注入，Run 资格 `missingKnowledge` 含 `KNOWLEDGE_SOURCE_REVOKED` 且 `diagnosisReady` 仍为 `true`（可选知识降级）。
+3. **必需知识门禁**：发布 Semantic 后通过 `PUT /targets/market-a-sim/knowledge/policy`（`policyVersion:'required/v1'`，`requiredness:'required'`，`knowledgeClass:'semantic'`）把知识标记为必需；验证 `policyEpoch:1` 且知识仍注入、`diagnosisReady:true`；再用既有 revoke 路由吊销该知识后，下一次 Run 不再注入、`diagnosisReady:false`、`missingKnowledge` 含 `KNOWLEDGE_REVOKED` 且 `requiredness:'required'`。
+
+以上三条均通过普通 `apps/agent-server` 正式 bootstrap（真实 SQLite、真实 Resolver/OperationPolicy/RuntimeProvider、loopback 模拟 Metrics/Logs 来源），模型输入通过 ScriptedModel 实际录制，Run 资格通过 `/targets/:id/runs/:id` 的 `knowledgeQualification` 断言。
+
+存储失败 / 超时 / Abort / 逐类型预算仍保持协调器层确定性覆盖（`memory-coordinator.test.ts` 已断言 required 门禁、存储失败、deadline、Abort、预算）；Spec §4.2 明确禁止普通宿主开启故障控制/测试时钟，因此这些故障注入不与正式宿主组合。Episodic 正向召回沿用多来源记忆既有验收（simulation Profile），本轮未在 Target 宿主重测。
+
+本轮检查：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build` 通过；`pnpm exec vitest run test/local-target-runtime-host.test.ts` 8/8 通过（含 3 条新组合用例）；`pnpm exec vitest run test/knowledge-memory-api.test.ts test/procedural-template-service.test.ts test/memory-coordinator.test.ts test/target-knowledge-publication.test.ts test/knowledge-memory-contract.test.ts` 125/125 通过；全量 `TMPDIR=/private/tmp pnpm test` 218 文件通过、5 个 opt-in 文件跳过，2262 项通过、9 项跳过。未运行浏览器 E2E（本轮改动仅核心治理路由与主机级测试，未触碰 Web 前端）。
