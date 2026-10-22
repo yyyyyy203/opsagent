@@ -239,5 +239,28 @@
       },
       "policyVersion": "local-simulation-v1"
     }
-  ]
+  ],
+  "knowledge": {
+    "enabledTargetIds": ["market-a-sim", "market-b-sim"],
+    "sources": [
+      {
+        "sourceType": "controlled_runbook",
+        "sourceId": "local-settlement-runbook",
+        "sourceVersion": "v1",
+        "sourceDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "dataDomainId": "local-settlement-runbook-v1",
+        "allowedTargetIds": ["market-a-sim", "market-b-sim"]
+      }
+    ],
+    "proceduralCapabilities": [
+      {
+        "capabilityId": "metrics.read",
+        "access": "read_only",
+        "serviceIds": ["checkout"],
+        "faultTypes": ["window_failure_rate.v1"],
+        "environments": ["simulation"],
+        "dataClasses": ["simulated"]
+      }
+    ]
+  }
 }

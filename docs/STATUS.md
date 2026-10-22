@@ -10,13 +10,14 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 ## 最新任务：本地多项目只读巡检系统 S1 / S2（2026-10-22）
 
-- 用户已授权“按照计划执行”。本轮完成 S1：普通 `apps/agent-server` 通过 `AGENTOPS_TARGET_CONFIG` 组装本地模拟 Target 的 Metrics+Logs 双来源；提供双 Target 模拟实验室、操作指南和浏览器闭环测试。没有访问 `group-buy-market`、生产遥测或在线模型，也没有增加真实写动作。
-- 验收：[S1 验收记录](./verification/2026-10-22-local-inspection-product-acceptance.md)。L01–L03 通过；L04–L14 未运行。全量测试通过（218 文件、2257 项；5 个 opt-in 文件、9 项跳过），`pnpm lint`、`pnpm typecheck`、`pnpm web:typecheck`、`pnpm e2e:local-inspection`（1/1）、`pnpm e2e:multi-target`（2/2）、`pnpm e2e:memory:multisource`（7/7）通过。具体结果与默认沙箱 loopback 限制见验收记录。
-- 基线：分支 `codex/event-message-v2`，实施前 HEAD `1aab521151a32a517cd8e11387a33a23d389e41e`，当时工作区干净；Node v24.19.0，pnpm v11.25.0（仓库声明 11.19.0）。本任务的全部源码、测试、示例、指南、Plan、验收记录和状态文档改动当前均未提交；最终文件列表以 `git status --short` 与提交内容为准。
-- 交付阻塞：S1 已独立提交到本地分支 `6bb18e5`。`git ls-remote origin refs/heads/codex/event-message-v2` 初次因 `Could not resolve host: github.com` 失败，重试持续挂起并中止，尚未获远端 SHA；网络恢复后先核验远端祖先关系，再普通推送并核对远端 HEAD。当前不宣称已推送或同步。
-- S1 独立本地提交为 `7b2fc7c`，工作树在启动 S2 前干净；S1 的远端推送仍受 DNS/连接阻塞。S2.1 已完成并独立提交到本地分支：同一 SQLite knowledge store 与 Episodic policy/recall/renderer 通过现有 memory seam 组装；新增测试验证 late-bound store 和协调器实例，未改数据库 Schema 或记忆资格规则。S2.1 完成后工作树干净。
-- 本轮 S2.1 检查：`pnpm typecheck` 通过；`pnpm exec vitest run test/memory-runtime.test.ts test/memory-coordinator.test.ts` 47 项通过。`pnpm lint` 首次因已移除的未用 import 报错，修复后最终 lint 结果待本轮补跑。尚未运行完整 S2 质量门。
-- 下一步：S2.2 为本地模拟 Target 提供可信 Semantic/Procedural 来源、scope、审核与发布组装，并从普通宿主验证真实模型输入。L04–L05 只有在检查知识 ID/version/digest、预算、跨 Target、撤销/到期、故障关闭和关闭开关对照后才能通过；S2 整体仍进行中，S1 通过不代表产品成熟或可生产上线。
+- 继续 S2.2 后，普通本地 Target 宿主可走通 Semantic/Procedural 创建、提交、单操作员审核、发布和召回。新增了明确的 loopback 单操作员决策和 4 KiB 知识输入上限；修复发布 policy overlay 校验、FTS 全词 AND 漏召回以及 limit 64 超出存储上限的问题。Episodic 保持既有 1 KiB renderer 上限和审核资格规则。详细范围/限制见[本地知识验收记录](./verification/2026-10-22-local-knowledge-integration.md)。
+- 本轮最终检查：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build` 通过；`TMPDIR=/private/tmp pnpm test` 为 218 文件通过、5 个 opt-in 文件跳过，2259 项通过、9 项跳过；`TMPDIR=/private/tmp pnpm acceptance:memory` 的 13 项检查和六格策略矩阵通过；本地巡检 E2E 1/1（首次瞬态失败、重跑通过）、多 Target E2E 2/2、多来源独立 E2E 7/7 通过。集成类命令使用 loopback 权限；默认沙箱 EPERM 不作为通过依据。
+- S2.2 正向组合验收通过，但 S2/L04–L05 不标完成：Target 宿主的拒绝/撤销/到期、来源状态变化与失败路径、必需知识门禁和 Web 治理操作尚未全部组合验收。当前 GitHub 网络状态需在本任务独立提交后重新核对；未核验前不声明已推送。
+
+- 用户已授权按计划实施。当前分支 `codex/event-message-v2`，S2.2 实施前 HEAD 为 `fddb10b`；其父提交 `7b2fc7c` 为 S1、`fddb10b` 为 S2.1。Node v24.19.0，pnpm v11.25.0（仓库声明 11.19.0）。本轮 S2.2 源码、测试、示例及文档尚未独立提交，最终范围以 `git status --short` 和提交核对为准。
+- S1 与 S2.1 的远端推送此前受 GitHub DNS/连接阻塞；本轮尚未查询或确认远端 SHA。提交 S2.2 后需先核对远端分支祖先关系，再普通推送并核验远端 HEAD；目前不宣称同步。
+- S1 的 L01–L03 验收见[产品验收记录](./verification/2026-10-22-local-inspection-product-acceptance.md)。S2.1 的运行时 seam 回归为 47 项通过；本轮 lint、typecheck、build 与新增 S2.2 检查结果见[本地知识验收记录](./verification/2026-10-22-local-knowledge-integration.md)。
+- 下一步：继续 S2 的剩余组合验收：拒绝/撤销后不召回、到期与来源撤销边界、存储失败/超时/Abort、必需知识门禁及浏览器草稿审核发布，并补明确的预算断言。S2 整体仍进行中，S1/S2.2 通过不代表产品成熟或可生产上线。
 
 ## 当前阶段
 

@@ -4,7 +4,7 @@ import type { CoordinatedMemoryView, MemoryCoordinatorPort, MemoryOperation, Mem
 import type { KnowledgeKind, KnowledgeLimitationReason, KnowledgeScope, MissingKnowledgeQualification } from '../contracts/knowledge-memory.js';
 import type { KnowledgeRevisionStateQueryPort, KnowledgeRevisionStateSnapshot, KnowledgeScopedSearchStore,
   TargetKnowledgePublicationContextPort } from '../contracts/knowledge-memory-storage.js';
-import type { ResolvedTargetSnapshotV2, TargetKnowledgeCapabilityPort, TargetKnowledgeReference } from '../contracts/target.js';
+import type { ResolvedTargetSnapshotV2, TargetKnowledgeCapabilityPort, TargetKnowledgePolicy, TargetKnowledgeReference } from '../contracts/target.js';
 import { checkpointChecksum } from '../contracts/stable-json.js';
 import { parseKnowledgeRecord, parseKnowledgeDiagnosisQualification } from '../contracts/knowledge-memory-schema.js';
 import { parseRunMemoryState } from '../contracts/diagnostic-memory-schema.js';
@@ -50,7 +50,7 @@ export class MemoryCoordinator implements MemoryCoordinatorPort {
       const authority = await bounded(this.options.authority.resolvePublicationContext({ targetId: snapshot.targetId,
         capturedAt: now(), signal: operation.signal ?? new AbortController().signal }), operation);
       allowed = checkpointChecksum(authority.scope) === checkpointChecksum(scope)
-        && checkpointChecksum(authority.hostPolicy) === checkpointChecksum(snapshot.knowledgePolicy);
+        && knowledgePolicyMatches(authority.hostPolicy, snapshot);
       flags = await bounded(this.options.capabilities.getForTarget(snapshot.targetId), operation);
     } catch (error) {
       operation.signal?.throwIfAborted();
@@ -94,7 +94,7 @@ export class MemoryCoordinator implements MemoryCoordinatorPort {
       view.scopes.push(kind); attempted++;
       try {
         check();
-        const records = await bounded(this.options[kind].search({ kind, scope, references: eligible, query: input.text.slice(0, 2000), limit: 64, now: now() }), operation);
+        const records = await bounded(this.options[kind].search({ kind, scope, references: eligible, query: input.text.slice(0, 2000), limit: 50, now: now() }), operation);
         for (const ref of eligible) {
           const raw = records.find(r => r.id === ref.id && String(r.contentRevision) === ref.version && r.kind === kind);
           if (raw === undefined) { missing.push(gap(snapshot, ref, kind, 'KNOWLEDGE_NOT_FOUND')); continue; }
@@ -230,7 +230,7 @@ export class MemoryCoordinator implements MemoryCoordinatorPort {
       const authority = await bounded(this.options.authority.resolvePublicationContext({ targetId: input.snapshot.targetId,
         capturedAt: now, signal: operation.signal ?? new AbortController().signal }), operation);
       if (checkpointChecksum(authority.scope) !== checkpointChecksum(scope)
-        || checkpointChecksum(authority.hostPolicy) !== checkpointChecksum(input.snapshot.knowledgePolicy)
+        || !knowledgePolicyMatches(authority.hostPolicy, input.snapshot)
         || view.selection.snapshotDigest !== input.snapshot.digest) general = 'KNOWLEDGE_SCOPE_MISMATCH';
       flags = await bounded(this.options.capabilities.getForTarget(input.snapshot.targetId), operation);
     } catch (error) { operation.signal?.throwIfAborted(); general = error instanceof KnowledgeDeadline ? 'KNOWLEDGE_DEADLINE_EXCEEDED' : 'KNOWLEDGE_STORAGE_UNAVAILABLE'; }
@@ -268,6 +268,27 @@ export function knowledgeScopeFor(snapshot: ResolvedTargetSnapshotV2): Knowledge
 }
 function sameRef(left: { id: string; version: string; digest: string }, right: TargetKnowledgeReference): boolean {
   return left.id === right.id && left.version === right.version && left.digest === right.digest;
+}
+function knowledgePolicyMatches(hostPolicy: TargetKnowledgePolicy | null, snapshot: ResolvedTargetSnapshotV2): boolean {
+  const base: TargetKnowledgePolicy = hostPolicy ?? { schemaVersion: 1, targetId: snapshot.targetId,
+    policyVersion: 'default/v1', policyEpoch: 0, defaultRequiredness: 'optional', requirements: [] };
+  const current = snapshot.knowledgePolicy;
+  if (base.targetId !== current.targetId || base.policyVersion !== current.policyVersion
+    || base.policyEpoch !== current.policyEpoch || base.defaultRequiredness !== current.defaultRequiredness) return false;
+  const currentByRef = new Map(current.requirements.map(requirement => [referenceKey(requirement), requirement]));
+  for (const requirement of base.requirements) {
+    const resolved = currentByRef.get(referenceKey(requirement));
+    if (resolved === undefined || checkpointChecksum(resolved) !== checkpointChecksum(requirement)) return false;
+  }
+  for (const requirement of current.requirements) {
+    const configured = base.requirements.some(item => referenceKey(item) === referenceKey(requirement));
+    if (!configured && (requirement.requiredness !== 'optional'
+      || !snapshot.knowledgeRefs.some(reference => referenceKey(reference) === referenceKey(requirement)))) return false;
+  }
+  return snapshot.knowledgeRefs.every(reference => currentByRef.has(referenceKey(reference)));
+}
+function referenceKey(reference: { id: string; version: string; digest: string }): string {
+  return JSON.stringify([reference.id, reference.version, reference.digest]);
 }
 function knowledgeReferenceKey(reference: { id: string; version: string; digest: string }): string {
   return JSON.stringify([reference.id, reference.version, reference.digest]);

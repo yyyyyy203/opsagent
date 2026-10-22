@@ -89,6 +89,8 @@ export interface AgentWebRuntimeOptions {
     createResolver: (ports: TargetResolverFactoryPorts) => TargetResolver | Promise<TargetResolver>;
     /** Host-owned flags. Omitted means Semantic and Procedural remain disabled. */
     knowledgeCapabilities?: TargetKnowledgeCapabilityPort;
+    /** Enables trusted single-operator knowledge review for this loopback-only host. */
+    localOperatorKnowledgeGovernance?: boolean;
     /** Optional host-owned authoring/review/source context. When present, formal durable replay is injected by bootstrap. */
     knowledgeManagement?: TargetKnowledgeManagementHostOptions;
     /** Both factories are required before Target execution can be enabled. */
@@ -242,6 +244,8 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     clock,
     ids,
     diagnosticMemory: memoryConfig,
+    ...(options.targetRuntime?.localOperatorKnowledgeGovernance === true
+      ? { localOperatorKnowledgeGovernance: true } : {}),
     ...(createKnowledgeCoordinator === undefined ? {} : { createKnowledgeCoordinator }),
     ...(options.observability === undefined ? {} : { observability: options.observability }),
     ...(options.eventObservability === undefined ? {} : { eventObservability: options.eventObservability }),

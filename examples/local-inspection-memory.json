@@ -1,0 +1,42 @@
+{
+  "enabled": true,
+  "profiles": [
+    {
+      "scope": {
+        "profileId": "market-a.local.settlement",
+        "profileRevision": "profile/v1",
+        "serviceId": "checkout",
+        "faultType": "window_failure_rate.v1",
+        "targetFingerprint": "market-a-local-settlement",
+        "environment": "simulation",
+        "dataClass": "simulated",
+        "datasetId": "local-settlement-shared-v1"
+      },
+      "profilePolicyRevision": "local-memory-v1",
+      "captureDefault": "manual",
+      "recallDefault": true,
+      "allowAutomaticCapture": false,
+      "allowRecall": true
+    },
+    {
+      "scope": {
+        "profileId": "market-b.local.settlement",
+        "profileRevision": "profile/v1",
+        "serviceId": "checkout",
+        "faultType": "window_failure_rate.v1",
+        "targetFingerprint": "market-b-local-settlement",
+        "environment": "simulation",
+        "dataClass": "simulated",
+        "datasetId": "local-settlement-shared-v1"
+      },
+      "profilePolicyRevision": "local-memory-v1",
+      "captureDefault": "manual",
+      "recallDefault": true,
+      "allowAutomaticCapture": false,
+      "allowRecall": true
+    }
+  ],
+  "requiredSources": ["metric", "log"],
+  "modelWindowTokens": 32768,
+  "reservedOutputTokens": 4096
+}

@@ -1651,7 +1651,7 @@ export class AgentHarness implements DiagnosisAgent {
       ? 0
       : configured.modelWindowTokens - configured.reservedOutputTokens - baseBytes;
     const availableMemoryTokens = Number.isSafeInteger(rawAvailable) && rawAvailable > 0
-      ? Math.min(1_024, rawAvailable)
+      ? Math.min(4_096, rawAvailable)
       : 0;
     return {
       now: now.toISOString(),

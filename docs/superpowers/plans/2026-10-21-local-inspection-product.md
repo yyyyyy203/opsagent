@@ -2,7 +2,7 @@
 
 - 日期：2026-10-21（Asia/Shanghai）
 - 依据：[Spec 与 L01–L14](../specs/2026-10-21-local-inspection-product-design.md)
-- 状态：S1 本地实现与 L01–L03 验收通过，已独立提交到本地分支；远端 SHA 查询因 GitHub DNS/连接挂起未完成，尚未推送。S2–S6 待实施。
+- 状态：S1 本地实现与 L01–L03 验收通过；S2.1/S2.2 实现与正向验收通过，S2/L04–L05 剩余组合用例仍进行中；S3–S6 待实施。S1/S2 远端同步以 STATUS 中本次 Git 核对为准。
 - 分类：bootstrap/应用编排/适配器/API-Web/基础设施；不改变 Harness 顺序或真实动作边界。
 
 ## 1. 顺序与工作量
@@ -77,17 +77,17 @@ macOS 若命中已知临时目录符号链接限制，可用 `TMPDIR=/private/tm
 | --- | --- |
 | `src/contracts/diagnostic-memory.ts`、`src/application/create-runtime.ts` | 以可选、向后兼容的 late-bound port 将同一 SQLite governed knowledge store 注入记忆组装；不新增数据库所有者或表 |
 | `src/bootstrap/diagnostic-memory.ts`、`src/bootstrap/inspection-runtime.ts`、`src/bootstrap/agent-web-runtime.ts`、`src/bootstrap/memory-policy.ts` | S2.1 已完成：当宿主提供治理端口且 Episodic memory 启用时组装 `MemoryCoordinator`，共享 Episodic 召回端口；缺少配置保持旧的 Episodic-only/关闭行为 |
-| `src/bootstrap/local-target-runtime.ts`、本地 Target 知识配置 | 待完成：提供本地模拟 scope、可信来源/能力注册、人工审核与 publication context，并让普通宿主按显式配置启用 |
-| `src/memory/memory-coordinator.ts`、`src/application/knowledge-management-service.ts` | 仅修接线暴露的真实缺陷；不放宽审核、到期、冻结选择及引用资格 |
+| `src/bootstrap/local-target-runtime.ts`、`examples/local-inspection-targets.json`、`examples/local-inspection-memory.json` | S2.2 已接入模拟 scope、可信来源/能力注册、loopback 单操作员审核/发布装配和显式记忆策略；默认关闭/拒绝行为保持 |
+| `src/memory/memory-coordinator.ts`、`src/application/target-knowledge-publication-service.ts`、`src/agent/agent-harness.ts`、`src/infrastructure/sqlite/knowledge-memory-store.ts` | S2.2 修复发布知识 policy overlay 校验、受限 FTS 任一词召回和检索上限；协调器知识预算上限 4 KiB；资格检查与 Episodic 1 KiB 上限不变 |
 | `src/api/knowledge-memory-routes.ts`、`apps/agent-web/src/components/knowledge-view.ts`、`MemoryPanel.tsx`（位于同 components 目录） | 沿用 API/页面，补能力关闭、必需知识缺失、发布与召回状态可见性 |
-| `test/target-host-memory.integration.test.ts`（拟新增）、`test/e2e/local-inspection-web.spec.ts` | Semantic、Procedural、Episodic 正向对照，观察实际模型输入与重启后的存储状态 |
+| `test/local-target-runtime-host.test.ts`、`docs/guides/local-target-inspection.md` | 普通宿主端到端创建/提交/审核/发布 Semantic 与 Procedural，验证 ID/version/digest、A 模型输入、B 隔离、记忆关闭对照；记录 loopback 单操作员边界 |
 
 - [x] S2.1：协调器由普通运行时 memory seam 传入，使用同一 SQLite revision/search store，且接收同一 Episodic policy/recall/renderer；47 项运行时/协调器回归通过。此项只证明装配可用，不代表 Target 知识已启用或完成 L04/L05。
-- [ ] 覆盖审核→发布→引用→召回；逐类型检查 ID/version/digest 与预算，不只看 UI。
-- [ ] 覆盖拒绝/撤销/到期/跨 Target、存储失败、超时、Abort、开关关闭和必需知识门禁。
-- [ ] 运行 `pnpm acceptance:memory`、双 Target/多来源 E2E 和全质量门。
+- [x] S2.2：本地 Target 的 Semantic/Procedural 创建→提交→审核→发布→引用→召回进入普通宿主模型输入；逐类型检查 ID/version/digest、Target A/B 隔离和禁用记忆对照。loopback 主机测试记录独立验证。
+- [ ] 将拒绝/撤销/到期、来源状态变化、存储失败、超时、Abort、开关关闭和必需知识门禁与普通 Target 宿主组合验收；已有底层治理测试不替代组合场景。
+- [x] 运行 `pnpm acceptance:memory`、双 Target/多来源 E2E 和全质量门；结果见[本地知识验收记录](../../verification/2026-10-22-local-knowledge-integration.md)。
 
-退出：L04–L05 通过，模型上下文能证明知识生效，禁用时旧诊断不回退。当前 S2 仍进行中，尚未完成本地知识来源、审核/发布流程和正反向 Target Run 验收。
+退出：L04–L05 通过，模型上下文能证明知识生效，禁用时旧诊断不回退。当前 S2.1/S2.2 已完成，S2 仍因剩余治理边界与 Web 操作的组合验收未通过而进行中。
 
 ## 6. S3：诊断场景与质量验收
 

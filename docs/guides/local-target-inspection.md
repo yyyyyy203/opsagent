@@ -24,11 +24,17 @@ $env:AGENTOPS_HOST = '127.0.0.1'
 $env:AGENTOPS_PORT = '4200'
 $env:AGENTOPS_WEB_PROFILE = 'simulation'
 $env:AGENTOPS_TARGET_CONFIG = (Resolve-Path (Join-Path $repo 'examples/local-inspection-targets.json')).Path
+$env:AGENTOPS_MEMORY_ENABLED = '1'
+$env:AGENTOPS_MEMORY_CONFIG = (Resolve-Path (Join-Path $repo 'examples/local-inspection-memory.json')).Path
 $env:AGENTOPS_METRICS_MCP_URL = 'http://127.0.0.1:19392/mcp'
 $env:AGENTOPS_LOGS_MCP_URL = 'http://127.0.0.1:19391/mcp'
 ```
 
 `AGENTOPS_TARGET_CONFIG` 必须是绝对路径。该样例只注册 `market-a-sim` 和 `market-b-sim` 两个模拟、只读 Target；它们查询相同的合成数据，但阈值分别为 5% 和 2%。
+
+示例显式启用按 Target 作用域的 Episodic 召回，以及本地受治理 Semantic/Procedural 知识。工作台“记忆与知识”页面可为当前 Target 创建草稿、提交审核、由单操作员确认审核并发布；只有已批准且发布的精确版本会进入后续模型输入。Semantic 来源清单固定为 `local-settlement-runbook@v1` 和配置中的 SHA-256 摘要，Procedural 能力仅含模拟 checkout 的只读 `metrics.read`。发布和批准都不授权工具写入。
+
+该示例的审核者是本机单操作员身份，服务端只允许绑定 loopback。不要把此宿主转发到公网、局域网或多用户环境；对外部署前必须接入真实身份/角色授权。省略两个记忆环境变量可保留仅 Target 巡检模式；设置 `AGENTOPS_MEMORY_ENABLED=0` 会关闭记忆协调器，已有知识不会进入模型提示词。
 
 Agent 仍需服务端 OpenAI-compatible 模型配置。真实模型会产生服务商费用；模型密钥只放在 Agent 进程的环境变量中：
 

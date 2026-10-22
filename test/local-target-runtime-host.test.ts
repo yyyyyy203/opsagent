@@ -1,13 +1,15 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage, ChatModel, ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../src/contracts/index.js';
+import type { DiagnosticMemoryConfig } from '../src/contracts/diagnostic-memory.js';
 import { startAgentWebRuntime } from '../src/bootstrap/agent-web-runtime.js';
 import { createLocalTargetRuntime, readLocalTargetHostConfig } from '../src/bootstrap/local-target-runtime.js';
 import { startLocalTargetSimulator } from '../src/bootstrap/local-target-simulator.js';
+import { parseDiagnosticMemoryConfig } from '../src/bootstrap/memory-policy.js';
 
 const roots: string[] = [];
 const examplePath = fileURLToPath(new URL('../examples/local-inspection-targets.json', import.meta.url));
@@ -147,6 +149,99 @@ describe('ordinary host Local Target assembly', () => {
       await runtime.close();
     }
   });
+
+  it('publishes Semantic and Procedural knowledge and proves Target-scoped prompt injection and disabled fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsagent-target-memory-host-'));
+    roots.push(root);
+    const simulator = await startLocalTargetSimulator({ metricsPort: 0, logsPort: 0, legacyMetricsPort: 0 });
+    const original = await readLocalTargetHostConfig(examplePath);
+    const config = { ...original, connections: { ...original.connections,
+      connections: original.connections.connections.map(item => ({ ...item,
+        endpoint: item.kind === 'metrics' ? simulator.metricsUrl : simulator.logsMcpUrl })) } };
+    const local = createLocalTargetRuntime(config, 'local-memory-host-cursor-secret-over-32-bytes');
+    const memoryPath = fileURLToPath(new URL('../examples/local-inspection-memory.json', import.meta.url));
+    const memoryConfig = parseDiagnosticMemoryConfig(JSON.parse(await readFile(memoryPath, 'utf8')) as unknown);
+    const prompts: string[] = [];
+    const model: ChatModel = { stream: async function* (messages: AgentMessage[]): AsyncGenerator<ModelStreamEvent, ModelResponse> {
+      prompts.push(messages.flatMap(message => message.blocks.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n'));
+      const text = '本地受治理知识上下文已读取。';
+      yield { type: 'text_delta', delta: text };
+      return { text, toolCalls: [] };
+    } };
+    const fixedNow = Date.parse('2026-10-22T12:00:00.000Z');
+    let runtime: Awaited<ReturnType<typeof startHost>> | undefined;
+    try {
+    runtime = await startHost(root, local, model, fixedNow, simulator, 'local-memory-host-cursor-secret-over-32-bytes', memoryConfig);
+    const source = { sourceId: 'local-settlement-runbook', sourceVersion: 'v1',
+      digest: 'c'.repeat(64) };
+    const semantic = await createApprovedKnowledge(runtime.url, 'semantic', source, {
+      type: 'metric_definition', metricName: 'settlement_window_requests', businessMeaning: 'SEMANTIC_CANARY: local synthetic settlement request count.',
+      unit: 'requests per fixed window', labels: [], allowedAggregations: ['count'], windowSemantics: ['fixed_window'],
+      sourceReferences: [source],
+    });
+    const procedural = await createApprovedKnowledge(runtime.url, 'procedural', source, {
+      type: 'investigation_template', templateId: 'local-settlement-window-review',
+      scenario: { id: 'window_failure_rate.v1', version: '1.1.0' },
+      applicableTo: { serviceIds: ['checkout'], faultTypes: ['window_failure_rate.v1'], environments: ['simulation'] },
+      preconditions: ['Use only the current Target snapshot.'], requiredEvidence: [{ category: 'metric', minimumCount: 1 }],
+      steps: [{ step: 1, goal: 'PROCEDURAL_CANARY: compare the deterministic five-minute rate with the Profile threshold.',
+        capabilityId: 'metrics.read', completionCriterion: 'Record the measured value and threshold.' }],
+      stopConditions: ['Stop if the required metric is unavailable.'], expectedReportFields: ['threshold', 'missingEvidence'],
+      limitations: ['Guidance only; this template grants no action authority.'], sourceReferences: [source],
+    });
+    const publish = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/publication`, { method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: 'publish-local-memory-knowledge',
+        expectedPublicationVersion: 0, references: [semantic, procedural].map(revision => ({ id: revision.id,
+          version: String(revision.contentRevision), digest: revision.contentDigest, approval: 'approved' })) }) });
+    expect(publish.status).toBe(200);
+    const published = await publish.json() as { publicationVersion: number };
+    expect(published.publicationVersion).toBe(1);
+    const statusResponse = await fetch(`${runtime.url}/targets/market-a-sim/knowledge/status`);
+    expect(statusResponse.status).toBe(200);
+    const targetKnowledgeStatus = await statusResponse.json() as { references: readonly unknown[] };
+    expect(targetKnowledgeStatus.references).toHaveLength(2);
+
+    const runA = await startTargetRun(runtime.url, 'market-a-sim', 'run-with-semantic-procedural-knowledge');
+    await waitForTargetRun(runtime.url, 'market-a-sim', runA);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('SEMANTIC_CANARY');
+    expect(prompts[0]).toContain('PROCEDURAL_CANARY');
+    for (const revision of [semantic, procedural]) {
+      expect(prompts[0]).toContain(`"id":"${revision.id}"`);
+      expect(prompts[0]).toContain(`"version":"${revision.contentRevision}"`);
+      expect(prompts[0]).toContain(`"digest":"${revision.contentDigest}"`);
+    }
+    expect(prompts[0]!.match(/SEMANTIC_CANARY/gu)).toHaveLength(1);
+    expect(prompts[0]!.match(/PROCEDURAL_CANARY/gu)).toHaveLength(1);
+
+    const runB = await startTargetRun(runtime.url, 'market-b-sim', 'run-without-market-a-knowledge');
+    await waitForTargetRun(runtime.url, 'market-b-sim', runB);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).not.toContain('SEMANTIC_CANARY');
+    expect(prompts[1]).not.toContain('PROCEDURAL_CANARY');
+
+    await runtime.close();
+    runtime = undefined;
+    runtime = await startHost(root, local, model, fixedNow, simulator, 'local-memory-host-cursor-secret-over-32-bytes', memoryConfig);
+    const restartedRun = await startTargetRun(runtime.url, 'market-a-sim', 'run-after-knowledge-host-restart');
+    await waitForTargetRun(runtime.url, 'market-a-sim', restartedRun);
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain('SEMANTIC_CANARY');
+    expect(prompts[2]).toContain('PROCEDURAL_CANARY');
+
+    await runtime.close();
+    runtime = undefined;
+    runtime = await startHost(root, local, model, fixedNow, simulator, 'local-memory-host-cursor-secret-over-32-bytes', { enabled: false });
+    const disabledRun = await startTargetRun(runtime.url, 'market-a-sim', 'run-with-memory-disabled');
+    await waitForTargetRun(runtime.url, 'market-a-sim', disabledRun);
+    expect(prompts).toHaveLength(4);
+    expect(prompts[3]).not.toContain('SEMANTIC_CANARY');
+    expect(prompts[3]).not.toContain('PROCEDURAL_CANARY');
+    } finally {
+      await runtime?.close();
+      await simulator.close();
+    }
+  }, 20_000);
 
   it('cancels an active Target Run through the ordinary host and aborts its model call', async () => {
     const root = await mkdtemp(join(tmpdir(), 'opsagent-local-target-cancel-'));
@@ -422,7 +517,8 @@ class LocalDualSourceModel implements ChatModel {
 }
 
 async function startHost(root: string, local: ReturnType<typeof createLocalTargetRuntime>, model: ChatModel, now: number,
-  simulator: Awaited<ReturnType<typeof startLocalTargetSimulator>>, cursorSecret: string) {
+  simulator: Awaited<ReturnType<typeof startLocalTargetSimulator>>, cursorSecret: string,
+  diagnosticMemory?: DiagnosticMemoryConfig) {
   return startAgentWebRuntime({
     dataDirectory: root,
     workspaceRoots: [root],
@@ -435,7 +531,34 @@ async function startHost(root: string, local: ReturnType<typeof createLocalTarge
     logs: { profileId: 'simulation', mcpUrl: simulator.logsMcpUrl, cursorSecret },
     profiles: local.profiles!,
     targetRuntime: local.targetRuntime!,
+    ...(diagnosticMemory === undefined ? {} : { diagnosticMemory }),
   });
+}
+
+async function createApprovedKnowledge(url: string, kind: 'semantic' | 'procedural',
+  source: { sourceId: string; sourceVersion: string; digest: string }, content: unknown) {
+  const path = `${url}/targets/market-a-sim/knowledge/${kind}`;
+  const request = async (route: string, requestId: string, body: Record<string, unknown>) => {
+    const response = await fetch(`${path}/${route}`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId, ...body }) });
+    if (!response.ok) throw new Error(`Knowledge ${route} returned ${response.status}: ${await response.text()}`);
+    return await response.json() as { id: string; contentRevision: number; governanceVersion: number; contentDigest: string };
+  };
+  const draft = await request('drafts', `draft-${kind}-host-test`, { source, content });
+  const submitted = await request(`${encodeURIComponent(draft.id)}/submit`, `submit-${kind}-host-test`, {
+    contentRevision: draft.contentRevision, governanceVersion: draft.governanceVersion,
+  });
+  return await request(`${encodeURIComponent(draft.id)}/review`, `review-${kind}-host-test`, {
+    contentRevision: submitted.contentRevision, governanceVersion: submitted.governanceVersion, decision: 'approve',
+  });
+}
+
+async function startTargetRun(url: string, targetId: string, requestId: string): Promise<string> {
+  const response = await fetch(`${url}/targets/${targetId}/runs`, { method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': requestId },
+    body: JSON.stringify({ message: 'Inspect settlement window failure rate and settlement metric definition.' }) });
+  if (response.status !== 202) throw new Error(`Target Run start returned ${response.status}: ${await response.text()}`);
+  return (await response.json() as { runId: string }).runId;
 }
 
 async function waitForTargetRun(url: string, targetId: string, runId: string): Promise<{ status: string; childRunIds: readonly string[] }> {

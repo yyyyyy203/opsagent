@@ -174,6 +174,8 @@ export interface AgentRuntimeOptions {
   sharedEvents?: SharedRuntimeEventPorts;
   /** SQLite path for the complete Event, Checkpoint, Evidence and execution persistence bundle. */
   sqlitePath?: string;
+  /** Explicit single-operator knowledge review/publish authority for loopback-only simulation hosts. */
+  localOperatorKnowledgeGovernance?: boolean;
   /** Explicit absolute Blob root used only when SQLite-backed L0 Blob storage is desired. */
   evidenceBlobRootPath?: string;
   /** Optional L0 data-plane and model-view ports. */
@@ -229,6 +231,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     clock,
     ids,
     ...(options.evidenceBlobRootPath === undefined ? {} : { evidenceBlobRootPath: options.evidenceBlobRootPath }),
+    ...(options.localOperatorKnowledgeGovernance === undefined ? {} : {
+      localOperatorKnowledgeGovernance: options.localOperatorKnowledgeGovernance,
+    }),
   });
   const inMemoryDurable = options.sharedEvents === undefined
     && persistence === undefined && options.checkpoints === undefined

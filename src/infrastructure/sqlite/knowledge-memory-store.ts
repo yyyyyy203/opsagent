@@ -1,6 +1,6 @@
 import { systemClock, randomIdGenerator, type Clock, type IdGenerator } from '../../contracts/common.js';
 import { KnowledgeContractError, isKnowledgeTransitionAllowed, type KnowledgeGovernanceReviewPort,
-  type KnowledgeQueryPort, type KnowledgeReviewAuthorityPort, type KnowledgeReviewCommand,
+  type KnowledgeQueryPort, type KnowledgeReviewAuthority, type KnowledgeReviewAuthorityPort, type KnowledgeReviewCommand,
   type KnowledgeRevision, type KnowledgeScope, type KnowledgeStatus } from '../../contracts/knowledge-memory.js';
 import { parseKnowledgeGovernanceAuditV1, type KnowledgeGovernanceAuditOutboxPort,
   type KnowledgeGovernanceAuditQueryPort, type KnowledgeGovernanceAuditV1 } from '../../contracts/knowledge-governance-audit.js';
@@ -34,6 +34,26 @@ export interface SqliteGovernedKnowledgeStoreOptions {
   authority: KnowledgeReviewAuthorityPort;
   clock?: Clock;
   ids?: IdGenerator;
+}
+
+/** Explicit single-operator authority for loopback-only local simulation hosts. */
+export function createLocalOperatorKnowledgeReviewAuthority(database: SqliteDatabase, clock: Clock = systemClock,
+  actorId = 'local-operator'): KnowledgeReviewAuthorityPort {
+  return { resolveFor: input => Promise.resolve().then(() => {
+    const row = database.raw.prepare(`SELECT r.*, s.governance_version, s.status, s.source_epoch, s.review_json, s.updated_at
+      FROM diagnostic_knowledge_revisions r JOIN diagnostic_knowledge_revision_states s
+        ON s.knowledge_id = r.knowledge_id AND s.content_revision = r.content_revision
+      WHERE r.knowledge_id = ? AND r.kind = ? AND s.status = 'review_pending'
+      ORDER BY r.content_revision DESC LIMIT 1`).get(input.knowledgeId, input.kind) as RevisionRow | undefined;
+    if (row === undefined) throw new KnowledgeContractError('KNOWLEDGE_APPROVAL_DENIED');
+    const revision = materializeRevision(row);
+    const source = selectSource(database, row.source_id, row.source_domain_id);
+    if (source === null || source.validity !== 'active' || source.sourceDigest !== revision.provenance.sourceDigest) {
+      throw new KnowledgeContractError('KNOWLEDGE_SOURCE_REVOKED');
+    }
+    return { actorId, scope: revision.scope, sourceEpoch: source.sourceEpoch, sourceDigest: source.sourceDigest,
+      reviewedAt: clock.now().toISOString() } satisfies KnowledgeReviewAuthority;
+  }) };
 }
 
 /** SQLite implementation for governed Semantic/Procedural revisions and their independent audit outbox. */
@@ -734,7 +754,7 @@ function normalizeReference(reference: TargetKnowledgeReference): TargetKnowledg
 function buildFtsMatch(query: string): string {
   const tokens = knowledgeQueryTokens(query);
   if (tokens.length === 0) return '';
-  return tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(' AND ');
+  return tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(' OR ');
 }
 
 function knowledgeAudit(ids: IdGenerator, input: { requestId: string; commandDigest: string; actorId: string; revision: KnowledgeRevision;

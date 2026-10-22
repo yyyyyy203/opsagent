@@ -32,7 +32,7 @@ import { SqliteWebMessageQuery } from './web-message-query.js';
 import { SqliteDiagnosticMemoryStore } from './diagnostic-memory-store.js';
 import { SqliteMemoryCaptureSource } from './memory-capture-source.js';
 import { SqliteTargetIdentityStore } from './target-identity-store.js';
-import { SqliteGovernedKnowledgeStore } from './knowledge-memory-store.js';
+import { createLocalOperatorKnowledgeReviewAuthority, SqliteGovernedKnowledgeStore } from './knowledge-memory-store.js';
 import { SqliteTargetKnowledgeBindingStore } from './target-knowledge-binding-store.js';
 import { KnowledgeAuditDispatcher, type KnowledgeAuditSink } from '../../memory/knowledge-audit-dispatcher.js';
 import { KnowledgeContractError } from '../../contracts/knowledge-memory.js';
@@ -50,6 +50,7 @@ export interface CreateSqlitePersistenceOptions {
   knowledgeReviewAuthority?: KnowledgeReviewAuthorityPort;
   knowledgePublicationActors?: KnowledgePublicationActorPort;
   knowledgeAuditSink?: KnowledgeAuditSink;
+  localOperatorKnowledgeGovernance?: boolean;
 }
 
 /** Single ownership boundary for all SQLite-backed Agent state. */
@@ -86,12 +87,14 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
     const durable = new SqliteDurableStateStore(database, clock);
     const targetIdentityStore = new SqliteTargetIdentityStore(database, { clock });
     const knowledge = new SqliteGovernedKnowledgeStore(database, {
-      authority: options.knowledgeReviewAuthority ?? unavailableReviewAuthority,
+      authority: options.knowledgeReviewAuthority ?? (options.localOperatorKnowledgeGovernance === true
+        ? createLocalOperatorKnowledgeReviewAuthority(database, clock) : unavailableReviewAuthority),
       clock,
       ...(options.ids === undefined ? {} : { ids: options.ids }),
     });
     const targetKnowledgeBindings = new SqliteTargetKnowledgeBindingStore(database, {
-      actors: options.knowledgePublicationActors ?? unavailablePublicationActors,
+      actors: options.knowledgePublicationActors ?? (options.localOperatorKnowledgeGovernance === true
+        ? { resolveForTarget: () => Promise.resolve({ actorId: 'local-operator' }) } : unavailablePublicationActors),
       clock,
       ...(options.ids === undefined ? {} : { ids: options.ids }),
     });

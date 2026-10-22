@@ -5,7 +5,11 @@ import { z } from 'zod';
 import type { AgentWebRuntimeOptions } from './agent-web-runtime.js';
 import type { ProfileDefinition } from '../profiles/profile-types.js';
 import type { ResolvedTargetSnapshotV2, TargetCatalogDefinition, TargetOperationPolicy,
-  TargetOperationRequest, TargetOperationPermit } from '../contracts/target.js';
+  TargetOperationRequest, TargetOperationPermit, TargetKnowledgeCapabilityPort } from '../contracts/target.js';
+import { KnowledgeContractError } from '../contracts/knowledge-memory.js';
+import type { TargetKnowledgePublicationContextPort } from '../contracts/knowledge-memory-storage.js';
+import { SemanticSourceRegistry, type SemanticSourceManifestEntry } from '../memory/semantic-source-registry.js';
+import type { ProceduralReadonlyCapabilityRegistryPort, ProceduralSourceRegistryPort } from '../memory/procedural-template-service.js';
 import { TargetConfigurationError } from '../contracts/target.js';
 import type { TargetRecoveryFactoryPorts } from './agent-web-runtime.js';
 import { StaticProfileResolver } from '../profiles/profile-resolver.js';
@@ -31,17 +35,40 @@ const connection = z.object({
   sourceGeneration: z.number().int().positive().safe(),
   permissionScopeDigest: z.string().regex(/^[a-f0-9]{64}$/iu),
 }).strict();
+const knowledgeSource = z.object({
+  sourceType: z.enum(['target_profile', 'controlled_runbook', 'operator_provided']),
+  sourceId: identifier,
+  sourceVersion: identifier,
+  sourceDigest: z.string().regex(/^[a-f0-9]{64}$/iu),
+  dataDomainId: identifier,
+  allowedTargetIds: z.array(identifier).min(1).max(200),
+}).strict();
+const proceduralCapability = z.object({
+  capabilityId: identifier,
+  access: z.literal('read_only'),
+  serviceIds: z.array(identifier).min(1).max(32),
+  faultTypes: z.array(identifier).min(1).max(32),
+  environments: z.array(z.enum(['development', 'staging', 'production', 'simulation'])).min(1).max(4),
+  dataClasses: z.array(z.enum(['live', 'simulated'])).min(1).max(2),
+}).strict();
+const knowledgeConfiguration = z.object({
+  enabledTargetIds: z.array(identifier).min(1).max(200),
+  sources: z.array(knowledgeSource).min(1).max(2_000),
+  proceduralCapabilities: z.array(proceduralCapability).max(2_000),
+}).strict();
 const configuration = z.object({
   schemaVersion: z.literal(1),
   catalog: z.unknown(),
   connections: z.object({ schemaVersion: z.literal(2), connections: z.array(connection).max(2_000) }).strict(),
   profiles: z.array(z.unknown()).min(1).max(200),
+  knowledge: knowledgeConfiguration.optional(),
 }).strict();
 
 export interface LocalTargetHostConfig {
   readonly catalog: { schemaVersion: 1; targets: readonly TargetCatalogDefinition[] };
   readonly connections: { schemaVersion: 2; connections: readonly z.infer<typeof connection>[] };
   readonly profiles: readonly ProfileDefinition[];
+  readonly knowledge?: z.infer<typeof knowledgeConfiguration>;
 }
 
 export async function readLocalTargetHostConfig(path: string): Promise<LocalTargetHostConfig> {
@@ -70,6 +97,27 @@ export async function readLocalTargetHostConfig(path: string): Promise<LocalTarg
     || target.environment !== 'simulation' || !profileIds.has(target.profileId))) {
     throw new Error('LOCAL_TARGETS_MUST_BE_SIMULATED_AND_READ_ONLY');
   }
+  if (parsed.data.knowledge !== undefined) {
+    const targetIds = new Set(catalog.targets.map(target => target.targetId));
+    const sourceKeys = new Set<string>();
+    const capabilityIds = new Set<string>();
+    if (parsed.data.knowledge.enabledTargetIds.some(targetId => !targetIds.has(targetId))
+      || new Set(parsed.data.knowledge.enabledTargetIds).size !== parsed.data.knowledge.enabledTargetIds.length) {
+      throw new Error('LOCAL_TARGET_KNOWLEDGE_CONFIG_INVALID');
+    }
+    for (const source of parsed.data.knowledge.sources) {
+      const key = `${source.sourceId}\u0000${source.sourceVersion}`;
+      if (source.allowedTargetIds.some(targetId => !targetIds.has(targetId))
+        || new Set(source.allowedTargetIds).size !== source.allowedTargetIds.length || sourceKeys.has(key)) {
+        throw new Error('LOCAL_TARGET_KNOWLEDGE_CONFIG_INVALID');
+      }
+      sourceKeys.add(key);
+    }
+    for (const capability of parsed.data.knowledge.proceduralCapabilities) {
+      if (capabilityIds.has(capability.capabilityId)) throw new Error('LOCAL_TARGET_KNOWLEDGE_CONFIG_INVALID');
+      capabilityIds.add(capability.capabilityId);
+    }
+  }
   for (const item of parsed.data.connections.connections) {
     const endpoint = new URL(item.endpoint);
     if (endpoint.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(endpoint.hostname)
@@ -81,6 +129,7 @@ export async function readLocalTargetHostConfig(path: string): Promise<LocalTarg
     catalog: { schemaVersion: 1, targets: catalog.targets },
     connections: parsed.data.connections,
     profiles,
+    ...(parsed.data.knowledge === undefined ? {} : { knowledge: parsed.data.knowledge }),
   };
 }
 
@@ -90,23 +139,33 @@ export function createLocalTargetRuntime(
 ): Pick<AgentWebRuntimeOptions, 'profiles' | 'targetRuntime'> {
   const connections = new Map(config.connections.connections.map(item => [item.sourceId, item]));
   const profileResolver = new StaticProfileResolver(config.profiles);
+  let publicationContexts: TargetKnowledgePublicationContextPort | undefined;
+  const knowledgeHost = config.knowledge === undefined ? undefined
+    : createLocalKnowledgeHost(config.knowledge, () => publicationContexts);
   const profiles = config.profiles.map(profile => ({ id: profile.profileId, name: profile.serviceName,
     description: '本机模拟 Target，只读巡检。', enabled: true, readOnly: true }));
   return {
     profiles,
     targetRuntime: {
-      createResolver: ports => createStaticTargetResolver({
-        ...ports,
-        catalog: config.catalog,
-        connections: config.connections,
-        profileResolver,
-        installedScenarios: WINDOW_FAILURE_RATE_INSTALLATIONS,
-        installedAdapters: [
-          { id: 'prometheus-mcp.v1', kind: 'metrics' as const },
-          { id: 'elasticsearch-mcp.v1', kind: 'logs' as const },
-        ],
-        validationTime: new Date().toISOString(),
-      }),
+      ...(config.knowledge === undefined ? {} : { localOperatorKnowledgeGovernance: true }),
+      ...(knowledgeHost === undefined ? {} : { knowledgeManagement: knowledgeHost.management,
+        knowledgeCapabilities: knowledgeHost.capabilities }),
+      createResolver: async ports => {
+        const resolver = await createStaticTargetResolver({
+          ...ports,
+          catalog: config.catalog,
+          connections: config.connections,
+          profileResolver,
+          installedScenarios: WINDOW_FAILURE_RATE_INSTALLATIONS,
+          installedAdapters: [
+            { id: 'prometheus-mcp.v1', kind: 'metrics' as const },
+            { id: 'elasticsearch-mcp.v1', kind: 'logs' as const },
+          ],
+          validationTime: new Date().toISOString(),
+        });
+        publicationContexts = resolver;
+        return resolver;
+      },
       createOperationPolicy: (): TargetOperationPolicy => ({
         authorize: request => Promise.resolve(createPermit(request, connections)),
         validate: (permit, request) => Promise.resolve().then(() => validatePermit(permit, request, connections)),
@@ -194,6 +253,59 @@ export function createLocalTargetRuntime(
       createStarter: ports => ({ startAccepted: options => ports.execution.startAccepted(ports.prepareStart(options)) }),
       sourcePartitionLimits: { maxPartitions: 32, maxConcurrentOperationsPerPartition: 2, maxQueuedOperationsPerPartition: 8 },
     },
+  };
+}
+
+function createLocalKnowledgeHost(config: NonNullable<LocalTargetHostConfig['knowledge']>,
+  current: () => TargetKnowledgePublicationContextPort | undefined) {
+  const targetIds = new Set(config.enabledTargetIds);
+  const sourceEntries: readonly SemanticSourceManifestEntry[] = config.sources;
+  const semanticSources = new SemanticSourceRegistry({ schemaVersion: 1, sources: sourceEntries });
+  const proceduralSources: ProceduralSourceRegistryPort = {
+    resolve: ({ targetId, reference }) => {
+      if (!targetIds.has(targetId)) throw new KnowledgeContractError('KNOWLEDGE_SCOPE_INVALID');
+      const source = config.sources.find(item => item.sourceId === reference.sourceId
+        && item.sourceVersion === reference.sourceVersion);
+      if (source === undefined) throw new KnowledgeContractError('KNOWLEDGE_NOT_FOUND');
+      if (source.sourceDigest !== reference.digest) throw new KnowledgeContractError('KNOWLEDGE_DIGEST_MISMATCH');
+      if (!source.allowedTargetIds.includes(targetId)) throw new KnowledgeContractError('KNOWLEDGE_SCOPE_INVALID');
+      return { sourceType: source.sourceType, sourceId: source.sourceId, sourceVersion: source.sourceVersion,
+        sourceDigest: source.sourceDigest, dataDomainId: source.dataDomainId };
+    },
+  };
+  const capabilities = new Map(config.proceduralCapabilities.map(value => [value.capabilityId, value]));
+  const proceduralCapabilities: ProceduralReadonlyCapabilityRegistryPort = {
+    resolveForTarget: ({ targetId, capabilityId }) => targetIds.has(targetId) ? capabilities.get(capabilityId) ?? null : null,
+  };
+  const knowledgeCapabilities: TargetKnowledgeCapabilityPort = {
+    getForTarget: targetId => Promise.resolve({ semanticEnabled: targetIds.has(targetId), proceduralEnabled: targetIds.has(targetId) }),
+  };
+  const resolvePublicationContext: TargetKnowledgePublicationContextPort['resolvePublicationContext'] = input => {
+    const port = current();
+    if (port === undefined) return Promise.reject(new TargetConfigurationError('TARGET_BINDING_INVALID'));
+    return port.resolvePublicationContext(input);
+  };
+  const contextPort: TargetKnowledgePublicationContextPort = { resolvePublicationContext };
+  const resolveTarget = async (input: { readonly targetId: string; readonly requestId: string }) => {
+    const context = await resolvePublicationContext({ targetId: input.targetId, capturedAt: new Date().toISOString(),
+      signal: new AbortController().signal });
+    return { actorId: 'local-operator', scope: context.scope };
+  };
+  const reviewAttestation = { resolveForReview: () => Promise.resolve({ sourceVerified: true, scopeVerified: true, contentReviewed: true }) };
+  return {
+    capabilities: knowledgeCapabilities,
+    management: {
+      targets: { resolveForTarget: resolveTarget },
+      semanticSources,
+      proceduralSources,
+      proceduralCapabilities,
+      semanticReviewAttestations: reviewAttestation,
+      proceduralReviewAttestations: reviewAttestation,
+      publicationContexts: contextPort,
+    },
+  } satisfies {
+    capabilities: TargetKnowledgeCapabilityPort;
+    management: NonNullable<AgentWebRuntimeOptions['targetRuntime']>['knowledgeManagement'];
   };
 }
 
