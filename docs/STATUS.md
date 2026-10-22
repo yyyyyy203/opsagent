@@ -14,7 +14,7 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
 - 按 S2 计划继续补普通 Target 宿主生命周期组合验收：有效期内 A 召回三条已发布知识；撤销 Procedural 后不再注入；推进固定 Clock 并重启后过期 Semantic 不再注入、未过期 Semantic 仍可召回；记忆关闭后所有三条均不注入。新增的 Web 浏览器闭环通过草稿、提交审核、批准、发布、A 模型输入确认及 B 隔离。
 - 本轮实际检查：`pnpm lint`、`pnpm typecheck`、`pnpm web:typecheck` 通过；`pnpm e2e:local-inspection` 重跑 2/2 通过（首次双 Target 案例有一次模拟 Metrics 瞬态未产出证据）；`TMPDIR=/private/tmp pnpm test` 全量 218 文件通过、5 个 opt-in 文件跳过，2259 项通过、9 项跳过。全量测试在默认沙箱第一次运行受 loopback `EPERM` 影响，提升本机回环权限后重跑通过。详细结果见[验收记录](./verification/2026-10-22-local-knowledge-integration.md)。
-- 本轮工作树改动包括宿主生命周期测试、Web 测试夹具/用例、S2 Plan 与验收/状态文档。尚未提交或推送；需先独立暂存本任务文件、复核分支和远端，再普通推送并核对远端 SHA。
+- 本轮改动包括宿主生命周期测试、Web 测试夹具/用例、S2 Plan 与验收/状态文档，已独立提交为 `de1c6424da635cf4a5e3a9d757b1690a3da48776` 并推送。推送前远端为 `db6b719b7796ca9f6969c4bdebcf1f8d7f69fdd5`；推送后 `git ls-remote` 与本地 HEAD 均为 `de1c6424da635cf4a5e3a9d757b1690a3da48776`，工作区干净。
 - 下一步仍是完成 S2 遗留组合验收：拒绝后不注入、来源状态变化、治理存储故障/超时、显式 Abort、required 知识缺失 Run 门禁和三类记忆预算断言。S2/L04–L05 继续保持进行中。
 
 - 继续 S2.2 后，普通本地 Target 宿主可走通 Semantic/Procedural 创建、提交、单操作员审核、发布和召回。新增了明确的 loopback 单操作员决策和 4 KiB 知识输入上限；修复发布 policy overlay 校验、FTS 全词 AND 漏召回以及 limit 64 超出存储上限的问题。Episodic 保持既有 1 KiB renderer 上限和审核资格规则。详细范围/限制见[本地知识验收记录](./verification/2026-10-22-local-knowledge-integration.md)。
