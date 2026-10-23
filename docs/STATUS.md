@@ -1,6 +1,6 @@
 # 项目状态
 
-更新时间：2026-10-22（Asia/Shanghai）
+更新时间：2026-10-23（Asia/Shanghai）
 
 当前仓库：`/Users/yumohan/Documents/ChatGPT/巡检项目/opsagent`
 
@@ -8,7 +8,16 @@
 
 GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 
-## 最新任务：本地多项目只读巡检系统 S1 / S2（2026-10-22）
+## 最新任务：本地多项目只读巡检系统 S3（2026-10-23）
+
+- S3 离线部分完成：新增延迟、流量、依赖异常、资源饱和四个独立版本场景族与五族注册表，配套一致时间窗的模拟数据集（19 个夹具，含正常、异常、歧义、低样本、缺失与矛盾信息）、离线质量集运行器、防篡改报告与 `acceptance:local-quality` 入口。L06 通过；L07 保持 `not_run`，依赖歧义样本因 `SCENARIO_NOT_BOUND_TO_TARGET_RUNTIME` 为 `blocked`。详见[S3 验收记录](./verification/2026-10-23-local-inspection-quality-set.md)。
+- 本轮实际检查：`pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build`、`git diff --check` 通过；`TMPDIR=/private/tmp pnpm test` 219 文件通过、5 个 opt-in 文件跳过，2280 项通过、9 项跳过；`pnpm acceptance:local-quality` 与 `--transport=loopback-http` 均 19/19 `verdict: passed`；`--online-plan` 生成清单且 `verdict: blocked`；回归 `TMPDIR=/private/tmp pnpm acceptance:memory`（13 项检查、6 行策略矩阵）、`pnpm e2e:local-inspection` 2/2、`pnpm e2e:multi-target` 2/2、`pnpm exec vitest run test/local-inspection-quality.test.ts` 15/15 通过。集成命令在提升本机回环权限后运行；默认沙箱 `listen EPERM` 不作为通过依据。Node v24.21.0，pnpm 11.28.5（仓库声明 11.19.0）。
+- 未执行：`pnpm e2e:memory:multisource`（本轮未触碰记忆接线）、`pnpm acceptance:real-model`/`acceptance:trace-probe`（缺在线授权与凭据）、24 小时持续运行（属 S6）。
+- 改动包括 `src/profiles/scenarios/*`、`src/profiles/index.ts`、`src/infrastructure/simulator/scenario-window-{fixtures,server}.ts`、`src/bootstrap/scenario-quality-lab.ts`、`src/acceptance/{local-quality,local-quality-cases,online-quality-plan,index,evaluator,types}.ts`、`apps/acceptance/local-inspection-quality.mjs`、`package.json`、`test/local-inspection-quality.test.ts`、`test/fixtures/local-inspection-quality-cases.ts`、`test/acceptance-evaluator.test.ts`，以及指南/计划/验收文档。未触发公共事件、Harness 顺序、Hook/Guard/HITL 或记忆晋级语义变更；`SCENARIO_APPLICABILITY` 为可选检查，未声明场景绑定时历史验收报告仍为 13 项检查，因此未新增 DECISIONS 记录。
+- 本轮实现已提交为 `fe5af1a`，状态记录另作提交。GitHub 推送与远端 SHA 核对待本条记录提交后执行；若网络受阻在此登记，不宣称已同步。
+- 下一步：S4 持久化定时巡检（先落调度设计决策，再实现契约、SQLite 表、调度器、路由、Web 与故障注入测试），随后 S5 站内结果处理闭环与 S6 运维/备份恢复/持续运行。新场景族绑定 Target Catalog/运行时与 L07 在线四例仍为独立待办。
+
+## 前次任务：本地多项目只读巡检系统 S1 / S2（2026-10-22）
 
 ### 后续推进记录（2026-10-22）
 
@@ -88,7 +97,7 @@ GitHub 远端：`https://github.com/yyyyyy203/opsagent.git`
 ## 当前下一步
 
 1. 本地只读巡检 Spec/Plan 已完成文档校验并在 `34b91af` 推送核验；实施从 S0 重新核对当时基线。最新结果见顶部任务记录。
-2. 产品实施按新 Plan 的 S0–S6 推进，当前尚未启动。先解决普通 `apps/agent-server` 的 Target 双来源与受治理知识接线，复用既有机制和测试。
+2. 产品实施按新 Plan 的 S0–S6 推进：S1（普通宿主双来源）、S2（受治理知识）、S3 离线质量集已完成；S4 定时巡检、S5 站内处理闭环、S6 运维与持续运行待实施。
 3. 在线模型质量单独验收；对外认证授权、真实业务接入和外部告警/通知另立方案。M2b 没有可信旧数据时不触发迁移。
 
 ## 前次方案文档任务（2026-10-21）
