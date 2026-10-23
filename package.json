@@ -10,6 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "acceptance:local-quality": "pnpm build && node apps/acceptance/local-inspection-quality.mjs",
+    "acceptance:local-quality:loopback": "pnpm build && node apps/acceptance/local-inspection-quality.mjs --transport=loopback-http",
     "acceptance:memory": "pnpm build && node apps/acceptance/memory.mjs",
     "acceptance:real-model": "pnpm build && node apps/acceptance/real-model.mjs",
     "acceptance:trace-probe": "pnpm build && node apps/acceptance/trace-probe.mjs",

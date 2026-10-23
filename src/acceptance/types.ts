@@ -6,6 +6,7 @@ import type {
   SourceSubagentResult,
 } from '../contracts/index.js';
 import type { SettlementMetricFact } from '../profiles/settlement.js';
+import type { ScenarioFamilyCode } from '../profiles/scenarios/index.js';
 import type { SmokeBudgetSnapshot } from '../model/smoke-request-budget.js';
 import type { SmokeOutputBudgetSnapshot } from '../model/smoke-output-budget.js';
 import type { ExportDiagnostics } from '../observability/export-diagnostics.js';
@@ -30,6 +31,7 @@ export type ManualReview =
   | { status: 'approved' | 'rejected'; unsupportedClaimCount: number };
 
 export type AcceptanceCheckCode =
+  | 'SCENARIO_APPLICABILITY'
   | 'SOURCE_ALLOWLIST'
   | 'SOURCE_CALL_LIMIT'
   | 'METRIC_FACT_VALID'
@@ -51,8 +53,21 @@ export interface AcceptanceSnapshot {
   events: readonly AgentEventEnvelopeV2[];
 }
 
+/**
+ * Declared scenario binding for a Run. Optional: reports without it keep the
+ * pre-S3 check list byte-identical, and `applyManualReview` never invents a pass.
+ */
+export type ScenarioApplicabilityDeclaration = {
+  family: ScenarioFamilyCode;
+  applicable: boolean;
+  scenarioId: string;
+  scenarioVersion: string;
+  implementationDigest: string;
+};
+
 export interface AcceptanceInput extends AcceptanceSnapshot {
   diagnostics?: AcceptanceDiagnostics;
+  scenarioApplicability?: ScenarioApplicabilityDeclaration;
   caseId: AcceptanceCaseId;
   codeRevision: string;
   sourceFingerprint: string;

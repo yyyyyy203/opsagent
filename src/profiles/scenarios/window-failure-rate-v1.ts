@@ -1,4 +1,5 @@
 import { checkpointChecksum } from '../../contracts/stable-json.js';
+import { scenarioConclusionBounds, type ScenarioConclusionBounds } from './scenario-conclusions.js';
 
 export const WINDOW_FAILURE_RATE_SCENARIO_ID = 'window_failure_rate.v1' as const;
 export const WINDOW_FAILURE_RATE_SCENARIO_VERSION_V1_0_0 = '1.0.0' as const;
@@ -336,4 +337,34 @@ function isNonnegativeSafeInteger(value: unknown): value is number {
 
 function isWindowBoundaryEvidence(value: unknown): value is WindowCountMissingEvidenceV1 {
   return value === 'start_boundary' || value === 'end_boundary';
+}
+
+/**
+ * Conclusion vocabulary for the frozen 1.1.0 assessment shape.
+ *
+ * The assessment object itself stays byte-identical (its implementation digest is
+ * pinned by existing Target snapshots), so the S3 conclusion bounds are published
+ * as this pure mapping instead of a new field. A future 1.2.0 may inline it.
+ */
+export function windowFailureRateConclusionsV1(
+  assessment: WindowFailureRateAssessmentV1,
+): ScenarioConclusionBounds {
+  if (assessment.status === 'insufficient_samples') {
+    return scenarioConclusionBounds(
+      ['insufficient_samples_no_attribution', 'missing_evidence_partial_diagnosis'],
+      ['metric_threshold_breached', 'metric_within_threshold'],
+    );
+  }
+  if (assessment.status === 'unavailable') {
+    return scenarioConclusionBounds(['missing_evidence_partial_diagnosis'], [
+      'metric_threshold_breached', 'metric_within_threshold', 'insufficient_samples_no_attribution',
+    ]);
+  }
+  return assessment.thresholdReached
+    ? scenarioConclusionBounds(['metric_threshold_breached', 'correlation_not_root_cause'], [
+      'metric_within_threshold', 'insufficient_samples_no_attribution', 'missing_evidence_partial_diagnosis',
+    ])
+    : scenarioConclusionBounds(['metric_within_threshold', 'correlation_not_root_cause'], [
+      'metric_threshold_breached', 'insufficient_samples_no_attribution', 'missing_evidence_partial_diagnosis',
+    ]);
 }

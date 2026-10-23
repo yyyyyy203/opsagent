@@ -2,7 +2,7 @@
 
 - 日期：2026-10-21（Asia/Shanghai）
 - 依据：[Spec 与 L01–L14](../specs/2026-10-21-local-inspection-product-design.md)
-- 状态：S1 本地实现与 L01–L03 验收通过；S2 完成（S2.1/S2.2 正向召回、撤销/到期/禁用/跨 scope、拒绝、来源吊销、必需知识门禁均通过普通 Target 宿主组合验收；存储失败/超时/Abort/预算按 Spec §4.2 保持协调器层覆盖）；L04–L05 通过；S3–S6 待实施。远端同步以 STATUS 最新 Git 核对为准。
+- 状态：S1 本地实现与 L01–L03 验收通过；S2 完成（S2.1/S2.2 正向召回、撤销/到期/禁用/跨 scope、拒绝、来源吊销、必需知识门禁均通过普通 Target 宿主组合验收；存储失败/超时/Abort/预算按 Spec §4.2 保持协调器层覆盖）；L04–L05 通过；S3 离线部分完成（L06 通过，L07 保持 not_run/blocked，见[S3 验收记录](../../verification/2026-10-23-local-inspection-quality-set.md)）；S4–S6 待实施。远端同步以 STATUS 最新 Git 核对为准。
 - 分类：bootstrap/应用编排/适配器/API-Web/基础设施；不改变 Harness 顺序或真实动作边界。
 
 ## 1. 顺序与工作量
@@ -102,10 +102,12 @@ macOS 若命中已知临时目录符号链接限制，可用 `TMPDIR=/private/tm
 | `test/local-inspection-quality.test.ts`（拟新增）、既有 acceptance tests | 计算边界、引用、错误/缺失/矛盾信息、预算、Abort，以及失败报告不能人工“刷绿” |
 | `docs/guides/real-model-langsmith-acceptance.md` | 补当前版本四样本选择、整批上限和人工复核步骤，保留现有 probe 准入 |
 
-- [ ] L06 离线全部通过；报告记录模拟来源与模型模式。
-- [ ] 准备可审阅的在线运行清单、预算、输出目录和安全凭据配置方式。
-- [ ] 获得在线调用授权且配置具备时，执行四例；缺少授权/凭据/probe 未通过则将 L07 保持 not_run/blocked，继续独立阶段。
-- [ ] 逐个 Run 人工审核，unsupported claims 为 0，保存真实 usage/引用/限制，不输出凭据。
+- [x] L06 离线全部通过；报告记录模拟来源与模型模式。19 个具名样本（失败率 5、延迟 3、流量 3、依赖 4、资源 4）在进程内与回环两种传输下均 `verdict: passed`，见[S3 验收记录](../../verification/2026-10-23-local-inspection-quality-set.md)。
+- [x] 准备可审阅的在线运行清单、预算、输出目录和安全凭据配置方式：`--online-plan` 生成 `online-quality-plan.json`，只记录凭据环境变量名与存在性。
+- [ ] 获得在线调用授权且配置具备时，执行四例；缺少授权/凭据/probe 未通过则将 L07 保持 not_run/blocked，继续独立阶段。**当前 blocked**：无授权与凭据，且依赖歧义样本受 `SCENARIO_NOT_BOUND_TO_TARGET_RUNTIME` 阻塞。
+- [ ] 逐个 Run 人工审核，unsupported claims 为 0，保存真实 usage/引用/限制，不输出凭据。**未运行**。
+
+S3 实施记录（2026-10-23）：新增 `src/profiles/scenarios/{scenario-conclusions,scenario-window,window-latency-v1,window-traffic-baseline-v1,dependency-correlation-v1,resource-saturation-v1,index}.ts`；权威样本表落在 `src/acceptance/local-quality-cases.ts`，`test/fixtures/local-inspection-quality-cases.ts` 复用并补充篡改/非法变体；模拟输入改为新增 `src/infrastructure/simulator/scenario-window-fixtures.ts`、`scenario-window-server.ts` 与 `src/bootstrap/scenario-quality-lab.ts`，未改动结算专用的 `metrics-lab.ts`/`logs-lab.ts`；`src/acceptance/real-model-runner.ts` 未改动，适用性检查以可选输入 `scenarioApplicability` + `SCENARIO_APPLICABILITY` 加在 `evaluator.ts`/`types.ts`，未声明时历史报告仍为 13 项检查。新场景族尚未绑定 Target Catalog/运行时，属后续独立任务。
 
 退出分开登记：离线工程通过与在线质量通过。计划落盘或离线脚本成功不视为用户已授权付费调用。
 

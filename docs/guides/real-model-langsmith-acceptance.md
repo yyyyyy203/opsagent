@@ -145,3 +145,40 @@ v2 自动检查包含 `SCENARIO_OUTCOME_VALID`（父 Run 及预期子 Run 均完
 - 自动检查、LangSmith 远端核验和人工复核是不同结果；报告必须保留三者状态。
 - 没有真实运行就只能说 CLI/代码和 fake-client 测试已验证，不能说 DeepSeek、真实 Prometheus/Elasticsearch 或 LangSmith 远端验收通过。
 - 此烟测验证的是模拟巡检链路，不证明目标业务系统已经接入生产指标、日志、Trace，也不授权任何真实写操作。
+
+## S3 离线诊断质量集（不调用模型）
+
+离线质量集验证五族确定性场景（失败率、延迟、流量、依赖异常、资源饱和）在模拟来源上的计算、引用、缺失证据与结论边界。它不启动模型、不访问 LangSmith、不访问任何业务系统，并显式拒绝非回环请求。
+
+```sh
+pnpm acceptance:local-quality                       # 进程内模拟数据集
+pnpm acceptance:local-quality:loopback              # 经回环模拟来源服务读取同一冻结数据集
+node apps/acceptance/local-inspection-quality.mjs --out=/abs/path --deadline-ms=20000 --max-cases=32
+```
+
+- 报告写入 `<out>/local-inspection-quality-report.json`（默认 `test-results/local-inspection-quality/`），`schemaVersion: 1`。
+- 报告写回后会重新读取并用 `parseLocalQualityReportV1` 复算每个用例与整体 verdict；改 verdict、改任一 check、改 summary 或新增 `manualReview` 等字段都会得到 `REPORT_TAMPERED`，失败报告无法人工“刷绿”。
+- 报告固定记录 `modelMode: offline_deterministic`、`sourceMode: simulated`、数据集 ID/摘要与冻结窗口秒数；用例记录 scenario id/version/implementationDigest 与证据来源归属。
+- 预算有限：`--max-cases` 少于用例数直接以 `BUDGET_EXCEEDED` 失败；超过 `--deadline-ms` 或收到 Abort 后，剩余用例记为 `not_run` 且整体 verdict 为 `failed`，不自动重跑。
+- 用例表在 `src/acceptance/local-quality-cases.ts`（19 个具名样本，覆盖五族），测试侧夹具 `test/fixtures/local-inspection-quality-cases.ts` 复用同一张表并提供篡改/非法变体。
+
+新场景族当前只用于离线质量集：Target Catalog 的场景绑定仍固定为 `window_failure_rate.v1`，把新族绑定到真实 Target 运行时属于后续独立任务。
+
+## S3 在线四例批次（显式授权后才执行）
+
+在线质量验收（L07）与离线工程验收分开登记。先生成可审阅的批次清单，不做任何模型调用：
+
+```sh
+node apps/acceptance/local-inspection-quality.mjs --online-plan
+```
+
+清单写入 `<out>/online-quality-plan.json`，内容包括：
+
+- 四个样本：正常、失败率异常、来源缺失、依赖歧义。前三例映射到既有联合验收 case（`normal`、`settlement_failure`、`logs_offline`）；依赖歧义样本目前为 `blocked`，原因码 `SCENARIO_NOT_BOUND_TO_TARGET_RUNTIME`（S3 新场景尚未绑定 Target 运行时）。清单整体 verdict 因此为 `blocked`。
+- 授权：仅当 `AGENTOPS_REAL_MODEL_SMOKE=1` 时 `authorization.granted` 为 true。生成清单不构成授权，也不会产生费用。
+- 凭据：只记录 `AGENTOPS_MODEL*`、`LANGSMITH_*` 环境变量名与“是否存在”的布尔值，从不写入或打印取值。
+- 预算：`maxBatchRuns: 4`、每样本最多 1 个父 Run、`autoRerun: false`；单 Run 的请求/token/期限上限仍由 `real-model-runner` 的既有烟测预算强制，整批上限不得超过这些既有上限之和。
+- 门禁：保留当次 LangSmith trace probe 门禁，probe 失败时对应结果保持 `not_run`，不得记为模型验收通过。
+- 人工复核：逐个 Run 复核，`maxUnsupportedClaims: 0`；任何 `not_run`/`review_required`/`failed` 保留原状态。
+
+执行在线批次仍使用既有 `pnpm acceptance:real-model` 与 `pnpm acceptance:review` 流程。四例通过只证明首批样本，不代表统计准确率或全场景泛化。

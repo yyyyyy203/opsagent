@@ -3,6 +3,7 @@ import { applyManualReview, evaluateAcceptance, readSourceReports } from '../src
 import type { EvidenceRecord } from '../src/contracts/index.js';
 import { publicEvidenceFromRecord } from '../src/contracts/read-model.js';
 import { createAcceptanceFixture } from './fixtures/acceptance-cases.js';
+import { scenarioFamilyApplicability } from '../src/profiles/scenarios/index.js';
 
 describe('combined-source acceptance evaluator', () => {
   it.each(['normal', 'settlement_failure', 'low_sample', 'logs_offline', 'capture_window_mismatch'] as const)(
@@ -238,5 +239,46 @@ describe('combined-source acceptance evaluator', () => {
     expect(report.checks.find((check) => check.code === 'TERMINAL_COMPLETE')?.passed).toBe(true);
     expect(report.checks.find((check) => check.code === 'SCENARIO_OUTCOME_VALID')?.passed).toBe(false);
     expect(report.verdict).toBe('failed');
+  });
+});
+
+describe('scenario applicability gate', () => {
+  it('keeps the historical check list when no scenario binding is declared', () => {
+    const report = evaluateAcceptance(createAcceptanceFixture('settlement_failure'));
+    expect(report.checks).toHaveLength(13);
+    expect(report.checks.some((check) => check.code === 'SCENARIO_APPLICABILITY')).toBe(false);
+  });
+
+  it('passes only for the installed scenario implementation identity', () => {
+    const input = createAcceptanceFixture('settlement_failure');
+    const installed = scenarioFamilyApplicability('failure_rate');
+    const declared = evaluateAcceptance({ ...input,
+      scenarioApplicability: { family: 'failure_rate', ...installed } });
+    expect(declared.checks).toHaveLength(14);
+    expect(declared.checks.find((check) => check.code === 'SCENARIO_APPLICABILITY')?.passed).toBe(true);
+    expect(declared.verdict).toBe('review_required');
+
+    const wrongDigest = evaluateAcceptance({ ...input,
+      scenarioApplicability: { family: 'failure_rate', applicable: true, scenarioId: installed.scenarioId,
+        scenarioVersion: installed.scenarioVersion, implementationDigest: `sha256:v1:${'0'.repeat(64)}` } });
+    expect(wrongDigest.checks.find((check) => check.code === 'SCENARIO_APPLICABILITY')?.passed).toBe(false);
+    expect(wrongDigest.verdict).toBe('failed');
+
+    const notApplicable = evaluateAcceptance({ ...input,
+      scenarioApplicability: { family: 'latency', applicable: false, scenarioId: 'window_latency.v1',
+        scenarioVersion: '1.0.0', implementationDigest: installed.implementationDigest } });
+    expect(notApplicable.checks.find((check) => check.code === 'SCENARIO_APPLICABILITY')?.passed).toBe(false);
+  });
+
+  it('cannot be reviewed into a pass after the declared scenario failed', () => {
+    const input = createAcceptanceFixture('settlement_failure');
+    const installed = scenarioFamilyApplicability('failure_rate');
+    const report = evaluateAcceptance({ ...input,
+      scenarioApplicability: { family: 'failure_rate', applicable: true, scenarioId: 'window_latency.v1',
+        scenarioVersion: installed.scenarioVersion, implementationDigest: installed.implementationDigest } });
+    expect(report.checks.find((check) => check.code === 'SCENARIO_APPLICABILITY')?.passed).toBe(false);
+    const reviewed = applyManualReview(report, { status: 'approved', unsupportedClaimCount: 0 });
+    expect(reviewed.checks.find((check) => check.code === 'SCENARIO_APPLICABILITY')?.passed).toBe(false);
+    expect(reviewed.verdict).toBe('failed');
   });
 });

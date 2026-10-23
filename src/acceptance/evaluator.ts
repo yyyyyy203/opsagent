@@ -7,6 +7,7 @@ import type {
 } from '../contracts/index.js';
 import { summarizeRunUsage } from '../contracts/run-usage.js';
 import { assessSettlementMetrics, settlementMetricsLabProfile } from '../profiles/settlement.js';
+import { scenarioFamilyApplicability } from '../profiles/scenarios/index.js';
 import type { ExportDiagnosticCode } from '../observability/export-diagnostics.js';
 import { readSourceReports } from './source-reports.js';
 import { collectAcceptanceFailures } from './failure-summary.js';
@@ -18,6 +19,7 @@ import type {
   AcceptanceInput,
   AcceptanceReport,
   ManualReview,
+  ScenarioApplicabilityDeclaration,
   TraceVerification,
 } from './types.js';
 
@@ -60,6 +62,12 @@ export function evaluateAcceptance(input: AcceptanceInput): AcceptanceReport {
   };
 
   const checks: AcceptanceReport['checks'] = [
+    // Emitted only when the Run declares a bound scenario, so historical reports
+    // keep their exact check list and a missing declaration never counts as a pass.
+    ...(input.scenarioApplicability === undefined ? [] : [{
+      code: 'SCENARIO_APPLICABILITY' as const,
+      passed: isScenarioApplicabilityValid(input.scenarioApplicability),
+    }]),
     {
       code: 'SOURCE_ALLOWLIST',
       passed: reportsMatch
@@ -184,6 +192,21 @@ export function applyManualReview(report: AcceptanceReport, review: ManualReview
     manualReview: normalizedReview,
     verdict: calculateVerdict(reviewedChecks, report.traceVerification, normalizedReview),
   };
+}
+
+/** The declared scenario must be an installed implementation with a matching digest. */
+export function isScenarioApplicabilityValid(declaration: ScenarioApplicabilityDeclaration): boolean {
+  if (declaration.applicable !== true) return false;
+  let installed: ReturnType<typeof scenarioFamilyApplicability>;
+  try {
+    installed = scenarioFamilyApplicability(declaration.family);
+  } catch {
+    return false;
+  }
+  return installed.applicable
+    && installed.scenarioId === declaration.scenarioId
+    && installed.scenarioVersion === declaration.scenarioVersion
+    && installed.implementationDigest === declaration.implementationDigest;
 }
 
 function isScenarioOutcomeValid(
